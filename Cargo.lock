@@ -2640,6 +2640,7 @@ dependencies = [
  "eyre",
  "log",
  "pretty_env_logger",
+ "sha2",
  "teloxide",
  "tokio",
 ]
