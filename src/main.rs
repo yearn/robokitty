@@ -1,10 +1,10 @@
 use chrono::{DateTime, Utc};
 use ethers::prelude::*;
-//use eyre::{Ok, Result};
 use serde::{Serialize, Deserialize};
 use sha2::{Sha256, Digest};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
+    error::Error,
     fs,
     str,
     sync::Arc,
@@ -14,7 +14,10 @@ use tokio::{
     time::{sleep, Duration},
 };
 
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+
+// TODO: Change rev to a float and do k in order to match original imp
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum TeamStatus {
     Earner { trailing_monthly_revenue: Vec<u64>},
     Supporter,
@@ -37,6 +40,35 @@ struct SystemState {
 struct BudgetSystem {
     current_state: SystemState,
     history: Vec<SystemState>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum RaffleTeamStatus {
+    Earner { trailing_monthly_revenue: Vec<u64> },
+    Supporter,
+    Excluded, // For teams with conflict of interest in a particular Vote
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct RaffleTeam {
+    name: String,
+    status: RaffleTeamStatus,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct RaffleTicket {
+    team_name: String,
+    index: u64,
+    score: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Raffle {
+    tickets: Vec<RaffleTicket>,
+    teams: HashMap<String, RaffleTeam>,
+    total_counted_seats: usize,
+    max_earner_seats: usize,
+    block_randomness: String,
 }
 
 impl Team {
@@ -187,6 +219,148 @@ impl BudgetSystem {
         self.history.get(index)
     }
 
+    fn conduct_raffle(&self, block_randomness: String, excluded_teams: &[String]) -> Result<Raffle, &'static str> {
+        self.conduct_raffle_with_seats(Raffle::DEFAULT_TOTAL_COUNTED_SEATS, Raffle::DEFAULT_MAX_EARNER_SEATS, block_randomness, excluded_teams)
+    }
+
+    fn conduct_raffle_with_seats(&self, total_counted_seats: usize, max_earner_seats: usize, block_randomness: String, excluded_teams: &[String]) -> Result<Raffle, &'static str> {
+        if max_earner_seats > total_counted_seats {
+            return Err("Earner seats cannot be greater than the total number of seats");
+        }
+        let mut raffle = Raffle::with_seats(&self.current_state.teams, excluded_teams, total_counted_seats, max_earner_seats, block_randomness);
+        raffle.allocate_tickets()?;
+        raffle.generate_scores()?;
+        Ok(raffle)
+    }
+
+}
+
+impl Raffle {
+    const DEFAULT_TOTAL_COUNTED_SEATS: usize = 7;
+    const DEFAULT_MAX_EARNER_SEATS: usize = 5;
+
+    // Initiates a Raffle with default seat allocations
+    fn new(teams: &HashMap<String, Team>, excluded_teams: &[String], block_randomness: String) -> Self {
+        Self::with_seats(teams, excluded_teams, Self::DEFAULT_TOTAL_COUNTED_SEATS, Self::DEFAULT_MAX_EARNER_SEATS, block_randomness)
+    }
+    
+    // Clones the Teams into Raffle Teams and initiates a Raffle.
+    // Supports non-default seat allocations.
+    fn with_seats(teams: &HashMap<String, Team>, excluded_teams: &[String], total_counted_seats: usize, max_earner_seats: usize, block_randomness: String) -> Self {
+        let raffle_teams = teams.iter().map(|(name, team)| {
+            let status = if excluded_teams.contains(name) {
+                RaffleTeamStatus::Excluded
+            } else {
+                match &team.status {
+                    TeamStatus::Earner { trailing_monthly_revenue } => 
+                        RaffleTeamStatus::Earner { trailing_monthly_revenue: trailing_monthly_revenue.clone() },
+                    TeamStatus::Supporter => RaffleTeamStatus::Supporter,
+                }
+            };
+            (name.clone(), RaffleTeam { name: name.clone(), status})
+        }).collect();
+
+        Raffle {
+            tickets: Vec::new(),
+            teams: raffle_teams,
+            total_counted_seats,
+            max_earner_seats,
+            block_randomness,
+        }
+    }
+
+    fn allocate_tickets(&mut self) -> Result<(), &'static str> {
+        self.tickets.clear();
+        for (name, team) in &self.teams {
+            let ticket_count: Result<u64, &'static str> = match &team.status {
+                RaffleTeamStatus::Earner { trailing_monthly_revenue } => {
+                    if trailing_monthly_revenue.len() > 3 { 
+                        return Err("Trailing monthly revenue cannot exceed 3 entries");
+                    }
+    
+                    let sum: u64 = trailing_monthly_revenue.iter().sum();
+                    let quarterly_average = sum as f64 / 3.0;
+                    let ticket_count = quarterly_average.sqrt().floor() as u64;
+    
+                    Ok(ticket_count.max(1))
+                },
+                RaffleTeamStatus::Supporter => Ok(1),
+                RaffleTeamStatus::Excluded => Ok(0),
+            };
+            
+            for _ in 0..ticket_count? {
+                self.tickets.push(RaffleTicket {
+                    team_name: name.clone(),
+                    index: self.tickets.len() as u64,
+                    score: 0.0 // Is set in generate_scores
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn generate_scores(&mut self) -> Result<(), &'static str> {
+        for ticket in &mut self.tickets {
+            ticket.score = generate_random_score_from_seed(&self.block_randomness, ticket.index);
+        }
+        Ok(())
+    }
+
+    fn select_teams(&self) -> (HashSet<String>, HashSet<String>) {
+        let mut earner_teams: Vec<_> = self.tickets.iter()
+            .filter(|ticket| matches!(self.teams[&ticket.team_name].status, RaffleTeamStatus::Earner { .. }))
+            .map(|ticket| (&ticket.team_name, ticket.score))
+            .collect();
+        earner_teams.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        earner_teams.dedup_by(|a, b| a.0 == b.0);
+
+        let mut supporter_teams: Vec<_> = self.tickets.iter()
+        .filter(|ticket| matches!(self.teams[&ticket.team_name].status, RaffleTeamStatus::Supporter))
+        .map(|ticket| (&ticket.team_name, ticket.score))
+        .collect();
+        supporter_teams.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        supporter_teams.dedup_by(|a, b| a.0 == b.0);
+
+        let mut counted_voters = HashSet::new();
+        let mut uncounted_voters = HashSet::new();
+
+        // Select earner teams for counted seats
+        let earner_seats = earner_teams.len().min(self.max_earner_seats);
+        counted_voters.extend(earner_teams.iter().take(earner_seats).map(|(name, _)| (*name).to_string()));
+
+        // Fill remaining counted seats with supporter teams
+        let supporter_seats = self.total_counted_seats - counted_voters.len();
+        counted_voters.extend(supporter_teams.iter().take(supporter_seats).map(|(name, _)| (*name).to_string()));
+
+        // Assign remaining teams to uncounted voters
+        uncounted_voters.extend(earner_teams.iter().skip(earner_seats).map(|(name, _)| (*name).to_string()));
+        uncounted_voters.extend(supporter_teams.iter().skip(supporter_seats).map(|(name, _)| (*name).to_string()));
+
+        // Add excluded teams to uncounted voters
+        uncounted_voters.extend(
+            self.teams.iter()
+                .filter(|(_, team)| matches!(team.status, RaffleTeamStatus::Excluded))
+                .map(|(name, _)| name.clone())
+        );
+
+        (counted_voters, uncounted_voters)
+    }
+
+}
+
+// Takes a seed and an index and deterministically generates 
+// a random float in the range of 0 < x < 1
+fn generate_random_score_from_seed(randomness: &str, index: u64) -> f64 {
+    let combined_seed = format!("{}_{}", randomness, index);
+    let mut hasher = Sha256::new();
+
+    hasher.update(combined_seed.as_bytes());
+    let result = hasher.finalize();
+
+    // Convert first 8 bytes of the hash to a u64
+    let hash_num = u64::from_be_bytes(result[..8].try_into().unwrap());
+    let max_num = u64::MAX as f64;
+    hash_num as f64 / max_num
 }
 
 fn draw_with(block_randomness: &str, ballot_index: u64) -> f64 {
@@ -203,66 +377,67 @@ fn draw_with(block_randomness: &str, ballot_index: u64) -> f64 {
 }
 
 #[tokio::main]
-async fn main() -> eyre::Result<()> {
-
-    // Connect to reth via ipc
-    let provider = Provider::connect_ipc("/tmp/reth.ipc").await?;
-    let client = Arc::new(provider);
-
-    // Get current latest block number from chain
-    let latest_block = client.get_block_number().await?.as_u64();
-    println!("Current block height: {}", latest_block);
-
-    // Get randomness from latest block
-    match client.get_block(latest_block).await {
-        Ok(Some(block)) => {
-            match block.mix_hash {
-                Some(mix_hash) => {
-                    println!("Randomness: {:x}", mix_hash);
-                }
-                None => {
-                    println!("Randomness not found for block {}", latest_block);
-                }
-            }
-        }
-        Ok(None) => {
-            println!("Block number {} not found", latest_block);
-        }
-        Err(e) => {
-            eprintln!("Error fetching block {}:{:?}", latest_block, e);
-        }
-    }
-
-    let test_randomness = "0xd0cb380f49b60f392631607e78ba2cd1094fa8069918edcfc97455b7ad029db4";
-    let test_index: u64 = 0;
-    println!("Test draw output:{}", draw_with(test_randomness, test_index));
-
+async fn main() -> Result<(), Box<dyn Error>> {
+    // Initialize the BudgetSystem
     let mut system = BudgetSystem::new();
 
-    // Adding teams
-    system.add_team("Team A".to_string(), "Alice".to_string(), Some(vec![100000])).unwrap();
-    system.add_team("Team B".to_string(), "Bob".to_string(), None).unwrap();
+    // Add teams
+    system.add_team("Team A".to_string(), "Alice".to_string(), Some(vec![100000, 120000, 110000]))?;
+    system.add_team("Team B".to_string(), "Bob".to_string(), Some(vec![90000, 95000, 100000]))?;
+    system.add_team("Team C".to_string(), "Charlie".to_string(), None)?;
+    system.add_team("Team D".to_string(), "David".to_string(), Some(vec![150000, 160000, 170000]))?;
+    system.add_team("Team E".to_string(), "Eve".to_string(), None)?;
 
-    // Updating team status
-    system.update_team_status("Team B", TeamStatus::Earner { trailing_monthly_revenue: vec![50000] }).unwrap();
-
-    // Updating team revenue
-    system.update_team_revenue("Team A", vec![120000, 5858]).unwrap();
-
-    // Removing a team
-    system.remove_team("Team B").unwrap();
-
-    // Load system from file
-    let loaded_system = BudgetSystem::load_from_file().unwrap();
-
-    // Check historical state
-    if let Some(historical_state) = loaded_system.get_state_at(1) {
-        println!("Historical state at index 1: {:?}", historical_state.timestamp);
-        println!("Number of teams: {}", historical_state.teams.len());
+    println!("Teams added to the system:");
+    for (name, team) in &system.current_state.teams {
+        println!("- {}: {:?}", name, team.status);
     }
 
-    Ok(())
+    // Connect to Ethereum node and get randomness
+    let provider = Provider::connect_ipc("/tmp/reth.ipc").await?;
+    let client = Arc::new(provider);
+    let latest_block = client.get_block_number().await?.as_u64();
+    println!("\nCurrent block height: {}", latest_block);
 
+    let block_randomness = match client.get_block(latest_block).await? {
+        Some(block) => block.mix_hash.map(|h| format!("{:x}", h)).unwrap_or_else(|| "default_randomness".to_string()),
+        None => "default_randomness".to_string(),
+    };
+    println!("Block randomness: {}", block_randomness);
+
+    // Conduct a raffle
+    let excluded_teams = vec!["Team C".to_string()]; // Exclude Team C for this raffle
+    let raffle = system.conduct_raffle(block_randomness, &excluded_teams)?;
+
+    println!("\nRaffle conducted. Results:");
+    println!("Total tickets allocated: {}", raffle.tickets.len());
+
+    // Display ticket allocation
+    for (team_name, team) in &raffle.teams {
+        let ticket_count = raffle.tickets.iter().filter(|t| t.team_name == *team_name).count();
+        println!("- {}: {} tickets", team_name, ticket_count);
+    }
+
+    // Select teams
+    let (counted_voters, uncounted_voters) = raffle.select_teams();
+
+    println!("\nSelected teams:");
+    println!("Counted voters:");
+    for team in &counted_voters {
+        println!("- {}", team);
+    }
+    println!("Uncounted voters:");
+    for team in &uncounted_voters {
+        println!("- {}", team);
+    }
+
+    // Verify results
+    println!("\nVerification:");
+    println!("Total counted voters: {} (should be {})", counted_voters.len(), raffle.total_counted_seats);
+    println!("Max earner seats: {}", raffle.max_earner_seats);
+    println!("Excluded team (Team C) in uncounted voters: {}", uncounted_voters.contains("Team C"));
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -322,5 +497,112 @@ mod tests {
         } else {
             panic!("Team A should be an Earner");
         }
+    }
+
+    fn setup_test_teams() -> HashMap<String, Team> {
+        let mut teams = HashMap::new();
+        teams.insert("Team A".to_string(), Team::new("Team A".to_string(), "Alice".to_string(), Some(vec![100000, 120000, 110000])).unwrap());
+        teams.insert("Team B".to_string(), Team::new("Team B".to_string(), "Bob".to_string(), Some(vec![90000, 95000, 100000])).unwrap());
+        teams.insert("Team C".to_string(), Team::new("Team C".to_string(), "Charlie".to_string(), None).unwrap());
+        teams.insert("Team D".to_string(), Team::new("Team D".to_string(), "David".to_string(), Some(vec![150000, 160000, 170000])).unwrap());
+        teams.insert("Team E".to_string(), Team::new("Team E".to_string(), "Eve".to_string(), None).unwrap());
+        teams
+    }
+
+    #[test]
+    fn test_raffle_creation() {
+        let teams = setup_test_teams();
+        let raffle = Raffle::new(&teams, &[], "test_randomness".to_string());
+        assert_eq!(raffle.teams.len(), 5);
+        assert_eq!(raffle.total_counted_seats, Raffle::DEFAULT_TOTAL_COUNTED_SEATS);
+        assert_eq!(raffle.max_earner_seats, Raffle::DEFAULT_MAX_EARNER_SEATS);
+    }
+
+    #[test]
+    fn test_raffle_with_excluded_teams() {
+        let teams = setup_test_teams();
+        let excluded_teams = vec!["Team C".to_string(), "Team E".to_string()];
+        let raffle = Raffle::new(&teams, &excluded_teams, "test_randomness".to_string());
+        assert_eq!(raffle.teams.len(), 5);
+        assert!(matches!(raffle.teams["Team C"].status, RaffleTeamStatus::Excluded));
+        assert!(matches!(raffle.teams["Team E"].status, RaffleTeamStatus::Excluded));
+    }
+
+    #[test]
+    fn test_ticket_allocation() {
+        let teams = setup_test_teams();
+        let mut raffle = Raffle::new(&teams, &[], "test_randomness".to_string());
+        raffle.allocate_tickets().unwrap();
+        
+        // Check if earner teams have more than 1 ticket
+        assert!(raffle.tickets.iter().filter(|t| t.team_name == "Team A").count() > 1);
+        assert!(raffle.tickets.iter().filter(|t| t.team_name == "Team B").count() > 1);
+        assert!(raffle.tickets.iter().filter(|t| t.team_name == "Team D").count() > 1);
+        
+        // Check if supporter teams have exactly 1 ticket
+        assert_eq!(raffle.tickets.iter().filter(|t| t.team_name == "Team C").count(), 1);
+        assert_eq!(raffle.tickets.iter().filter(|t| t.team_name == "Team E").count(), 1);
+    }
+
+    #[test]
+    fn test_score_generation() {
+        let teams = setup_test_teams();
+        let mut raffle = Raffle::new(&teams, &[], "test_randomness".to_string());
+        raffle.allocate_tickets().unwrap();
+        raffle.generate_scores().unwrap();
+        
+        for ticket in &raffle.tickets {
+            assert!(ticket.score > 0.0 && ticket.score < 1.0);
+        }
+    }
+
+    #[test]
+    fn test_team_selection() {
+        let teams = setup_test_teams();
+        let mut raffle = Raffle::new(&teams, &[], "test_randomness".to_string());
+        raffle.allocate_tickets().unwrap();
+        raffle.generate_scores().unwrap();
+        let (counted_voters, uncounted_voters) = raffle.select_teams();
+        
+        assert_eq!(counted_voters.len() + uncounted_voters.len(), teams.len());
+        assert_eq!(counted_voters.len(), Raffle::DEFAULT_TOTAL_COUNTED_SEATS);
+        assert!(counted_voters.len() <= Raffle::DEFAULT_MAX_EARNER_SEATS + 2); // Max earners + min 2 supporters
+    }
+
+    #[test]
+    fn test_raffle_with_custom_seats() {
+        let teams = setup_test_teams();
+        let raffle = Raffle::with_seats(&teams, &[], 9, 6, "test_randomness".to_string());
+        assert_eq!(raffle.total_counted_seats, 9);
+        assert_eq!(raffle.max_earner_seats, 6);
+    }
+
+    #[test]
+    fn test_raffle_with_fewer_teams_than_seats() {
+        let mut teams = HashMap::new();
+        teams.insert("Team A".to_string(), Team::new("Team A".to_string(), "Alice".to_string(), Some(vec![100000])).unwrap());
+        teams.insert("Team B".to_string(), Team::new("Team B".to_string(), "Bob".to_string(), None).unwrap());
+        
+        let mut raffle = Raffle::new(&teams, &[], "test_randomness".to_string());
+        raffle.allocate_tickets().unwrap();
+        raffle.generate_scores().unwrap();
+        let (counted_voters, uncounted_voters) = raffle.select_teams();
+        
+        assert_eq!(counted_voters.len() + uncounted_voters.len(), teams.len());
+        assert_eq!(counted_voters.len(), teams.len());
+        assert_eq!(uncounted_voters.len(), 0);
+    }
+
+    #[test]
+    fn test_raffle_with_all_excluded_teams() {
+        let teams = setup_test_teams();
+        let excluded_teams: Vec<String> = teams.keys().cloned().collect();
+        let mut raffle = Raffle::new(&teams, &excluded_teams, "test_randomness".to_string());
+        raffle.allocate_tickets().unwrap();
+        raffle.generate_scores().unwrap();
+        let (counted_voters, uncounted_voters) = raffle.select_teams();
+        
+        assert_eq!(counted_voters.len(), 0);
+        assert_eq!(uncounted_voters.len(), teams.len());
     }
 }
