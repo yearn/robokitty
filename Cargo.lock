@@ -2682,7 +2682,6 @@ dependencies = [
  "chrono",
  "dotenvy",
  "ethers",
- "eyre",
  "log",
  "pretty_env_logger",
  "serde",
@@ -2690,6 +2689,7 @@ dependencies = [
  "sha2",
  "teloxide",
  "tokio",
+ "uuid 1.9.1",
 ]
 
 [[package]]
@@ -3294,7 +3294,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
- "uuid 1.8.0",
+ "uuid 1.9.1",
 ]
 
 [[package]]
@@ -3725,11 +3725,13 @@ dependencies = [
 
 [[package]]
 name = "uuid"
-version = "1.8.0"
+version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a183cf7feeba97b4dd1c0d46788634f6221d87fa961b305bed08c851829efcc0"
+checksum = "5de17fd2f7da591098415cff336e12965a28061ddace43b59cb3c430179c9439"
 dependencies = [
  "getrandom",
+ "rand",
+ "serde",
 ]
 
 [[package]]
