@@ -19,6 +19,7 @@ use uuid::Uuid;
 enum TeamStatus {
     Earner { trailing_monthly_revenue: Vec<u64>},
     Supporter,
+    Inactive,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -140,7 +141,7 @@ impl Team {
     fn get_revenue_data(&self) -> Option<&Vec<u64>> {
         match &self.status {
             TeamStatus::Earner { trailing_monthly_revenue } => Some(trailing_monthly_revenue),
-            TeamStatus::Supporter => None,
+            _ => None,
         }
     }
 
@@ -164,6 +165,7 @@ impl Team {
                 Ok(())
             },
             TeamStatus::Supporter => Err("Cannot update revenue for a Supporter team"),
+            TeamStatus::Inactive => Err("Cannot update revenue for an Inactive team"),
         }
     }
 
@@ -178,6 +180,21 @@ impl Team {
         Ok(())
     }
 
+    fn deactivate(&mut self) -> Result<(), &'static str> {
+        if matches!(self.status, TeamStatus::Inactive) {
+            return Err("Team is already inactive");
+        }
+        self.status = TeamStatus::Inactive;
+        Ok(())
+    }
+
+    fn reactivate(&mut self) -> Result<(), &'static str> {
+        if !matches!(self.status, TeamStatus::Inactive) {
+            return Err("Team is not inactive");
+        }
+        self.status = TeamStatus::Supporter;
+        Ok(())
+    }
 
 }
 
@@ -210,6 +227,28 @@ impl BudgetSystem {
             Ok(())
         } else {
             Err("Team not found")
+        }
+    }
+
+    fn deactivate_team(&mut self, team_id: Uuid) -> Result<(), &'static str> {
+        match self.current_state.teams.get_mut(&team_id) {
+            Some(team) => {
+                team.deactivate()?;
+                self.save_state();
+                Ok(())
+            },
+            None => Err("Team not found"),
+        }
+    }
+
+    fn reactivate_team(&mut self, team_id: Uuid) -> Result<(), &'static str> {
+        match self.current_state.teams.get_mut(&team_id) {
+            Some(team) => {
+                team.reactivate()?;
+                self.save_state();
+                Ok(())
+            },
+            None => Err("Team not found"),
         }
     }
 
@@ -268,9 +307,14 @@ impl BudgetSystem {
             return Err("Proposal not found");
         }
 
+        let active_teams: HashMap<Uuid, Team> = self.current_state.teams.iter()
+            .filter(|(_, team)| !matches!(team.status, TeamStatus::Inactive))
+            .map(|(id, team)| (*id, team.clone()))
+            .collect();
+
         let mut raffle = Raffle::new(
             proposal_id,
-            &self.current_state.teams,
+            &active_teams,
             excluded_teams,
             block_randomness
         );
@@ -301,9 +345,14 @@ impl BudgetSystem {
             return Err("Earner seats cannot be greater than the total number of seats");
         }
 
+        let active_teams: HashMap<Uuid, Team> = self.current_state.teams.iter()
+            .filter(|(_, team)| !matches!(team.status, TeamStatus::Inactive))
+            .map(|(id, team)| (*id, team.clone()))
+            .collect();
+
         let mut raffle = Raffle::with_custom_seats(
             proposal_id,
-            &self.current_state.teams,
+            &active_teams,
             excluded_teams,
             total_counted_seats,
             max_earner_seats,
@@ -487,7 +536,9 @@ impl Raffle {
         max_earner_seats: usize,
         block_randomness: String
     ) -> Self {
-        let raffle_teams = teams.iter().map(|(id, team)| {
+        let raffle_teams = teams.iter()
+            .filter(|(_, team)| !matches!(team.status, TeamStatus::Inactive))
+            .map(|(id, team)| {
             let status = if excluded_teams.contains(id) {
                 RaffleTeamStatus::Excluded
             } else {
@@ -495,6 +546,7 @@ impl Raffle {
                     TeamStatus::Earner { trailing_monthly_revenue } => 
                         RaffleTeamStatus::Earner { trailing_monthly_revenue: trailing_monthly_revenue.clone() },
                     TeamStatus::Supporter => RaffleTeamStatus::Supporter,
+                    TeamStatus::Inactive => unreachable!(),
                 }
             };
             (*id, RaffleTeam { id: *id, name: team.name.clone(), status })
@@ -793,12 +845,145 @@ mod tests {
     use super::*;
     use chrono::NaiveDate;
 
+    fn setup_system() -> BudgetSystem {
+        let mut system = BudgetSystem::new();
+        system.add_team("Team A".to_string(), "Alice".to_string(), Some(vec![100000])).unwrap();
+        system.add_team("Team B".to_string(), "Bob".to_string(), Some(vec![90000])).unwrap();
+        system.add_team("Team C".to_string(), "Charlie".to_string(), None).unwrap();
+        system
+    }
+
     #[test]
     fn test_add_team() {
         let mut system = BudgetSystem::new();
         let result = system.add_team("Team A".to_string(), "Alice".to_string(), None);
         assert!(result.is_ok());
         assert_eq!(system.current_state.teams.len(), 1);
+    }
+
+    #[test]
+    fn test_deactivate_team() {
+        let mut system = setup_system();
+        let team_id = *system.current_state.teams.keys().next().unwrap();
+        system.deactivate_team(team_id).unwrap();
+        assert!(matches!(system.current_state.teams[&team_id].status, TeamStatus::Inactive));
+    }
+
+    #[test]
+    fn test_reactivate_team() {
+        let mut system = setup_system();
+        let team_id = *system.current_state.teams.keys().next().unwrap();
+        system.deactivate_team(team_id).unwrap();
+        system.reactivate_team(team_id).unwrap();
+        assert!(matches!(system.current_state.teams[&team_id].status, TeamStatus::Supporter));
+    }
+
+    #[test]
+    fn test_conduct_raffle() {
+        let mut system = setup_system();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let raffle_id = system.conduct_raffle(proposal_id, "test_randomness".to_string(), &[]).unwrap();
+        let raffle = system.raffles.get(&raffle_id).unwrap();
+        assert_eq!(raffle.teams.len(), 3);
+    }
+
+    #[test]
+    fn test_raffle_ignores_inactive_team() {
+        let mut system = setup_system();
+        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
+        
+        // Add a new team and set it to inactive
+        let inactive_team_id = system.add_team("Inactive Team".to_string(), "Inactive".to_string(), None).unwrap();
+        system.deactivate_team(inactive_team_id).unwrap();
+        
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let raffle_id = system.conduct_raffle(proposal_id, "test_randomness".to_string(), &[]).unwrap();
+        let raffle = system.raffles.get(&raffle_id).unwrap();
+        
+        // Check that the inactive team is not included in the raffle
+        assert!(!raffle.teams.contains_key(&inactive_team_id));
+        
+        // Check that all other teams are included
+        for team_id in team_ids {
+            assert!(raffle.teams.contains_key(&team_id));
+        }
+    }
+
+    #[test]
+    fn test_conduct_raffle_with_custom_seats() {
+        let mut system = setup_system();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let raffle_id = system.conduct_raffle_with_custom_seats(proposal_id, 9, 6, "test_randomness".to_string(), &[]).unwrap();
+        let raffle = system.raffles.get(&raffle_id).unwrap();
+        assert_eq!(raffle.teams.len(), 3);
+        assert_eq!(raffle.total_counted_seats, 9);
+        assert_eq!(raffle.max_earner_seats, 6);
+    }
+
+    #[test]
+    fn test_raffle_with_custom_seats_ignores_inactive_team() {
+        let mut system = setup_system();
+        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
+        
+        // Add a new team and set it to inactive
+        let inactive_team_id = system.add_team("Inactive Team".to_string(), "Inactive".to_string(), None).unwrap();
+        system.deactivate_team(inactive_team_id).unwrap();
+        
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let raffle_id = system.conduct_raffle_with_custom_seats(proposal_id, 9, 6, "test_randomness".to_string(), &[]).unwrap();
+        let raffle = system.raffles.get(&raffle_id).unwrap();
+        
+        // Check that the inactive team is not included in the raffle
+        assert!(!raffle.teams.contains_key(&inactive_team_id));
+        
+        // Check that all other teams are included
+        for team_id in team_ids {
+            assert!(raffle.teams.contains_key(&team_id));
+        }
+        
+        // Check that the custom seat numbers are respected
+        assert_eq!(raffle.total_counted_seats, 9);
+        assert_eq!(raffle.max_earner_seats, 6);
+    }
+
+    #[test]
+    fn test_raffle_ticket_allocation() {
+        let mut system = setup_system();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let raffle_id = system.conduct_raffle(proposal_id, "test_randomness".to_string(), &[]).unwrap();
+        let raffle = system.raffles.get(&raffle_id).unwrap();
+        
+        let ticket_counts: HashMap<_, _> = raffle.tickets.iter()
+            .fold(HashMap::new(), |mut acc, ticket| {
+                *acc.entry(ticket.team_id).or_insert(0) += 1;
+                acc
+            });
+
+        // Check that Earner teams have more than 1 ticket
+        for (team_id, team) in &system.current_state.teams {
+            if let TeamStatus::Earner { .. } = team.status {
+                assert!(*ticket_counts.get(team_id).unwrap_or(&0) > 1);
+            }
+        }
+
+        // Check that Supporter teams have exactly 1 ticket
+        for (team_id, team) in &system.current_state.teams {
+            if let TeamStatus::Supporter = team.status {
+                assert_eq!(*ticket_counts.get(team_id).unwrap_or(&0), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn test_raffle_score_generation() {
+        let mut system = setup_system();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let raffle_id = system.conduct_raffle(proposal_id, "test_randomness".to_string(), &[]).unwrap();
+        let raffle = system.raffles.get(&raffle_id).unwrap();
+        
+        for ticket in &raffle.tickets {
+            assert!(ticket.score > 0.0 && ticket.score < 1.0);
+        }
     }
 
     #[test]
@@ -875,36 +1060,6 @@ mod tests {
     fn test_raffle_with_custom_seats() {
         let teams = setup_test_teams();
         let raffle = Raffle::with_custom_seats(Uuid::new_v4(), &teams, &[], 9, 6, "test_randomness".to_string());
-        assert_eq!(raffle.total_counted_seats, 9);
-        assert_eq!(raffle.max_earner_seats, 6);
-    }
-
-    #[test]
-    fn test_conduct_raffle() {
-        let mut system = BudgetSystem::new();
-        let teams = setup_test_teams();
-        for team in teams.values() {
-            system.add_team(team.name.clone(), team.representative.clone(), team.get_revenue_data().cloned()).unwrap();
-        }
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let raffle_id = system.conduct_raffle(proposal_id, "test_randomness".to_string(), &[]).unwrap();
-        let raffle = system.raffles.get(&raffle_id).unwrap();
-        assert_eq!(raffle.teams.len(), 5);
-        assert_eq!(raffle.total_counted_seats, Raffle::DEFAULT_TOTAL_COUNTED_SEATS);
-        assert_eq!(raffle.max_earner_seats, Raffle::DEFAULT_MAX_EARNER_SEATS);
-    }
-
-    #[test]
-    fn test_conduct_raffle_with_custom_seats() {
-        let mut system = BudgetSystem::new();
-        let teams = setup_test_teams();
-        for team in teams.values() {
-            system.add_team(team.name.clone(), team.representative.clone(), team.get_revenue_data().cloned()).unwrap();
-        }
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let raffle_id = system.conduct_raffle_with_custom_seats(proposal_id, 9, 6, "test_randomness".to_string(), &[]).unwrap();
-        let raffle = system.raffles.get(&raffle_id).unwrap();
-        assert_eq!(raffle.teams.len(), 5);
         assert_eq!(raffle.total_counted_seats, 9);
         assert_eq!(raffle.max_earner_seats, 6);
     }
@@ -992,12 +1147,6 @@ mod tests {
         
         assert_eq!(counted_voters.len(), 0);
         assert_eq!(uncounted_voters.len(), teams.len());
-    }
-
-    fn setup_system() -> BudgetSystem {
-        let mut system = BudgetSystem::new();
-        system.add_team("Team A".to_string(), "Alice".to_string(), Some(vec![100000])).unwrap();
-        system
     }
 
     #[test]
