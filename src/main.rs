@@ -284,7 +284,8 @@ impl Raffle {
     
                     let sum: u64 = trailing_monthly_revenue.iter().sum();
                     let quarterly_average = sum as f64 / 3.0;
-                    let ticket_count = quarterly_average.sqrt().floor() as u64;
+                    let scaled_average = quarterly_average / 1000.0; // Scale down by 1000 for legacy compatibility
+                    let ticket_count = scaled_average.sqrt().floor() as u64;
     
                     Ok(ticket_count.max(1))
                 },
