@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use ethers::prelude::*;
 use serde::{Serialize, Deserialize};
 use sha2::{Sha256, Digest};
@@ -14,9 +14,6 @@ use tokio::{
     time::{sleep, Duration},
 };
 use uuid::Uuid;
-
-
-// TODO: Change rev to a float and do k in order to match original imp
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum TeamStatus {
@@ -42,6 +39,8 @@ struct SystemState {
 struct BudgetSystem {
     current_state: SystemState,
     history: Vec<SystemState>,
+    proposals: HashMap<Uuid, Proposal>,
+    raffles: HashMap<Uuid, Raffle>
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -68,11 +67,44 @@ struct RaffleTicket {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Raffle {
     id: Uuid,
+    proposal_id: Uuid,
     tickets: Vec<RaffleTicket>,
     teams: HashMap<Uuid, RaffleTeam>,
     total_counted_seats: usize,
     max_earner_seats: usize,
     block_randomness: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum PaymentStatus {
+    Unpaid,
+    Paid
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum ProposalStatus {
+    Open,
+    Approved,
+    Rejected,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct BudgetRequestDetails {
+    team: Option<Uuid>,
+    request_amount: f64,
+    request_token: String,
+    start_date: Option<NaiveDate>,
+    end_date: Option<NaiveDate>,
+    payment_status: Option<PaymentStatus>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Proposal {
+    id: Uuid,
+    title: String,
+    url: Option<String>,
+    status: ProposalStatus,
+    budget_request_details: Option<BudgetRequestDetails>,
 }
 
 impl Team {
@@ -151,6 +183,8 @@ impl BudgetSystem {
                 timestamp: Utc::now(),
             },
             history: Vec::new(),
+            proposals: HashMap::new(),
+            raffles: HashMap::new(),
         }
 
     }
@@ -222,18 +256,112 @@ impl BudgetSystem {
         self.history.get(index)
     }
 
-    fn conduct_raffle(&self, block_randomness: String, excluded_teams: &[Uuid]) -> Result<Raffle, &'static str> {
-        self.conduct_raffle_with_seats(Raffle::DEFAULT_TOTAL_COUNTED_SEATS, Raffle::DEFAULT_MAX_EARNER_SEATS, block_randomness, excluded_teams)
-    }
+    fn conduct_raffle(&mut self, proposal_id: Uuid, block_randomness: String, excluded_teams: &[Uuid]) -> Result<Uuid, &'static str> {
+        if !self.proposals.contains_key(&proposal_id) {
+            return Err("Proposal not found");
+        }
 
-    fn conduct_raffle_with_seats(&self, total_counted_seats: usize, max_earner_seats: usize, block_randomness: String, excluded_teams: &[Uuid]) -> Result<Raffle, &'static str> {
+        let mut raffle = Raffle::new(
+            proposal_id,
+            &self.current_state.teams,
+            excluded_teams,
+            block_randomness
+        );
+
+        raffle.allocate_tickets()?;
+        raffle.generate_scores()?;
+
+        let raffle_id = raffle.id;
+        self.raffles.insert(raffle_id, raffle);
+        self.save_state();
+
+        Ok(raffle_id)
+    }
+    
+    fn conduct_raffle_with_custom_seats(
+        &mut self,
+        proposal_id: Uuid,
+        total_counted_seats: usize,
+        max_earner_seats: usize,
+        block_randomness: String,
+        excluded_teams: &[Uuid]
+    ) -> Result<Uuid, &'static str> {
+        if !self.proposals.contains_key(&proposal_id) {
+            return Err("Proposal not found");
+        }
+
         if max_earner_seats > total_counted_seats {
             return Err("Earner seats cannot be greater than the total number of seats");
         }
-        let mut raffle = Raffle::with_seats(&self.current_state.teams, excluded_teams, total_counted_seats, max_earner_seats, block_randomness);
+
+        let mut raffle = Raffle::with_custom_seats(
+            proposal_id,
+            &self.current_state.teams,
+            excluded_teams,
+            total_counted_seats,
+            max_earner_seats,
+            block_randomness
+        );
+
         raffle.allocate_tickets()?;
         raffle.generate_scores()?;
-        Ok(raffle)
+
+        let raffle_id = raffle.id;
+        self.raffles.insert(raffle_id, raffle);
+        self.save_state();
+
+        Ok(raffle_id)
+    }
+
+    fn add_proposal(&mut self, title: String, url: Option<String>, budget_request_details: Option<BudgetRequestDetails>) -> Result<Uuid, &'static str> {
+        // Validate dates if present
+        if let Some(details) = &budget_request_details {
+            if let (Some(start), Some(end)) = (details.start_date, details.end_date) {
+                if start > end {
+                    return Err("Start date cannot be after end date");
+                }
+            }
+            // Ensure payment_status is None for new proposals
+            if details.payment_status.is_some() {
+                return Err("New proposals should not have a payment status");
+            }
+        }
+    
+        let proposal = Proposal::new(title, url, budget_request_details);
+        let id = proposal.id;
+        self.proposals.insert(id, proposal);
+        self.save_state();
+        Ok(id)
+    }
+
+    fn get_proposal(&self, id: Uuid) -> Option<&Proposal> {
+        self.proposals.get(&id)
+    }
+
+    fn update_proposal_status(&mut self, id: Uuid, new_status: ProposalStatus) -> Result<(), &'static str> {
+        if let Some(proposal) = self.proposals.get_mut(&id) {
+            match new_status {
+                ProposalStatus::Approved => proposal.approve(),
+                ProposalStatus::Rejected => proposal.reject(),
+                ProposalStatus::Open => return Err("Cannot set status back to Open"), // TODO: Support reverting
+            }
+            self.save_state();
+            Ok(())
+        } else {
+            Err("Proposal not found")
+        }
+    }
+
+    fn mark_proposal_as_paid(&mut self, id: Uuid) -> Result<(), &'static str> {
+        if let Some(proposal) = self.proposals.get_mut(&id) {
+            let result = proposal.mark_as_paid();
+            if result.is_ok() {
+                self.save_state();
+            }
+            result
+        } else {
+            Err("Proposal not found")
+        }
     }
 
 }
@@ -243,13 +371,27 @@ impl Raffle {
     const DEFAULT_MAX_EARNER_SEATS: usize = 5;
 
     // Initiates a Raffle with default seat allocations
-    fn new(teams: &HashMap<Uuid, Team>, excluded_teams: &[Uuid], block_randomness: String) -> Self {
-        Self::with_seats(teams, excluded_teams, Self::DEFAULT_TOTAL_COUNTED_SEATS, Self::DEFAULT_MAX_EARNER_SEATS, block_randomness)
+    fn new(proposal_id: Uuid, teams: &HashMap<Uuid, Team>, excluded_teams: &[Uuid], block_randomness: String) -> Self {
+        Self::with_custom_seats(
+            proposal_id,
+            teams,
+            excluded_teams,
+            Self::DEFAULT_TOTAL_COUNTED_SEATS,
+            Self::DEFAULT_MAX_EARNER_SEATS,
+            block_randomness
+        )
     }
     
     // Clones the Teams into Raffle Teams and initiates a Raffle.
     // Supports non-default seat allocations.
-    fn with_seats(teams: &HashMap<Uuid, Team>, excluded_teams: &[Uuid], total_counted_seats: usize, max_earner_seats: usize, block_randomness: String) -> Self {
+    fn with_custom_seats(
+        proposal_id: Uuid,
+        teams: &HashMap<Uuid, Team>,
+        excluded_teams: &[Uuid],
+        total_counted_seats: usize,
+        max_earner_seats: usize,
+        block_randomness: String
+    ) -> Self {
         let raffle_teams = teams.iter().map(|(id, team)| {
             let status = if excluded_teams.contains(id) {
                 RaffleTeamStatus::Excluded
@@ -265,6 +407,7 @@ impl Raffle {
 
         Raffle {
             id: Uuid::new_v4(),
+            proposal_id,
             tickets: Vec::new(),
             teams: raffle_teams,
             total_counted_seats,
@@ -381,6 +524,45 @@ fn draw_with(block_randomness: &str, ballot_index: u64) -> f64 {
     hash_num as f64 / max_num
 }
 
+impl Proposal {
+    fn new(title: String, url: Option<String>, budget_request_details: Option<BudgetRequestDetails>) -> Self {
+        Proposal {
+            id: Uuid::new_v4(),
+            title,
+            url,
+            status: ProposalStatus::Open,
+            budget_request_details,
+        }
+    }
+
+    fn approve(&mut self) {
+        self.status = ProposalStatus::Approved;
+        if let Some(details) = &mut self.budget_request_details {
+            details.payment_status = Some(PaymentStatus::Unpaid);
+        }
+    }
+
+    fn reject(&mut self) {
+        self.status = ProposalStatus::Rejected;
+    }
+
+    fn mark_as_paid(&mut self) -> Result<(), &'static str> {
+        match (&self.status, &mut self.budget_request_details) {
+            (ProposalStatus::Approved, Some(details)) => {
+                details.payment_status = Some(PaymentStatus::Paid);
+                Ok(())
+            }
+            (ProposalStatus::Approved, None) => Err("Cannot mark as paid: Not a budget request"),
+            _ => Err("Cannot mark as paid: Proposal is not approved")
+
+        }
+    }
+
+    fn is_budget_request(&self) -> bool {
+        self.budget_request_details.is_some()
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // Initialize the BudgetSystem
@@ -398,6 +580,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("- {} ({}): {:?}", team.name, id, team.status);
     }
 
+    // Add a proposal
+    let proposal_id = system.add_proposal(
+        "Q3 Budget Request".to_string(),
+        Some("https://example.com/proposal".to_string()),
+        Some(BudgetRequestDetails {
+            team: Some(team_a_id),
+            request_amount: 500000.0,
+            request_token: "USD".to_string(),
+            start_date: Some(NaiveDate::from_ymd_opt(2024, 7, 1).unwrap()),
+            end_date: Some(NaiveDate::from_ymd_opt(2024, 9, 30).unwrap()),
+            payment_status: None,
+        })
+    )?;
+
+    println!("\nProposal added:");
+    println!("{:?}", system.get_proposal(proposal_id).unwrap());
+
     // Connect to Ethereum node and get randomness
     let provider = Provider::connect_ipc("/tmp/reth.ipc").await?;
     let client = Arc::new(provider);
@@ -412,7 +611,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Conduct a raffle
     let excluded_teams = vec![team_c_id]; // Exclude Team C for this raffle
-    let raffle = system.conduct_raffle(block_randomness, &excluded_teams)?;
+    let raffle_id = system.conduct_raffle(proposal_id, block_randomness, &excluded_teams)?;
+    let raffle = system.raffles.get(&raffle_id).unwrap();
 
     println!("\nRaffle conducted. Results:");
     println!("Total tickets allocated: {}", raffle.tickets.len());
@@ -442,12 +642,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("Max earner seats: {}", raffle.max_earner_seats);
     println!("Excluded team (Team C) in uncounted voters: {}", uncounted_voters.contains(&team_c_id));
 
+    // Approve the proposal
+    system.update_proposal_status(proposal_id, ProposalStatus::Approved)?;
+    println!("\nProposal approved:");
+    println!("{:?}", system.get_proposal(proposal_id).unwrap());
+
+    // Mark the proposal as paid
+    system.mark_proposal_as_paid(proposal_id)?;
+    println!("\nProposal marked as paid:");
+    println!("{:?}", system.get_proposal(proposal_id).unwrap());
+
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::NaiveDate;
 
     #[test]
     fn test_add_team() {
@@ -521,10 +732,48 @@ mod tests {
     #[test]
     fn test_raffle_creation() {
         let teams = setup_test_teams();
-        let raffle = Raffle::new(&teams, &[], "test_randomness".to_string());
+        let raffle = Raffle::new(Uuid::new_v4(), &teams, &[], "test_randomness".to_string());
         assert_eq!(raffle.teams.len(), 5);
         assert_eq!(raffle.total_counted_seats, Raffle::DEFAULT_TOTAL_COUNTED_SEATS);
         assert_eq!(raffle.max_earner_seats, Raffle::DEFAULT_MAX_EARNER_SEATS);
+    }
+
+    #[test]
+    fn test_raffle_with_custom_seats() {
+        let teams = setup_test_teams();
+        let raffle = Raffle::with_custom_seats(Uuid::new_v4(), &teams, &[], 9, 6, "test_randomness".to_string());
+        assert_eq!(raffle.total_counted_seats, 9);
+        assert_eq!(raffle.max_earner_seats, 6);
+    }
+
+    #[test]
+    fn test_conduct_raffle() {
+        let mut system = BudgetSystem::new();
+        let teams = setup_test_teams();
+        for team in teams.values() {
+            system.add_team(team.name.clone(), team.representative.clone(), team.get_revenue_data().cloned()).unwrap();
+        }
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let raffle_id = system.conduct_raffle(proposal_id, "test_randomness".to_string(), &[]).unwrap();
+        let raffle = system.raffles.get(&raffle_id).unwrap();
+        assert_eq!(raffle.teams.len(), 5);
+        assert_eq!(raffle.total_counted_seats, Raffle::DEFAULT_TOTAL_COUNTED_SEATS);
+        assert_eq!(raffle.max_earner_seats, Raffle::DEFAULT_MAX_EARNER_SEATS);
+    }
+
+    #[test]
+    fn test_conduct_raffle_with_custom_seats() {
+        let mut system = BudgetSystem::new();
+        let teams = setup_test_teams();
+        for team in teams.values() {
+            system.add_team(team.name.clone(), team.representative.clone(), team.get_revenue_data().cloned()).unwrap();
+        }
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let raffle_id = system.conduct_raffle_with_custom_seats(proposal_id, 9, 6, "test_randomness".to_string(), &[]).unwrap();
+        let raffle = system.raffles.get(&raffle_id).unwrap();
+        assert_eq!(raffle.teams.len(), 5);
+        assert_eq!(raffle.total_counted_seats, 9);
+        assert_eq!(raffle.max_earner_seats, 6);
     }
 
     #[test]
@@ -534,7 +783,7 @@ mod tests {
             .filter(|t| t.name == "Team C" || t.name == "Team E")
             .map(|t| t.id)
             .collect();
-        let raffle = Raffle::new(&teams, &excluded_teams, "test_randomness".to_string());
+        let raffle = Raffle::new(Uuid::new_v4(), &teams, &excluded_teams, "test_randomness".to_string());
         assert_eq!(raffle.teams.len(), 5);
         assert!(raffle.teams.values().any(|t| t.name == "Team C" && matches!(t.status, RaffleTeamStatus::Excluded)));
         assert!(raffle.teams.values().any(|t| t.name == "Team E" && matches!(t.status, RaffleTeamStatus::Excluded)));
@@ -543,7 +792,7 @@ mod tests {
     #[test]
     fn test_ticket_allocation() {
         let teams = setup_test_teams();
-        let mut raffle = Raffle::new(&teams, &[], "test_randomness".to_string());
+        let mut raffle = Raffle::new(Uuid::new_v4(), &teams, &[], "test_randomness".to_string());
         raffle.allocate_tickets().unwrap();
         
         // Check if earner teams have more than 1 ticket
@@ -559,7 +808,7 @@ mod tests {
     #[test]
     fn test_score_generation() {
         let teams = setup_test_teams();
-        let mut raffle = Raffle::new(&teams, &[], "test_randomness".to_string());
+        let mut raffle = Raffle::new(Uuid::new_v4(), &teams, &[], "test_randomness".to_string());
         raffle.allocate_tickets().unwrap();
         raffle.generate_scores().unwrap();
         
@@ -571,7 +820,7 @@ mod tests {
     #[test]
     fn test_team_selection() {
         let teams = setup_test_teams();
-        let mut raffle = Raffle::new(&teams, &[], "test_randomness".to_string());
+        let mut raffle = Raffle::new(Uuid::new_v4(), &teams, &[], "test_randomness".to_string());
         raffle.allocate_tickets().unwrap();
         raffle.generate_scores().unwrap();
         let (counted_voters, uncounted_voters) = raffle.select_teams();
@@ -582,14 +831,6 @@ mod tests {
     }
 
     #[test]
-    fn test_raffle_with_custom_seats() {
-        let teams = setup_test_teams();
-        let raffle = Raffle::with_seats(&teams, &[], 9, 6, "test_randomness".to_string());
-        assert_eq!(raffle.total_counted_seats, 9);
-        assert_eq!(raffle.max_earner_seats, 6);
-    }
-
-    #[test]
     fn test_raffle_with_fewer_teams_than_seats() {
         let mut teams = HashMap::new();
         let team_a = Team::new("Team A".to_string(), "Alice".to_string(), Some(vec![100000])).unwrap();
@@ -597,7 +838,7 @@ mod tests {
         teams.insert(team_a.id, team_a);
         teams.insert(team_b.id, team_b);
         
-        let mut raffle = Raffle::new(&teams, &[], "test_randomness".to_string());
+        let mut raffle = Raffle::new(Uuid::new_v4(), &teams, &[], "test_randomness".to_string());
         raffle.allocate_tickets().unwrap();
         raffle.generate_scores().unwrap();
         let (counted_voters, uncounted_voters) = raffle.select_teams();
@@ -611,12 +852,62 @@ mod tests {
     fn test_raffle_with_all_excluded_teams() {
         let teams = setup_test_teams();
         let excluded_teams: Vec<Uuid> = teams.keys().cloned().collect();
-        let mut raffle = Raffle::new(&teams, &excluded_teams, "test_randomness".to_string());
+        let mut raffle = Raffle::new(Uuid::new_v4(), &teams, &excluded_teams, "test_randomness".to_string());
         raffle.allocate_tickets().unwrap();
         raffle.generate_scores().unwrap();
         let (counted_voters, uncounted_voters) = raffle.select_teams();
         
         assert_eq!(counted_voters.len(), 0);
         assert_eq!(uncounted_voters.len(), teams.len());
+    }
+
+    #[test]
+    fn test_add_proposal() {
+        let mut system = BudgetSystem::new();
+        let team_id = system.add_team("Team A".to_string(), "Alice".to_string(), Some(vec![100000])).unwrap();
+        let proposal_id = system.add_proposal(
+            "Test Proposal".to_string(),
+            Some("https://example.com".to_string()),
+            Some(BudgetRequestDetails {
+                team: Some(team_id),
+                request_amount: 50000.0,
+                request_token: "USD".to_string(),
+                start_date: Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()),
+                end_date: Some(NaiveDate::from_ymd_opt(2024, 12, 31).unwrap()),
+                payment_status: None,
+            })
+        ).unwrap();
+        
+        let proposal = system.get_proposal(proposal_id).unwrap();
+        assert_eq!(proposal.title, "Test Proposal");
+        assert_eq!(proposal.status, ProposalStatus::Open);
+        assert!(proposal.is_budget_request());
+    }
+
+    #[test]
+    fn test_proposal_approval_and_payment() {
+        let mut system = BudgetSystem::new();
+        let team_id = system.add_team("Team A".to_string(), "Alice".to_string(), Some(vec![100000])).unwrap();
+        let proposal_id = system.add_proposal(
+            "Test Proposal".to_string(),
+            None,
+            Some(BudgetRequestDetails {
+                team: Some(team_id),
+                request_amount: 50000.0,
+                request_token: "USD".to_string(),
+                start_date: None,
+                end_date: None,
+                payment_status: None,
+            })
+        ).unwrap();
+        
+        system.update_proposal_status(proposal_id, ProposalStatus::Approved).unwrap();
+        let proposal = system.get_proposal(proposal_id).unwrap();
+        assert_eq!(proposal.status, ProposalStatus::Approved);
+        assert_eq!(proposal.budget_request_details.as_ref().unwrap().payment_status, Some(PaymentStatus::Unpaid));
+
+        system.mark_proposal_as_paid(proposal_id).unwrap();
+        let proposal = system.get_proposal(proposal_id).unwrap();
+        assert_eq!(proposal.budget_request_details.as_ref().unwrap().payment_status, Some(PaymentStatus::Paid));
     }
 }
