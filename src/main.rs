@@ -16,9 +16,11 @@ use tokio::{
 use uuid::Uuid;
 
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+// TODO: Change rev to a float and do k in order to match original imp
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum TeamStatus {
-    Earner { trailing_monthly_revenue: Vec<f64>},
+    Earner { trailing_monthly_revenue: Vec<u64>},
     Supporter,
 }
 
@@ -44,7 +46,7 @@ struct BudgetSystem {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum RaffleTeamStatus {
-    Earner { trailing_monthly_revenue: Vec<f64> },
+    Earner { trailing_monthly_revenue: Vec<u64> },
     Supporter,
     Excluded, // For teams with conflict of interest in a particular Vote
 }
@@ -74,7 +76,7 @@ struct Raffle {
 }
 
 impl Team {
-    fn new(name: String, representative: String, trailing_monthly_revenue: Option<Vec<f64>>) -> Result<Self, &'static str> {
+    fn new(name: String, representative: String, trailing_monthly_revenue: Option<Vec<u64>>) -> Result<Self, &'static str> {
         let status = match trailing_monthly_revenue {
             Some(revenue) => {
                 if revenue.is_empty() {
@@ -96,14 +98,14 @@ impl Team {
         })
     }
 
-    fn get_revenue_data(&self) -> Option<&Vec<f64>> {
+    fn get_revenue_data(&self) -> Option<&Vec<u64>> {
         match &self.status {
             TeamStatus::Earner { trailing_monthly_revenue } => Some(trailing_monthly_revenue),
             TeamStatus::Supporter => None,
         }
     }
 
-    fn update_revenue_data(&mut self, new_revenue: Vec<f64>) -> Result<(), &'static str> {
+    fn update_revenue_data(&mut self, new_revenue: Vec<u64>) -> Result<(), &'static str> {
         if new_revenue.is_empty() {
             return Err("New revenue data cannot be empty");
         } else if new_revenue.len() > 3 {
@@ -153,7 +155,7 @@ impl BudgetSystem {
 
     }
 
-    fn add_team(&mut self, name: String, representative: String, trailing_monthly_revenue: Option<Vec<f64>>) -> Result<Uuid, &'static str> {
+    fn add_team(&mut self, name: String, representative: String, trailing_monthly_revenue: Option<Vec<u64>>) -> Result<Uuid, &'static str> {
         let team = Team::new(name, representative, trailing_monthly_revenue)?;
         let id = team.id;
         self.current_state.teams.insert(id, team);
@@ -192,7 +194,7 @@ impl BudgetSystem {
         }
     }
 
-    fn update_team_revenue(&mut self, team_id: Uuid, new_revenue: Vec<f64>) -> Result<(), &'static str> {
+    fn update_team_revenue(&mut self, team_id: Uuid, new_revenue: Vec<u64>) -> Result<(), &'static str> {
         match self.current_state.teams.get_mut(&team_id) {
             Some(team) => {
                 team.update_revenue_data(new_revenue)?;
@@ -280,8 +282,8 @@ impl Raffle {
                         return Err("Trailing monthly revenue cannot exceed 3 entries");
                     }
     
-                    let sum: f64 = trailing_monthly_revenue.iter().sum();
-                    let quarterly_average = sum / 3.0;
+                    let sum: u64 = trailing_monthly_revenue.iter().sum();
+                    let quarterly_average = sum as f64 / 3.0;
                     let ticket_count = quarterly_average.sqrt().floor() as u64;
     
                     Ok(ticket_count.max(1))
@@ -384,10 +386,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut system = BudgetSystem::new();
 
     // Add teams
-    let team_a_id = system.add_team("Team A".to_string(), "Alice".to_string(), Some(vec![100.0, 120.0, 110.0]))?;
-    let team_b_id = system.add_team("Team B".to_string(), "Bob".to_string(), Some(vec![90.0, 95.0, 100.0]))?;
+    let team_a_id = system.add_team("Team A".to_string(), "Alice".to_string(), Some(vec![100000, 120000, 110000]))?;
+    let team_b_id = system.add_team("Team B".to_string(), "Bob".to_string(), Some(vec![90000, 95000, 100000]))?;
     let team_c_id = system.add_team("Team C".to_string(), "Charlie".to_string(), None)?;
-    let team_d_id = system.add_team("Team D".to_string(), "David".to_string(), Some(vec![150.0, 160.0, 170.0]))?;
+    let team_d_id = system.add_team("Team D".to_string(), "David".to_string(), Some(vec![150000, 160000, 170000]))?;
     let team_e_id = system.add_team("Team E".to_string(), "Eve".to_string(), None)?;
 
     println!("Teams added to the system:");
@@ -457,7 +459,7 @@ mod tests {
     #[test]
     fn test_add_team_with_revenue() {
         let mut system = BudgetSystem::new();
-        let team_id = system.add_team("Team A".to_string(), "Alice".to_string(), Some(vec![10.0])).unwrap();
+        let team_id = system.add_team("Team A".to_string(), "Alice".to_string(), Some(vec![100000])).unwrap();
         assert_eq!(system.current_state.teams.len(), 1);
         assert!(matches!(system.current_state.teams[&team_id].status, TeamStatus::Earner { .. }));
     }
@@ -482,7 +484,7 @@ mod tests {
     fn test_update_team_status() {
         let mut system = BudgetSystem::new();
         let team_id = system.add_team("Team A".to_string(), "Alice".to_string(), None).unwrap();
-        let result = system.update_team_status(team_id, TeamStatus::Earner { trailing_monthly_revenue: vec![100.0] });
+        let result = system.update_team_status(team_id, TeamStatus::Earner { trailing_monthly_revenue: vec![100000] });
         assert!(result.is_ok());
         assert!(matches!(system.current_state.teams[&team_id].status, TeamStatus::Earner { .. }));
     }
@@ -490,11 +492,11 @@ mod tests {
     #[test]
     fn test_update_team_revenue() {
         let mut system = BudgetSystem::new();
-        let team_id = system.add_team("Team A".to_string(), "Alice".to_string(), Some(vec![100.0])).unwrap();
-        let result = system.update_team_revenue(team_id, vec![120.0]);
+        let team_id = system.add_team("Team A".to_string(), "Alice".to_string(), Some(vec![100000])).unwrap();
+        let result = system.update_team_revenue(team_id, vec![120000]);
         assert!(result.is_ok());
         if let TeamStatus::Earner { trailing_monthly_revenue } = &system.current_state.teams[&team_id].status {
-            assert_eq!(trailing_monthly_revenue, &vec![10.0, 120.0]);
+            assert_eq!(trailing_monthly_revenue, &vec![100000, 120000]);
         } else {
             panic!("Team A should be an Earner");
         }
@@ -502,10 +504,10 @@ mod tests {
 
     fn setup_test_teams() -> HashMap<Uuid, Team> {
         let mut teams = HashMap::new();
-        let team_a = Team::new("Team A".to_string(), "Alice".to_string(), Some(vec![100.0, 120.0, 110.0])).unwrap();
-        let team_b = Team::new("Team B".to_string(), "Bob".to_string(), Some(vec![90.0, 95.0, 100.0])).unwrap();
+        let team_a = Team::new("Team A".to_string(), "Alice".to_string(), Some(vec![100000, 120000, 110000])).unwrap();
+        let team_b = Team::new("Team B".to_string(), "Bob".to_string(), Some(vec![90000, 95000, 100000])).unwrap();
         let team_c = Team::new("Team C".to_string(), "Charlie".to_string(), None).unwrap();
-        let team_d = Team::new("Team D".to_string(), "David".to_string(), Some(vec![150.0, 160.0, 170.0])).unwrap();
+        let team_d = Team::new("Team D".to_string(), "David".to_string(), Some(vec![150000, 160000, 170000])).unwrap();
         let team_e = Team::new("Team E".to_string(), "Eve".to_string(), None).unwrap();
         teams.insert(team_a.id, team_a);
         teams.insert(team_b.id, team_b);
@@ -589,7 +591,7 @@ mod tests {
     #[test]
     fn test_raffle_with_fewer_teams_than_seats() {
         let mut teams = HashMap::new();
-        let team_a = Team::new("Team A".to_string(), "Alice".to_string(), Some(vec![100.0])).unwrap();
+        let team_a = Team::new("Team A".to_string(), "Alice".to_string(), Some(vec![100000])).unwrap();
         let team_b = Team::new("Team B".to_string(), "Bob".to_string(), None).unwrap();
         teams.insert(team_a.id, team_a);
         teams.insert(team_b.id, team_b);
