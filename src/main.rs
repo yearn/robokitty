@@ -84,6 +84,12 @@ enum PaymentStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum ProposalStatus {
     Open,
+    Closed,
+    Reopened,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum VoteStatus {
     Approved,
     Rejected,
 }
@@ -104,6 +110,7 @@ struct Proposal {
     title: String,
     url: Option<String>,
     status: ProposalStatus,
+    vote_status: Option<VoteStatus>,
     budget_request_details: Option<BudgetRequestDetails>,
 }
 
@@ -340,10 +347,83 @@ impl BudgetSystem {
 
     fn update_proposal_status(&mut self, id: Uuid, new_status: ProposalStatus) -> Result<(), &'static str> {
         if let Some(proposal) = self.proposals.get_mut(&id) {
-            match new_status {
-                ProposalStatus::Approved => proposal.approve(),
-                ProposalStatus::Rejected => proposal.reject(),
-                ProposalStatus::Open => return Err("Cannot set status back to Open"), // TODO: Support reverting
+           proposal.update_status(new_status);
+            self.save_state();
+            Ok(())
+        } else {
+            Err("Proposal not found")
+        }
+    }
+
+    fn approve(&mut self, id: Uuid) -> Result<(), &'static str> {
+        if let Some(proposal) = self.proposals.get_mut(&id) {
+            if proposal.vote_status.is_some() {
+                return Err("Cannot approve: Proposal already has a vote");
+            }
+            if let Some(details) = &proposal.budget_request_details {
+                if matches!(details.payment_status, Some(PaymentStatus::Paid)) {
+                    return Err("Cannot approve: Proposal is already paid");
+                }
+            }
+            proposal.set_vote_status(VoteStatus::Approved);
+            if proposal.is_budget_request() {
+                if let Some(details) = &mut proposal.budget_request_details {
+                    details.payment_status = Some(PaymentStatus::Unpaid);
+                }
+            }
+            self.save_state();
+            Ok(())
+        } else {
+            Err("Proposal not found")
+        }
+    }
+
+
+    fn reject(&mut self, id: Uuid) -> Result<(), &'static str> {
+        if let Some(proposal) = self.proposals.get_mut(&id) {
+            if let Some(details) = &proposal.budget_request_details {
+                if matches!(details.payment_status, Some(PaymentStatus::Paid)) {
+                    return Err("Cannot reject: Proposal is already paid");
+                }
+            }
+            proposal.set_vote_status(VoteStatus::Rejected);
+            proposal.update_status(ProposalStatus::Closed);
+            self.save_state();
+            Ok(())
+        } else {
+            Err("Proposal not found")
+        }
+    }
+
+    fn reopen(&mut self, id: Uuid) -> Result<(), &'static str> {
+        if let Some(proposal) = self.proposals.get_mut(&id) {
+            match proposal.status {
+                ProposalStatus::Closed => {
+                    proposal.update_status(ProposalStatus::Reopened);
+                    self.save_state();
+                    Ok(())
+                }
+                ProposalStatus::Open => Err("Cannot reopen: Proposal is already open"),
+                ProposalStatus::Reopened => Err("Cannot reopen: Proposal is already reopened"),
+            }
+        } else {
+            Err("Proposal not found")
+        }
+    }
+
+    fn retract_vote(&mut self, id: Uuid) -> Result<(), &'static str> {
+        if let Some(proposal) = self.proposals.get_mut(&id) {
+            if proposal.vote_status.is_none() {
+                return Err("No vote to retract");
+            }
+            if let Some(details) = &proposal.budget_request_details {
+                if matches!(details.payment_status, Some(PaymentStatus::Paid)) {
+                    return Err("Cannot retract vote: Proposal is already paid");
+                }
+            }
+            proposal.remove_vote_status();
+            if let Some(details) = &mut proposal.budget_request_details {
+                details.payment_status = None;
             }
             self.save_state();
             Ok(())
@@ -359,6 +439,21 @@ impl BudgetSystem {
                 self.save_state();
             }
             result
+        } else {
+            Err("Proposal not found")
+        }
+    }
+
+    fn close(&mut self, id: Uuid) -> Result<(), &'static str> {
+        if let Some(proposal) = self.proposals.get_mut(&id) {
+            match proposal.status {
+                ProposalStatus::Open | ProposalStatus::Reopened => {
+                    proposal.update_status(ProposalStatus::Closed);
+                    self.save_state();
+                    Ok(())
+                },
+                ProposalStatus::Closed => Err("Cannot close: Proposal is already closed"),
+            }
         } else {
             Err("Proposal not found")
         }
@@ -531,30 +626,31 @@ impl Proposal {
             title,
             url,
             status: ProposalStatus::Open,
+            vote_status: None,
             budget_request_details,
         }
     }
 
-    fn approve(&mut self) {
-        self.status = ProposalStatus::Approved;
-        if let Some(details) = &mut self.budget_request_details {
-            details.payment_status = Some(PaymentStatus::Unpaid);
-        }
+    fn update_status(&mut self, new_status: ProposalStatus) {
+        self.status = new_status;
     }
 
-    fn reject(&mut self) {
-        self.status = ProposalStatus::Rejected;
+    fn set_vote_status(&mut self, vote_status: VoteStatus) {
+        self.vote_status = Some(vote_status);
+    }
+
+    fn remove_vote_status(&mut self) {
+        self.vote_status = None;
     }
 
     fn mark_as_paid(&mut self) -> Result<(), &'static str> {
-        match (&self.status, &mut self.budget_request_details) {
-            (ProposalStatus::Approved, Some(details)) => {
+        match (&self.status, &self.vote_status, &mut self.budget_request_details) {
+            (_, Some(VoteStatus::Approved), Some(details)) => {
                 details.payment_status = Some(PaymentStatus::Paid);
                 Ok(())
             }
-            (ProposalStatus::Approved, None) => Err("Cannot mark as paid: Not a budget request"),
+            (_, Some(VoteStatus::Approved), None) => Err("Cannot mark as paid: Not a budget request"),
             _ => Err("Cannot mark as paid: Proposal is not approved")
-
         }
     }
 
@@ -568,7 +664,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Initialize the BudgetSystem
     let mut system = BudgetSystem::new();
 
-    // Add teams
+    // Add teams (unchanged)
     let team_a_id = system.add_team("Team A".to_string(), "Alice".to_string(), Some(vec![100000, 120000, 110000]))?;
     let team_b_id = system.add_team("Team B".to_string(), "Bob".to_string(), Some(vec![90000, 95000, 100000]))?;
     let team_c_id = system.add_team("Team C".to_string(), "Charlie".to_string(), None)?;
@@ -580,7 +676,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("- {} ({}): {:?}", team.name, id, team.status);
     }
 
-    // Add a proposal
+    // Add a proposal (unchanged)
     let proposal_id = system.add_proposal(
         "Q3 Budget Request".to_string(),
         Some("https://example.com/proposal".to_string()),
@@ -597,7 +693,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("\nProposal added:");
     println!("{:?}", system.get_proposal(proposal_id).unwrap());
 
-    // Connect to Ethereum node and get randomness
+    // Connect to Ethereum node and get randomness (unchanged)
     let provider = Provider::connect_ipc("/tmp/reth.ipc").await?;
     let client = Arc::new(provider);
     let latest_block = client.get_block_number().await?.as_u64();
@@ -609,21 +705,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
     println!("Block randomness: {}", block_randomness);
 
-    // Conduct a raffle
-    let excluded_teams = vec![team_c_id]; // Exclude Team C for this raffle
+    // Conduct a raffle (unchanged)
+    let excluded_teams = vec![team_c_id];
     let raffle_id = system.conduct_raffle(proposal_id, block_randomness, &excluded_teams)?;
     let raffle = system.raffles.get(&raffle_id).unwrap();
 
     println!("\nRaffle conducted. Results:");
     println!("Total tickets allocated: {}", raffle.tickets.len());
 
-    // Display ticket allocation
+    // Display ticket allocation (unchanged)
     for (id, team) in &raffle.teams {
         let ticket_count = raffle.tickets.iter().filter(|t| t.team_id == *id).count();
         println!("- {} ({}): {} tickets", team.name, id, ticket_count);
     }
 
-    // Select teams
+    // Select teams (unchanged)
     let (counted_voters, uncounted_voters) = raffle.select_teams();
 
     println!("\nSelected teams:");
@@ -636,21 +732,58 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("- {} ({})", raffle.teams[id].name, id);
     }
 
-    // Verify results
+    // Verify results (unchanged)
     println!("\nVerification:");
     println!("Total counted voters: {} (should be {})", counted_voters.len(), raffle.total_counted_seats);
     println!("Max earner seats: {}", raffle.max_earner_seats);
     println!("Excluded team (Team C) in uncounted voters: {}", uncounted_voters.contains(&team_c_id));
 
+    // Demonstrate new proposal management flow
+    println!("\nDemonstrating proposal management flow:");
+
     // Approve the proposal
-    system.update_proposal_status(proposal_id, ProposalStatus::Approved)?;
-    println!("\nProposal approved:");
+    system.approve(proposal_id)?;
+    println!("Proposal approved:");
     println!("{:?}", system.get_proposal(proposal_id).unwrap());
+
+    // Try to approve again (should fail)
+    match system.approve(proposal_id) {
+        Ok(_) => println!("Unexpected: Proposal approved again"),
+        Err(e) => println!("Expected error when approving again: {}", e),
+    }
 
     // Mark the proposal as paid
     system.mark_proposal_as_paid(proposal_id)?;
-    println!("\nProposal marked as paid:");
+    println!("Proposal marked as paid:");
     println!("{:?}", system.get_proposal(proposal_id).unwrap());
+
+    // Try to retract vote (should fail because it's paid)
+    match system.retract_vote(proposal_id) {
+        Ok(_) => println!("Unexpected: Vote retracted on paid proposal"),
+        Err(e) => println!("Expected error when retracting vote on paid proposal: {}", e),
+    }
+
+    // Close the proposal
+    system.close(proposal_id)?;
+    println!("Proposal closed:");
+    println!("{:?}", system.get_proposal(proposal_id).unwrap());
+
+    // Try to reopen (should work)
+    system.reopen(proposal_id)?;
+    println!("Proposal reopened:");
+    println!("{:?}", system.get_proposal(proposal_id).unwrap());
+
+    // Add a new proposal for rejection demonstration
+    let reject_proposal_id = system.add_proposal(
+        "Proposal to be rejected".to_string(),
+        None,
+        None
+    )?;
+
+    // Reject the new proposal
+    system.reject(reject_proposal_id)?;
+    println!("New proposal rejected:");
+    println!("{:?}", system.get_proposal(reject_proposal_id).unwrap());
 
     Ok(())
 }
@@ -861,10 +994,16 @@ mod tests {
         assert_eq!(uncounted_voters.len(), teams.len());
     }
 
+    fn setup_system() -> BudgetSystem {
+        let mut system = BudgetSystem::new();
+        system.add_team("Team A".to_string(), "Alice".to_string(), Some(vec![100000])).unwrap();
+        system
+    }
+
     #[test]
     fn test_add_proposal() {
-        let mut system = BudgetSystem::new();
-        let team_id = system.add_team("Team A".to_string(), "Alice".to_string(), Some(vec![100000])).unwrap();
+        let mut system = setup_system();
+        let team_id = *system.current_state.teams.keys().next().unwrap();
         let proposal_id = system.add_proposal(
             "Test Proposal".to_string(),
             Some("https://example.com".to_string()),
@@ -882,12 +1021,67 @@ mod tests {
         assert_eq!(proposal.title, "Test Proposal");
         assert_eq!(proposal.status, ProposalStatus::Open);
         assert!(proposal.is_budget_request());
+        assert!(proposal.vote_status.is_none());
     }
 
     #[test]
-    fn test_proposal_approval_and_payment() {
-        let mut system = BudgetSystem::new();
-        let team_id = system.add_team("Team A".to_string(), "Alice".to_string(), Some(vec![100000])).unwrap();
+    fn test_approve_proposal() {
+        let mut system = setup_system();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        
+        system.approve(proposal_id).unwrap();
+        let proposal = system.get_proposal(proposal_id).unwrap();
+        assert_eq!(proposal.vote_status, Some(VoteStatus::Approved));
+        assert_eq!(proposal.status, ProposalStatus::Open);
+    }
+
+    #[test]
+    fn test_reject_proposal() {
+        let mut system = setup_system();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        
+        system.reject(proposal_id).unwrap();
+        let proposal = system.get_proposal(proposal_id).unwrap();
+        assert_eq!(proposal.vote_status, Some(VoteStatus::Rejected));
+        assert_eq!(proposal.status, ProposalStatus::Closed);
+    }
+
+    #[test]
+    fn test_close_proposal() {
+        let mut system = setup_system();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        
+        system.close(proposal_id).unwrap();
+        let proposal = system.get_proposal(proposal_id).unwrap();
+        assert_eq!(proposal.status, ProposalStatus::Closed);
+    }
+
+    #[test]
+    fn test_reopen_proposal() {
+        let mut system = setup_system();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        
+        system.close(proposal_id).unwrap();
+        system.reopen(proposal_id).unwrap();
+        let proposal = system.get_proposal(proposal_id).unwrap();
+        assert_eq!(proposal.status, ProposalStatus::Reopened);
+    }
+
+    #[test]
+    fn test_retract_vote() {
+        let mut system = setup_system();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        
+        system.approve(proposal_id).unwrap();
+        system.retract_vote(proposal_id).unwrap();
+        let proposal = system.get_proposal(proposal_id).unwrap();
+        assert!(proposal.vote_status.is_none());
+    }
+
+    #[test]
+    fn test_mark_proposal_as_paid() {
+        let mut system = setup_system();
+        let team_id = *system.current_state.teams.keys().next().unwrap();
         let proposal_id = system.add_proposal(
             "Test Proposal".to_string(),
             None,
@@ -901,13 +1095,88 @@ mod tests {
             })
         ).unwrap();
         
-        system.update_proposal_status(proposal_id, ProposalStatus::Approved).unwrap();
-        let proposal = system.get_proposal(proposal_id).unwrap();
-        assert_eq!(proposal.status, ProposalStatus::Approved);
-        assert_eq!(proposal.budget_request_details.as_ref().unwrap().payment_status, Some(PaymentStatus::Unpaid));
-
+        system.approve(proposal_id).unwrap();
         system.mark_proposal_as_paid(proposal_id).unwrap();
         let proposal = system.get_proposal(proposal_id).unwrap();
         assert_eq!(proposal.budget_request_details.as_ref().unwrap().payment_status, Some(PaymentStatus::Paid));
     }
+
+    #[test]
+    fn test_cannot_approve_already_voted_proposal() {
+        let mut system = setup_system();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        
+        system.approve(proposal_id).unwrap();
+        assert!(system.approve(proposal_id).is_err());
+    }
+
+    #[test]
+    fn test_cannot_reject_paid_proposal() {
+        let mut system = setup_system();
+        let team_id = *system.current_state.teams.keys().next().unwrap();
+        let proposal_id = system.add_proposal(
+            "Test Proposal".to_string(),
+            None,
+            Some(BudgetRequestDetails {
+                team: Some(team_id),
+                request_amount: 50000.0,
+                request_token: "USD".to_string(),
+                start_date: None,
+                end_date: None,
+                payment_status: None,
+            })
+        ).unwrap();
+        
+        system.approve(proposal_id).unwrap();
+        system.mark_proposal_as_paid(proposal_id).unwrap();
+        assert!(system.reject(proposal_id).is_err());
+    }
+
+    #[test]
+    fn test_cannot_retract_vote_on_paid_proposal() {
+        let mut system = setup_system();
+        let team_id = *system.current_state.teams.keys().next().unwrap();
+        let proposal_id = system.add_proposal(
+            "Test Proposal".to_string(),
+            None,
+            Some(BudgetRequestDetails {
+                team: Some(team_id),
+                request_amount: 50000.0,
+                request_token: "USD".to_string(),
+                start_date: None,
+                end_date: None,
+                payment_status: None,
+            })
+        ).unwrap();
+        
+        system.approve(proposal_id).unwrap();
+        system.mark_proposal_as_paid(proposal_id).unwrap();
+        assert!(system.retract_vote(proposal_id).is_err());
+    }
+
+    #[test]
+    fn test_cannot_reopen_open_proposal() {
+        let mut system = setup_system();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        
+        assert!(system.reopen(proposal_id).is_err());
+    }
+
+    #[test]
+    fn test_full_proposal_lifecycle() {
+        let mut system = setup_system();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        
+        // Open -> Approved -> Closed -> Reopened -> Rejected -> Closed
+        system.approve(proposal_id).unwrap();
+        system.close(proposal_id).unwrap();
+        system.reopen(proposal_id).unwrap();
+        system.retract_vote(proposal_id).unwrap();
+        system.reject(proposal_id).unwrap();
+        
+        let proposal = system.get_proposal(proposal_id).unwrap();
+        assert_eq!(proposal.status, ProposalStatus::Closed);
+        assert_eq!(proposal.vote_status, Some(VoteStatus::Rejected));
+    }
+
 }
