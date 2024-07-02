@@ -310,18 +310,17 @@ impl BudgetSystem {
             return Err("Proposal not found");
         }
 
+        // Filter for active teams
         let active_teams: HashMap<Uuid, Team> = self.current_state.teams.iter()
             .filter(|(_, team)| !matches!(team.status, TeamStatus::Inactive))
             .map(|(id, team)| (*id, team.clone()))
             .collect();
 
-        let mut raffle = Raffle::new(
-            proposal_id,
-            &active_teams,
-            excluded_teams,
-            block_randomness
-        );
-
+        if active_teams.is_empty() {
+            return Err("No active teams available for the raffle");
+        }
+        
+        let mut raffle = Raffle::new(proposal_id, &active_teams, excluded_teams, block_randomness)?;
         raffle.allocate_tickets()?;
         raffle.generate_scores()?;
 
@@ -348,10 +347,15 @@ impl BudgetSystem {
             return Err("Earner seats cannot be greater than the total number of seats");
         }
 
+        // Filter for active teams
         let active_teams: HashMap<Uuid, Team> = self.current_state.teams.iter()
             .filter(|(_, team)| !matches!(team.status, TeamStatus::Inactive))
             .map(|(id, team)| (*id, team.clone()))
             .collect();
+
+        if active_teams.is_empty() {
+            return Err("No active teams available for the raffle");
+        }
 
         let mut raffle = Raffle::with_custom_seats(
             proposal_id,
@@ -360,7 +364,7 @@ impl BudgetSystem {
             total_counted_seats,
             max_earner_seats,
             block_randomness
-        );
+        )?;
 
         raffle.allocate_tickets()?;
         raffle.generate_scores()?;
@@ -370,7 +374,82 @@ impl BudgetSystem {
         self.save_state();
 
         Ok(raffle_id)
+        
     }
+
+    fn conduct_raffle_with_custom_allocation(
+        &mut self,
+        proposal_id: Uuid,
+        custom_allocation: Vec<(Uuid, u64)>,
+        excluded_teams: &[Uuid],
+        block_randomness: String
+    ) -> Result<Uuid, &'static str> {
+        if !self.proposals.contains_key(&proposal_id) {
+            return Err("Proposal not found");
+        }
+
+        // Filter for active teams
+        let active_teams: HashMap<Uuid, Team> = self.current_state.teams.iter()
+        .filter(|(_, team)| !matches!(team.status, TeamStatus::Inactive))
+        .map(|(id, team)| (*id, team.clone()))
+        .collect();
+
+        if active_teams.is_empty() {
+            return Err("No active teams available for the raffle");
+        }
+
+        let mut raffle = Raffle::with_custom_allocation(
+            proposal_id,
+            &active_teams,
+            custom_allocation,
+            excluded_teams,
+            block_randomness
+        )?;
+        raffle.generate_scores()?;
+
+        let raffle_id = raffle.id;
+        self.raffles.insert(raffle_id, raffle);
+        self.save_state();
+
+        Ok(raffle_id)
+    }
+
+    fn create_raffle_with_custom_order(
+        &mut self,
+        proposal_id: Uuid,
+        team_order: &[Uuid],
+        excluded_teams: &[Uuid],
+        block_randomness: String
+    ) -> Result<Uuid, &'static str> {
+        if !self.proposals.contains_key(&proposal_id) {
+            return Err("Proposal not found");
+        }
+
+        // Filter for active teams
+        let active_teams: HashMap<Uuid, Team> = self.current_state.teams.iter()
+            .filter(|(_, team)| !matches!(team.status, TeamStatus::Inactive))
+            .map(|(id, team)| (*id, team.clone()))
+            .collect();
+
+        if active_teams.is_empty() {
+            return Err("No active teams available for the raffle");
+        }
+
+        let mut raffle = Raffle::with_custom_team_order(
+            proposal_id,
+            &active_teams,
+            team_order,
+            excluded_teams,
+            block_randomness
+        )?;
+        raffle.generate_scores()?;
+
+        let raffle_id = raffle.id;
+        self.raffles.insert(raffle_id, raffle);
+        self.save_state();
+
+        Ok(raffle_id)
+    }    
 
     fn add_proposal(&mut self, title: String, url: Option<String>, budget_request_details: Option<BudgetRequestDetails>) -> Result<Uuid, &'static str> {
         // Validate dates if present
@@ -538,15 +617,17 @@ impl Raffle {
     const DEFAULT_MAX_EARNER_SEATS: usize = 5;
 
     // Initiates a Raffle with default seat allocations
-    fn new(proposal_id: Uuid, teams: &HashMap<Uuid, Team>, excluded_teams: &[Uuid], block_randomness: String) -> Self {
-        Self::with_custom_seats(
+    fn new(proposal_id: Uuid, teams: &HashMap<Uuid, Team>, excluded_teams: &[Uuid], block_randomness: String) -> Result<Self, &'static str> {
+        let mut raffle = Self::with_custom_seats(
             proposal_id,
             teams,
             excluded_teams,
             Self::DEFAULT_TOTAL_COUNTED_SEATS,
             Self::DEFAULT_MAX_EARNER_SEATS,
             block_randomness
-        )
+        )?;
+        raffle.allocate_tickets()?;
+        Ok(raffle)
     }
     
     // Clones the Teams into Raffle Teams and initiates a Raffle.
@@ -558,7 +639,12 @@ impl Raffle {
         total_counted_seats: usize,
         max_earner_seats: usize,
         block_randomness: String
-    ) -> Self {
+    ) -> Result<Self, &'static str> {
+
+        if max_earner_seats > total_counted_seats {
+            return Err("Max earner seats cannot exceed total counted seats");
+        }
+
         let raffle_teams = teams.iter()
             .filter(|(_, team)| !matches!(team.status, TeamStatus::Inactive))
             .map(|(id, team)| {
@@ -575,7 +661,7 @@ impl Raffle {
             (*id, RaffleTeam { id: *id, name: team.name.clone(), status })
         }).collect();
 
-        Raffle {
+        Ok(Self {
             id: Uuid::new_v4(),
             proposal_id,
             tickets: Vec::new(),
@@ -583,36 +669,14 @@ impl Raffle {
             total_counted_seats,
             max_earner_seats,
             block_randomness,
-        }
+        })
     }
 
     fn allocate_tickets(&mut self) -> Result<(), &'static str> {
         self.tickets.clear();
-        for (id, team) in &self.teams {
-            let ticket_count: Result<u64, &'static str> = match &team.status {
-                RaffleTeamStatus::Earner { trailing_monthly_revenue } => {
-                    if trailing_monthly_revenue.len() > 3 { 
-                        return Err("Trailing monthly revenue cannot exceed 3 entries");
-                    }
-    
-                    let sum: u64 = trailing_monthly_revenue.iter().sum();
-                    let quarterly_average = sum as f64 / 3.0;
-                    let scaled_average = quarterly_average / 1000.0; // Scale down by 1000 for legacy compatibility
-                    let ticket_count = scaled_average.sqrt().floor() as u64;
-    
-                    Ok(ticket_count.max(1))
-                },
-                RaffleTeamStatus::Supporter => Ok(1),
-                RaffleTeamStatus::Excluded => Ok(0),
-            };
-            
-            for _ in 0..ticket_count? {
-                self.tickets.push(RaffleTicket {
-                    team_id: *id,
-                    index: self.tickets.len() as u64,
-                    score: 0.0 // Is set in generate_scores
-                });
-            }
+        let team_ids: Vec<Uuid> = self.teams.keys().cloned().collect();
+        for team_id in team_ids {
+            self.generate_tickets_for_team(team_id)?;
         }
         Ok(())
     }
@@ -662,8 +726,109 @@ impl Raffle {
         );
 
         (counted_voters, uncounted_voters)
+
     }
 
+    fn with_custom_allocation(
+        proposal_id: Uuid,
+        teams: &HashMap<Uuid, Team>,
+        custom_allocation: Vec<(Uuid, u64)>,
+        excluded_teams: &[Uuid],
+        block_randomness: String
+    ) -> Result<Self, &'static str> {
+        let mut raffle = Self::with_custom_seats(
+            proposal_id,
+            teams,
+            excluded_teams,
+            Self::DEFAULT_TOTAL_COUNTED_SEATS,
+            Self::DEFAULT_MAX_EARNER_SEATS,
+            block_randomness
+        )?;
+
+        raffle.tickets.clear();
+        for (team_id, ticket_count) in custom_allocation {
+            if !raffle.teams.contains_key(&team_id) {
+                return Err("Custom allocation includes a team not present in the provided list of teams")
+            }
+            // Check if the team is excluded
+            if excluded_teams.contains(&team_id) {
+                continue; // Skip allocating tickets for excluded teams
+            }
+            for _ in 0..ticket_count {
+                raffle.tickets.push(RaffleTicket::new(team_id, raffle.tickets.len() as u64));
+            }
+        }
+
+        Ok(raffle)
+
+    }
+
+    fn with_custom_team_order(
+        proposal_id: Uuid,
+        teams: &HashMap<Uuid, Team>,
+        team_order: &[Uuid],
+        excluded_teams: &[Uuid],
+        block_randomness: String
+    ) -> Result<Self, &'static str> {
+        let mut raffle = Self::with_custom_seats(
+            proposal_id,
+            teams,
+            excluded_teams,
+            Self::DEFAULT_TOTAL_COUNTED_SEATS, 
+            Self::DEFAULT_MAX_EARNER_SEATS,
+            block_randomness
+        )?;
+
+        raffle.tickets.clear();
+        for &team_id in team_order {
+            raffle.generate_tickets_for_team(team_id);
+        }
+
+        Ok(raffle)
+
+    }
+
+    fn generate_tickets_for_team(&mut self, team_id: Uuid) -> Result<(), &'static str> {
+        if let Some(team) = self.teams.get(&team_id) {
+            let ticket_count = team.calculate_ticket_count()?;
+            for _ in 0..ticket_count {
+                self.tickets.push(RaffleTicket::new(team_id, self.tickets.len() as u64));
+            }
+        }
+        Ok(())
+    }
+
+}
+
+impl RaffleTeam {
+    fn calculate_ticket_count(&self) -> Result<u64, &'static str> {
+        match &self.status {
+            RaffleTeamStatus::Earner { trailing_monthly_revenue } => {
+                if trailing_monthly_revenue.len() > 3 { 
+                    return Err("Trailing monthly revenue cannot exceed 3 entries");
+                }
+        
+                let sum: u64 = trailing_monthly_revenue.iter().sum();
+                let quarterly_average = sum as f64 / 3.0;
+                let scaled_average = quarterly_average / 1000.0; // Scale down by 1000 for legacy compatibility
+                let ticket_count = scaled_average.sqrt().floor() as u64;
+        
+                Ok(ticket_count.max(1))
+            },
+            RaffleTeamStatus::Supporter => Ok(1),
+            RaffleTeamStatus::Excluded => Ok(0),
+        }
+    }
+}
+
+impl RaffleTicket {
+    fn new(team_id: Uuid, index: u64) -> Self {
+        RaffleTicket {
+            team_id,
+            index,
+            score: 0.0,
+        }
+    }
 }
 
 // Takes a seed and an index and deterministically generates 
@@ -1061,23 +1226,18 @@ mod tests {
 
     fn setup_test_teams() -> HashMap<Uuid, Team> {
         let mut teams = HashMap::new();
-        let team_a = Team::new("Team A".to_string(), "Alice".to_string(), Some(vec![100000, 120000, 110000])).unwrap();
-        let team_b = Team::new("Team B".to_string(), "Bob".to_string(), Some(vec![90000, 95000, 100000])).unwrap();
-        let team_c = Team::new("Team C".to_string(), "Charlie".to_string(), None).unwrap();
-        let team_d = Team::new("Team D".to_string(), "David".to_string(), Some(vec![150000, 160000, 170000])).unwrap();
-        let team_e = Team::new("Team E".to_string(), "Eve".to_string(), None).unwrap();
-        teams.insert(team_a.id, team_a);
-        teams.insert(team_b.id, team_b);
-        teams.insert(team_c.id, team_c);
-        teams.insert(team_d.id, team_d);
-        teams.insert(team_e.id, team_e);
+        teams.insert(Uuid::new_v4(), Team::new("Team A".to_string(), "Alice".to_string(), Some(vec![100000, 120000, 110000])).unwrap());
+        teams.insert(Uuid::new_v4(), Team::new("Team B".to_string(), "Bob".to_string(), Some(vec![90000, 95000, 100000])).unwrap());
+        teams.insert(Uuid::new_v4(), Team::new("Team C".to_string(), "Charlie".to_string(), None).unwrap());
+        teams.insert(Uuid::new_v4(), Team::new("Team D".to_string(), "David".to_string(), Some(vec![150000, 160000, 170000])).unwrap());
+        teams.insert(Uuid::new_v4(), Team::new("Team E".to_string(), "Eve".to_string(), None).unwrap());
         teams
     }
 
     #[test]
     fn test_raffle_creation() {
         let teams = setup_test_teams();
-        let raffle = Raffle::new(Uuid::new_v4(), &teams, &[], "test_randomness".to_string());
+        let raffle = Raffle::new(Uuid::new_v4(), &teams, &[], "test_randomness".to_string()).unwrap();
         assert_eq!(raffle.teams.len(), 5);
         assert_eq!(raffle.total_counted_seats, Raffle::DEFAULT_TOTAL_COUNTED_SEATS);
         assert_eq!(raffle.max_earner_seats, Raffle::DEFAULT_MAX_EARNER_SEATS);
@@ -1086,7 +1246,7 @@ mod tests {
     #[test]
     fn test_raffle_with_custom_seats() {
         let teams = setup_test_teams();
-        let raffle = Raffle::with_custom_seats(Uuid::new_v4(), &teams, &[], 9, 6, "test_randomness".to_string());
+        let raffle = Raffle::with_custom_seats(Uuid::new_v4(), &teams, &[], 9, 6, "test_randomness".to_string()).unwrap();
         assert_eq!(raffle.total_counted_seats, 9);
         assert_eq!(raffle.max_earner_seats, 6);
     }
@@ -1098,7 +1258,7 @@ mod tests {
             .filter(|t| t.name == "Team C" || t.name == "Team E")
             .map(|t| t.id)
             .collect();
-        let raffle = Raffle::new(Uuid::new_v4(), &teams, &excluded_teams, "test_randomness".to_string());
+        let raffle = Raffle::new(Uuid::new_v4(), &teams, &excluded_teams, "test_randomness".to_string()).unwrap();
         assert_eq!(raffle.teams.len(), 5);
         assert!(raffle.teams.values().any(|t| t.name == "Team C" && matches!(t.status, RaffleTeamStatus::Excluded)));
         assert!(raffle.teams.values().any(|t| t.name == "Team E" && matches!(t.status, RaffleTeamStatus::Excluded)));
@@ -1107,7 +1267,7 @@ mod tests {
     #[test]
     fn test_ticket_allocation() {
         let teams = setup_test_teams();
-        let mut raffle = Raffle::new(Uuid::new_v4(), &teams, &[], "test_randomness".to_string());
+        let mut raffle = Raffle::new(Uuid::new_v4(), &teams, &[], "test_randomness".to_string()).unwrap();
         raffle.allocate_tickets().unwrap();
         
         // Check if earner teams have more than 1 ticket
@@ -1123,7 +1283,7 @@ mod tests {
     #[test]
     fn test_score_generation() {
         let teams = setup_test_teams();
-        let mut raffle = Raffle::new(Uuid::new_v4(), &teams, &[], "test_randomness".to_string());
+        let mut raffle = Raffle::new(Uuid::new_v4(), &teams, &[], "test_randomness".to_string()).unwrap();
         raffle.allocate_tickets().unwrap();
         raffle.generate_scores().unwrap();
         
@@ -1135,7 +1295,7 @@ mod tests {
     #[test]
     fn test_team_selection() {
         let teams = setup_test_teams();
-        let mut raffle = Raffle::new(Uuid::new_v4(), &teams, &[], "test_randomness".to_string());
+        let mut raffle = Raffle::new(Uuid::new_v4(), &teams, &[], "test_randomness".to_string()).unwrap();
         raffle.allocate_tickets().unwrap();
         raffle.generate_scores().unwrap();
         let (counted_voters, uncounted_voters) = raffle.select_teams();
@@ -1153,7 +1313,7 @@ mod tests {
         teams.insert(team_a.id, team_a);
         teams.insert(team_b.id, team_b);
         
-        let mut raffle = Raffle::new(Uuid::new_v4(), &teams, &[], "test_randomness".to_string());
+        let mut raffle = Raffle::new(Uuid::new_v4(), &teams, &[], "test_randomness".to_string()).unwrap();
         raffle.allocate_tickets().unwrap();
         raffle.generate_scores().unwrap();
         let (counted_voters, uncounted_voters) = raffle.select_teams();
@@ -1167,13 +1327,74 @@ mod tests {
     fn test_raffle_with_all_excluded_teams() {
         let teams = setup_test_teams();
         let excluded_teams: Vec<Uuid> = teams.keys().cloned().collect();
-        let mut raffle = Raffle::new(Uuid::new_v4(), &teams, &excluded_teams, "test_randomness".to_string());
+        let mut raffle = Raffle::new(Uuid::new_v4(), &teams, &excluded_teams, "test_randomness".to_string()).unwrap();
         raffle.allocate_tickets().unwrap();
         raffle.generate_scores().unwrap();
         let (counted_voters, uncounted_voters) = raffle.select_teams();
         
         assert_eq!(counted_voters.len(), 0);
         assert_eq!(uncounted_voters.len(), teams.len());
+    }
+
+    #[test]
+    fn test_raffle_with_custom_allocation() {
+        let teams = setup_test_teams();
+        let custom_allocation: Vec<(Uuid, u64)> = teams.iter().map(|(id, _)| (*id, 2)).collect();
+        let raffle = Raffle::with_custom_allocation(Uuid::new_v4(), &teams, custom_allocation, &[], "test_randomness".to_string()).unwrap();
+        
+        assert_eq!(raffle.tickets.len(), teams.len() * 2);
+        for team_id in teams.keys() {
+            assert_eq!(raffle.tickets.iter().filter(|t| t.team_id == *team_id).count(), 2);
+        }
+    }
+
+    #[test]
+    fn test_raffle_with_custom_team_order() {
+        let teams = setup_test_teams();
+        let team_order: Vec<Uuid> = teams.keys().cloned().collect();
+        let raffle = Raffle::with_custom_team_order(Uuid::new_v4(), &teams, &team_order, &[], "test_randomness".to_string()).unwrap();
+        
+        let mut expected_index = 0;
+        for team_id in team_order {
+            let team_tickets: Vec<_> = raffle.tickets.iter().filter(|t| t.team_id == team_id).collect();
+            assert!(!team_tickets.is_empty());
+            assert_eq!(team_tickets[0].index, expected_index);
+            expected_index += team_tickets.len() as u64;
+        }
+    }
+
+    #[test]
+    fn test_raffle_with_inactive_teams() {
+        let mut teams = setup_test_teams();
+        let inactive_team_id = *teams.keys().next().unwrap();
+        teams.get_mut(&inactive_team_id).unwrap().status = TeamStatus::Inactive;
+
+        let raffle = Raffle::new(Uuid::new_v4(), &teams, &[], "test_randomness".to_string()).unwrap();
+        
+        assert_eq!(raffle.teams.len(), teams.len() - 1);
+        assert!(!raffle.teams.contains_key(&inactive_team_id));
+    }
+
+    #[test]
+    fn test_raffle_team_ticket_count_calculation() {
+        let mut teams = HashMap::new();
+        let team_a = Team::new("Team A".to_string(), "Alice".to_string(), Some(vec![1_000_000])).unwrap();
+        teams.insert(team_a.id, team_a);
+    
+        let raffle = Raffle::new(Uuid::new_v4(), &teams, &[], "test_randomness".to_string()).unwrap();
+    
+        // sqrt(1_000_000 / 1000) = sqrt(1000) ≈ 31.6, which should round down to 31
+        assert_eq!(raffle.tickets.len(), 31);
+    }
+
+    #[test]
+    fn test_raffle_with_excessive_revenue_data() {
+        let mut teams = HashMap::new();
+        let team_a = Team::new("Team A".to_string(), "Alice".to_string(), Some(vec![100000, 120000, 110000, 130000])).unwrap();
+        teams.insert(team_a.id, team_a);
+
+        let result = Raffle::new(Uuid::new_v4(), &teams, &[], "test_randomness".to_string());
+        assert!(result.is_err());
     }
     
     #[test]
@@ -1355,8 +1576,6 @@ mod tests {
         assert_eq!(proposal.status, ProposalStatus::Closed);
         assert_eq!(proposal.resolution, Some(Resolution::Rejected));
     }
-
-    // New tests
 
     #[test]
     fn test_close_with_reason() {
