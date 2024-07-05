@@ -41,7 +41,8 @@ struct BudgetSystem {
     current_state: SystemState,
     history: Vec<SystemState>,
     proposals: HashMap<Uuid, Proposal>,
-    raffles: HashMap<Uuid, Raffle>
+    raffles: HashMap<Uuid, Raffle>,
+    votes: HashMap<Uuid, Vote>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -66,6 +67,12 @@ struct RaffleTicket {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+struct RaffleResult {
+    counted: Vec<Uuid>,
+    uncounted: Vec<Uuid>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct Raffle {
     id: Uuid,
     proposal_id: Uuid,
@@ -74,6 +81,7 @@ struct Raffle {
     total_counted_seats: usize,
     max_earner_seats: usize,
     block_randomness: String,
+    result: Option<RaffleResult>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +124,68 @@ struct Proposal {
     status: ProposalStatus,
     resolution: Option<Resolution>,
     budget_request_details: Option<BudgetRequestDetails>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+enum VoteType {
+    Formal {
+        raffle_id: Uuid,
+        total_eligible_seats: u32,
+        threshold: f64,
+    },
+    Informal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+enum VoteStatus {
+    Open,
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+enum VoteChoice {
+    Yes,
+    No,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+struct VoteCount {
+    yes: u32,
+    no: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum VoteParticipation {
+    Formal {
+        counted: Vec<Uuid>,
+        uncounted: Vec<Uuid>,
+    },
+    Informal(Vec<Uuid>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum VoteResult {
+    Formal {
+        counted: VoteCount,
+        uncounted: VoteCount,
+        passed: bool,
+    },
+    Informal {
+        count: VoteCount,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Vote {
+    id: Uuid,
+    proposal_id: Uuid,
+    vote_type: VoteType,
+    status: VoteStatus,
+    participation: VoteParticipation,
+    result: Option<VoteResult>,
+    opened_at: DateTime<Utc>,
+    closed_at: Option<DateTime<Utc>>,
+    votes: HashMap<Uuid, VoteChoice> // leave private, temporarily stored
 }
 
 impl Team {
@@ -212,6 +282,7 @@ impl BudgetSystem {
             history: Vec::new(),
             proposals: HashMap::new(),
             raffles: HashMap::new(),
+            votes: HashMap::new(),
         }
 
     }
@@ -323,6 +394,7 @@ impl BudgetSystem {
         let mut raffle = Raffle::new(proposal_id, &active_teams, excluded_teams, block_randomness)?;
         raffle.allocate_tickets()?;
         raffle.generate_scores()?;
+        raffle.select_teams();
 
         let raffle_id = raffle.id;
         self.raffles.insert(raffle_id, raffle);
@@ -368,6 +440,7 @@ impl BudgetSystem {
 
         raffle.allocate_tickets()?;
         raffle.generate_scores()?;
+        raffle.select_teams();
 
         let raffle_id = raffle.id;
         self.raffles.insert(raffle_id, raffle);
@@ -406,6 +479,7 @@ impl BudgetSystem {
             block_randomness
         )?;
         raffle.generate_scores()?;
+        raffle.select_teams();
 
         let raffle_id = raffle.id;
         self.raffles.insert(raffle_id, raffle);
@@ -443,6 +517,7 @@ impl BudgetSystem {
             block_randomness
         )?;
         raffle.generate_scores()?;
+        raffle.select_teams();
 
         let raffle_id = raffle.id;
         self.raffles.insert(raffle_id, raffle);
@@ -609,6 +684,107 @@ impl BudgetSystem {
         }
     }
 
+    fn create_formal_vote(&mut self, proposal_id: Uuid, raffle_id: Uuid, threshold: Option<f64>) -> Result<Uuid, &'static str> {
+        let proposal = self.proposals.get(&proposal_id)
+            .ok_or("Proposal not found")?;
+
+        if !proposal.is_actionable() {
+            return Err("Proposal is not in a votable state");
+        }
+
+        let raffle = &self.raffles.get(&raffle_id)
+            .ok_or("Raffle not found")?;
+
+        if raffle.result.is_none() {
+            return Err("Raffle results have not been generated")
+        }
+
+        let vote = Vote::new_formal(
+            proposal_id,
+            raffle_id, 
+            raffle.total_counted_seats as u32,
+            threshold
+        );
+        let vote_id = vote.id;
+        self.votes.insert(vote_id, vote);
+        self.save_state();
+        Ok(vote_id)
+    }
+
+    fn create_informal_vote(&mut self, proposal_id: Uuid) -> Result<Uuid, &'static str> {
+        let proposal = self.proposals.get(&proposal_id)
+            .ok_or("Proposal not found")?;
+
+        if !proposal.is_actionable() {
+            return Err("Proposal is not in a votable state");
+        }
+
+        let vote = Vote::new_informal(proposal_id);
+        let vote_id = vote.id;
+        self.votes.insert(vote_id, vote);
+        self.save_state();
+        Ok(vote_id)
+    }
+
+    fn cast_votes(&mut self, vote_id: Uuid, votes: Vec<(Uuid, VoteChoice)>) -> Result<(), &'static str> {
+        let vote = self.votes.get_mut(&vote_id).ok_or("Vote not found")?;
+
+        match &vote.vote_type {
+            VoteType::Formal { raffle_id, .. } => {
+                let raffle = self.raffles.get(raffle_id).ok_or("Associated raffle not found")?;
+                let raffle_result = raffle.result.as_ref().ok_or("Raffle teams have not been selected")?;
+
+                let mut counted_votes = Vec::new();
+                let mut uncounted_votes = Vec::new();
+
+                for (team_id, choice) in votes {
+                    if raffle_result.counted.contains(&team_id) {
+                        counted_votes.push((team_id, choice));
+                    } else if raffle_result.uncounted.contains(&team_id) {
+                        uncounted_votes.push((team_id, choice));
+                    }
+                    // Votes from teams not in the raffle result are silently ignored
+                }
+
+                vote.cast_counted_votes(&counted_votes)?;
+                vote.cast_uncounted_votes(&uncounted_votes)?;
+            },
+            VoteType::Informal => {
+                let eligible_votes: Vec<_> = votes.into_iter()
+                    .filter(|(team_id, _)| {
+                        self.current_state.teams.get(team_id)
+                            .map(|team| !matches!(team.status, TeamStatus::Inactive))
+                            .unwrap_or(false)
+                    })
+                    .collect();
+
+                vote.cast_informal_votes(&eligible_votes)?;
+            },
+        }
+
+        self.save_state();
+        Ok(())
+    }
+
+    fn close_vote(&mut self, vote_id: Uuid) -> Result<bool, &'static str> {
+        let vote = self.votes.get_mut(&vote_id).ok_or("Vote not found")?;
+        
+        if vote.status == VoteStatus::Closed {
+            return Err("Vote is already closed");
+        }
+
+        let (proposal_id, vote_type) = (vote.proposal_id, vote.vote_type.clone());
+        let result = vote.close()?;
+
+        // If it's a formal vote and it passed, approve the proposal
+        if result && matches!(vote_type, VoteType::Formal { .. }) {
+            let proposal = self.proposals.get_mut(&proposal_id).ok_or("Associated proposal not found")?;
+            proposal.approve()?;
+        }
+
+        self.save_state();
+        Ok(result)
+    }
 
 }
 
@@ -669,6 +845,7 @@ impl Raffle {
             total_counted_seats,
             max_earner_seats,
             block_randomness,
+            result: None,
         })
     }
 
@@ -688,7 +865,7 @@ impl Raffle {
         Ok(())
     }
 
-    fn select_teams(&self) -> (HashSet<Uuid>, HashSet<Uuid>) {
+    fn select_teams(&mut self) {
         let mut earner_teams: Vec<_> = self.tickets.iter()
             .filter(|ticket| matches!(self.teams[&ticket.team_id].status, RaffleTeamStatus::Earner { .. }))
             .map(|ticket| (ticket.team_id, ticket.score))
@@ -703,29 +880,29 @@ impl Raffle {
         supporter_teams.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         supporter_teams.dedup_by(|a, b| a.0 == b.0);
 
-        let mut counted_voters = HashSet::new();
-        let mut uncounted_voters = HashSet::new();
+        let mut counted = Vec::new();
+        let mut uncounted = Vec::new();
 
         // Select earner teams for counted seats
         let earner_seats = earner_teams.len().min(self.max_earner_seats);
-        counted_voters.extend(earner_teams.iter().take(earner_seats).map(|(id, _)| *id));
+        counted.extend(earner_teams.iter().take(earner_seats).map(|(id, _)| *id));
 
         // Fill remaining counted seats with supporter teams
-        let supporter_seats = self.total_counted_seats - counted_voters.len();
-        counted_voters.extend(supporter_teams.iter().take(supporter_seats).map(|(id, _)| *id));
+        let supporter_seats = self.total_counted_seats - counted.len();
+        counted.extend(supporter_teams.iter().take(supporter_seats).map(|(id, _)| *id));
 
         // Assign remaining teams to uncounted voters
-        uncounted_voters.extend(earner_teams.iter().skip(earner_seats).map(|(id, _)| *id));
-        uncounted_voters.extend(supporter_teams.iter().skip(supporter_seats).map(|(id, _)| *id));
+        uncounted.extend(earner_teams.iter().skip(earner_seats).map(|(id, _)| *id));
+        uncounted.extend(supporter_teams.iter().skip(supporter_seats).map(|(id, _)| *id));
 
         // Add excluded teams to uncounted voters
-        uncounted_voters.extend(
+        uncounted.extend(
             self.teams.iter()
                 .filter(|(_, team)| matches!(team.status, RaffleTeamStatus::Excluded))
                 .map(|(id, _)| *id)
         );
 
-        (counted_voters, uncounted_voters)
+        self.result = Some(RaffleResult { counted, uncounted });
 
     }
 
@@ -897,140 +1074,307 @@ impl Proposal {
     fn is_budget_request(&self) -> bool {
         self.budget_request_details.is_some()
     }
+
+    fn is_actionable(&self) -> bool {
+        matches!(self.status, ProposalStatus::Open | ProposalStatus::Reopened)
+    }
+
+    fn approve(&mut self) -> Result<(), &'static str> {
+        if self.status != ProposalStatus::Open && self.status != ProposalStatus::Reopened {
+            return Err("Proposal is not in a state that can be approved");
+        }
+
+        self.status = ProposalStatus::Closed;
+        self.resolution = Some(Resolution::Approved);
+        Ok(())
+    }
+    
+}
+
+impl Vote {
+    const DEFAULT_QUALIFIED_MAJORITY_THRESHOLD:f64 = 0.7;
+
+    fn new_formal(proposal_id: Uuid, raffle_id: Uuid, total_eligible_seats: u32, threshold: Option<f64>) -> Self {
+        Vote {
+            id: Uuid::new_v4(),
+            proposal_id,
+            vote_type: VoteType::Formal {
+                raffle_id,
+                total_eligible_seats,
+                threshold: threshold.unwrap_or(Self::DEFAULT_QUALIFIED_MAJORITY_THRESHOLD),
+            },
+            status: VoteStatus::Open,
+            participation: VoteParticipation::Formal {
+                counted: Vec::new(),
+                uncounted: Vec::new(),
+            },
+            result: None,
+            opened_at: Utc::now(),
+            closed_at: None,
+            votes: HashMap::new(),
+        }
+    }
+
+    fn new_informal(proposal_id: Uuid) -> Self {
+        Vote {
+            id: Uuid::new_v4(),
+            proposal_id,
+            vote_type: VoteType::Informal,
+            status: VoteStatus::Open,
+            participation: VoteParticipation::Informal(Vec::new()),
+            result: None,
+            opened_at: Utc::now(),
+            closed_at: None,
+            votes: HashMap::new(),
+        }
+    }
+
+    fn cast_counted_votes(&mut self, votes: &[(Uuid, VoteChoice)]) -> Result<(), &'static str> {
+        if self.status != VoteStatus::Open {
+            return Err("Vote is not open");
+        }
+
+        if let VoteType::Formal { .. } = self.vote_type {
+            for &(team_id, choice) in votes {
+                self.votes.insert(team_id, choice);
+                if let VoteParticipation::Formal { counted, .. } = &mut self.participation {
+                    if !counted.contains(&team_id) {
+                        counted.push(team_id);
+                    }
+                }
+            }
+            Ok(())
+        } else {
+            Err("This is not a formal vote")
+        }
+    }
+
+    fn cast_uncounted_votes(&mut self, votes: &[(Uuid, VoteChoice)]) -> Result<(), &'static str> {
+        if self.status != VoteStatus::Open {
+            return Err("Vote is not open");
+        }
+
+        if let VoteType::Formal { .. } = self.vote_type {
+            for &(team_id, choice) in votes {
+                self.votes.insert(team_id, choice);
+                if let VoteParticipation::Formal { uncounted, .. } = &mut self.participation {
+                    if !uncounted.contains(&team_id) {
+                        uncounted.push(team_id);
+                    }
+                }
+            }
+            Ok(())
+        } else {
+            Err("This is not a formal vote")
+        }
+    }
+
+    fn cast_informal_votes(&mut self, votes: &[(Uuid, VoteChoice)]) -> Result<(), &'static str> {
+        if self.status != VoteStatus::Open {
+            return Err("Vote is not open");
+        }
+
+        if let VoteType::Informal = self.vote_type {
+            for &(team_id, choice) in votes {
+                self.votes.insert(team_id, choice);
+                if let VoteParticipation::Informal(participants) = &mut self.participation {
+                    if !participants.contains(&team_id) {
+                        participants.push(team_id);
+                    }
+                }
+            }
+            Ok(())
+        } else {
+            Err("This is not an informal vote")
+        }
+    }
+
+    fn count_votes(&self) -> VoteCount {
+        let mut count = VoteCount::default();
+        for &choice in self.votes.values() {
+            match choice {
+                VoteChoice::Yes => count.yes += 1,
+                VoteChoice::No => count.no += 1,
+            }
+        }
+        count
+    }
+
+    fn count_formal_votes(&self) -> (VoteCount, VoteCount) {
+        let mut counted = VoteCount::default();
+        let mut uncounted = VoteCount::default();
+
+        if let VoteParticipation::Formal { counted: counted_participants, uncounted: uncounted_participants } = &self.participation {
+            for (&team_id, &choice) in &self.votes {
+                let target = if counted_participants.contains(&team_id) { &mut counted } else { &mut uncounted };
+                match choice {
+                    VoteChoice::Yes => target.yes += 1,
+                    VoteChoice::No => target.no += 1,
+                }
+            }
+        }
+
+        (counted, uncounted)
+    }
+
+    fn close(&mut self) -> Result<bool, &'static str> {
+        if self.status == VoteStatus::Closed {
+            return Err("Vote is already closed");
+        }
+
+        self.status = VoteStatus::Closed;
+        self.closed_at = Some(Utc::now());
+
+        let result = match &self.vote_type {
+            VoteType::Formal { total_eligible_seats, threshold, .. } => {
+                let counted_yes = self.votes.iter()
+                    .filter(|(&team_id, &choice)| {
+                        if let VoteParticipation::Formal { counted, .. } = &self.participation {
+                            counted.contains(&team_id) && choice == VoteChoice::Yes
+                        } else {
+                            false
+                        }
+                    })
+                    .count() as f64;
+
+                let passed = counted_yes / *total_eligible_seats as f64 >= *threshold;
+                
+                let counted = VoteCount {
+                    yes: counted_yes as u32,
+                    no: *total_eligible_seats as u32 - counted_yes as u32,
+                };
+                
+                let uncounted = VoteCount {
+                    yes: self.votes.iter()
+                        .filter(|(&team_id, &choice)| {
+                            if let VoteParticipation::Formal { uncounted, .. } = &self.participation {
+                                uncounted.contains(&team_id) && choice == VoteChoice::Yes
+                            } else {
+                                false
+                            }
+                        })
+                        .count() as u32,
+                    no: self.votes.iter()
+                        .filter(|(&team_id, &choice)| {
+                            if let VoteParticipation::Formal { uncounted, .. } = &self.participation {
+                                uncounted.contains(&team_id) && choice == VoteChoice::No
+                            } else {
+                                false
+                            }
+                        })
+                        .count() as u32,
+                };
+
+                self.result = Some(VoteResult::Formal {
+                    counted,
+                    uncounted,
+                    passed,
+                });
+
+                passed
+            },
+            VoteType::Informal => {
+                let count = VoteCount {
+                    yes: self.votes.values().filter(|&&choice| choice == VoteChoice::Yes).count() as u32,
+                    no: self.votes.values().filter(|&&choice| choice == VoteChoice::No).count() as u32,
+                };
+
+                self.result = Some(VoteResult::Informal { count });
+
+                false // Informal votes don't automatically pass
+            },
+        };
+
+        self.votes.clear();
+        Ok(result)
+    }
+
+    fn get_result(&self) -> Option<&VoteResult> {
+        self.result.as_ref()
+    }
+    
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Initialize the BudgetSystem
-    let mut system = BudgetSystem::new();
+    let mut budget_system = BudgetSystem::new();
 
-    // Add teams (unchanged)
-    let team_a_id = system.add_team("Team A".to_string(), "Alice".to_string(), Some(vec![100000, 120000, 110000]))?;
-    let team_b_id = system.add_team("Team B".to_string(), "Bob".to_string(), Some(vec![90000, 95000, 100000]))?;
-    let team_c_id = system.add_team("Team C".to_string(), "Charlie".to_string(), None)?;
-    let team_d_id = system.add_team("Team D".to_string(), "David".to_string(), Some(vec![150000, 160000, 170000]))?;
-    let team_e_id = system.add_team("Team E".to_string(), "Eve".to_string(), None)?;
+    // Add teams
+    let team_a = budget_system.add_team("Team A".to_string(), "Alice".to_string(), Some(vec![100000, 120000, 110000]))?;
+    let team_b = budget_system.add_team("Team B".to_string(), "Bob".to_string(), Some(vec![90000, 95000, 100000]))?;
+    let team_c = budget_system.add_team("Team C".to_string(), "Charlie".to_string(), None)?;
+    let team_d = budget_system.add_team("Team D".to_string(), "David".to_string(), Some(vec![150000, 160000, 170000]))?;
+    let team_e = budget_system.add_team("Team E".to_string(), "Eve".to_string(), None)?;
 
-    println!("Teams added to the system:");
-    for (id, team) in &system.current_state.teams {
-        println!("- {} ({}): {:?}", team.name, id, team.status);
-    }
+    println!("Teams added successfully.");
 
-    // Add a proposal
-    let proposal_id = system.add_proposal(
-        "Q3 Budget Request".to_string(),
-        Some("https://example.com/proposal".to_string()),
-        Some(BudgetRequestDetails {
-            team: Some(team_a_id),
-            request_amount: 500000.0,
-            request_token: "USD".to_string(),
-            start_date: Some(NaiveDate::from_ymd_opt(2024, 7, 1).unwrap()),
-            end_date: Some(NaiveDate::from_ymd_opt(2024, 9, 30).unwrap()),
-            payment_status: None,
-        })
+    // Create a proposal
+    let proposal_id = budget_system.add_proposal(
+        "Q3 Budget Allocation".to_string(),
+        Some("https://example.com/q3-budget".to_string()),
+        None
     )?;
+    println!("Proposal created with ID: {}", proposal_id);
 
-    println!("\nProposal added:");
-    println!("{:?}", system.get_proposal(proposal_id).unwrap());
+    // Conduct a raffle
+    let raffle_id = budget_system.conduct_raffle(proposal_id, "random_seed_123".to_string(), &[])?;
+    println!("Raffle conducted with ID: {}", raffle_id);
 
-    // Connect to Ethereum node and get randomness (unchanged)
-    let provider = Provider::connect_ipc("/tmp/reth.ipc").await?;
-    let client = Arc::new(provider);
-    let latest_block = client.get_block_number().await?.as_u64();
-    println!("\nCurrent block height: {}", latest_block);
+    // Create a formal vote
+    let vote_id = budget_system.create_formal_vote(proposal_id, raffle_id, Some(0.7))?;
+    println!("Formal vote created with ID: {}", vote_id);
 
-    let block_randomness = match client.get_block(latest_block).await? {
-        Some(block) => block.mix_hash.map(|h| format!("{:x}", h)).unwrap_or_else(|| "default_randomness".to_string()),
-        None => "default_randomness".to_string(),
-    };
-    println!("Block randomness: {}", block_randomness);
+    // Cast votes
+    let votes = vec![
+        (team_a, VoteChoice::Yes),
+        (team_b, VoteChoice::Yes),
+        (team_c, VoteChoice::No),
+        (team_d, VoteChoice::Yes),
+        (team_e, VoteChoice::No),
+    ];
+    budget_system.cast_votes(vote_id, votes)?;
+    println!("Votes cast successfully.");
 
-    // Conduct a raffle (unchanged)
-    let excluded_teams = vec![team_c_id];
-    let raffle_id = system.conduct_raffle(proposal_id, block_randomness, &excluded_teams)?;
-    let raffle = system.raffles.get(&raffle_id).unwrap();
+    // Close the vote
+    let vote_result = budget_system.close_vote(vote_id)?;
+    println!("Vote closed. Result: {}", if vote_result { "Passed" } else { "Failed" });
 
-    println!("\nRaffle conducted. Results:");
-    println!("Total tickets allocated: {}", raffle.tickets.len());
+    // Check proposal status
+    let proposal = budget_system.get_proposal(proposal_id).ok_or("Proposal not found")?;
+    println!("Proposal status: {:?}", proposal.status);
+    println!("Proposal resolution: {:?}", proposal.resolution);
 
-    // Display ticket allocation (unchanged)
-    for (id, team) in &raffle.teams {
-        let ticket_count = raffle.tickets.iter().filter(|t| t.team_id == *id).count();
-        println!("- {} ({}): {} tickets", team.name, id, ticket_count);
-    }
-
-    // Select teams (unchanged)
-    let (counted_voters, uncounted_voters) = raffle.select_teams();
-
-    println!("\nSelected teams:");
-    println!("Counted voters:");
-    for id in &counted_voters {
-        println!("- {} ({})", raffle.teams[id].name, id);
-    }
-    println!("Uncounted voters:");
-    for id in &uncounted_voters {
-        println!("- {} ({})", raffle.teams[id].name, id);
-    }
-
-    // Demonstrate new proposal management flow
-    println!("\nDemonstrating proposal management flow:");
-
-    // Approve the proposal
-    system.approve(proposal_id)?;
-    println!("Proposal approved:");
-    println!("{:?}", system.get_proposal(proposal_id).unwrap());
-
-    // Try to approve again (should fail)
-    match system.approve(proposal_id) {
-        Ok(_) => println!("Unexpected: Proposal approved again"),
-        Err(e) => println!("Expected error when approving again: {}", e),
-    }
-
-    // Mark the proposal as paid
-    system.mark_proposal_as_paid(proposal_id)?;
-    println!("Proposal marked as paid:");
-    println!("{:?}", system.get_proposal(proposal_id).unwrap());
-
-    // Try to retract resolution (should fail because it's paid)
-    match system.retract_resolution(proposal_id) {
-        Ok(_) => println!("Unexpected: Resolution retracted on paid proposal"),
-        Err(e) => println!("Expected error when retracting resolution on paid proposal: {}", e),
-    }
-
-    // Close the proposal
-    system.close(proposal_id)?;
-    println!("Proposal closed:");
-    println!("{:?}", system.get_proposal(proposal_id).unwrap());
-
-    // Try to reopen (should work)
-    system.reopen(proposal_id)?;
-    println!("Proposal reopened:");
-    println!("{:?}", system.get_proposal(proposal_id).unwrap());
-
-    // Add a new proposal for rejection demonstration
-    let reject_proposal_id = system.add_proposal(
-        "Proposal to be rejected".to_string(),
+    // Create an informal vote for another proposal
+    let informal_proposal_id = budget_system.add_proposal(
+        "Team Building Event".to_string(),
         None,
         None
     )?;
+    let informal_vote_id = budget_system.create_informal_vote(informal_proposal_id)?;
+    println!("Informal vote created with ID: {}", informal_vote_id);
 
-    // Reject the new proposal
-    system.reject(reject_proposal_id)?;
-    println!("New proposal rejected:");
-    println!("{:?}", system.get_proposal(reject_proposal_id).unwrap());
+    // Cast informal votes
+    let informal_votes = vec![
+        (team_a, VoteChoice::Yes),
+        (team_b, VoteChoice::Yes),
+        (team_c, VoteChoice::Yes),
+        (team_d, VoteChoice::No),
+        (team_e, VoteChoice::Yes),
+    ];
+    budget_system.cast_votes(informal_vote_id, informal_votes)?;
+    println!("Informal votes cast successfully.");
 
-    // Demonstrate close_with_reason
-    let another_proposal_id = system.add_proposal(
-        "Another proposal".to_string(),
-        None,
-        None
-    )?;
-    system.close_with_reason(another_proposal_id, Resolution::Invalid)?;
-    println!("Another proposal closed as invalid:");
-    println!("{:?}", system.get_proposal(another_proposal_id).unwrap());
+    // Close the informal vote
+    let informal_vote_result = budget_system.close_vote(informal_vote_id)?;
+    println!("Informal vote closed. Result: {}", if informal_vote_result { "Passed" } else { "Not automatically passed" });
+
+    // Check informal proposal status
+    let informal_proposal = budget_system.get_proposal(informal_proposal_id).ok_or("Informal proposal not found")?;
+    println!("Informal proposal status: {:?}", informal_proposal.status);
+    println!("Informal proposal resolution: {:?}", informal_proposal.resolution);
 
     Ok(())
-}
+    }
 
 #[cfg(test)]
 mod tests {
@@ -1298,11 +1642,12 @@ mod tests {
         let mut raffle = Raffle::new(Uuid::new_v4(), &teams, &[], "test_randomness".to_string()).unwrap();
         raffle.allocate_tickets().unwrap();
         raffle.generate_scores().unwrap();
-        let (counted_voters, uncounted_voters) = raffle.select_teams();
+        raffle.select_teams();
         
-        assert_eq!(counted_voters.len() + uncounted_voters.len(), teams.len());
-        assert_eq!(counted_voters.len(), Raffle::DEFAULT_TOTAL_COUNTED_SEATS);
-        assert!(counted_voters.len() <= Raffle::DEFAULT_MAX_EARNER_SEATS + 2); // Max earners + min 2 supporters
+        let result = raffle.result.as_ref().unwrap();
+        assert_eq!(result.counted.len() + result.uncounted.len(), teams.len());
+        assert_eq!(result.counted.len(), Raffle::DEFAULT_TOTAL_COUNTED_SEATS);
+        assert!(result.counted.len() <= Raffle::DEFAULT_MAX_EARNER_SEATS + 2); // Max earners + min 2 supporters
     }
 
     #[test]
@@ -1316,11 +1661,12 @@ mod tests {
         let mut raffle = Raffle::new(Uuid::new_v4(), &teams, &[], "test_randomness".to_string()).unwrap();
         raffle.allocate_tickets().unwrap();
         raffle.generate_scores().unwrap();
-        let (counted_voters, uncounted_voters) = raffle.select_teams();
+        raffle.select_teams();
         
-        assert_eq!(counted_voters.len() + uncounted_voters.len(), teams.len());
-        assert_eq!(counted_voters.len(), teams.len());
-        assert_eq!(uncounted_voters.len(), 0);
+        let result = raffle.result.as_ref().unwrap();
+        assert_eq!(result.counted.len() + result.uncounted.len(), teams.len());
+        assert_eq!(result.counted.len(), teams.len());
+        assert_eq!(result.uncounted.len(), 0);
     }
 
     #[test]
@@ -1330,10 +1676,11 @@ mod tests {
         let mut raffle = Raffle::new(Uuid::new_v4(), &teams, &excluded_teams, "test_randomness".to_string()).unwrap();
         raffle.allocate_tickets().unwrap();
         raffle.generate_scores().unwrap();
-        let (counted_voters, uncounted_voters) = raffle.select_teams();
+        raffle.select_teams();
         
-        assert_eq!(counted_voters.len(), 0);
-        assert_eq!(uncounted_voters.len(), teams.len());
+        let result = raffle.result.as_ref().unwrap();
+        assert_eq!(result.counted.len(), 0);
+        assert_eq!(result.uncounted.len(), teams.len());
     }
 
     #[test]
@@ -1395,6 +1742,62 @@ mod tests {
 
         let result = Raffle::new(Uuid::new_v4(), &teams, &[], "test_randomness".to_string());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_raffle_result_generation() {
+        let mut system = setup_system();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let raffle_id = system.conduct_raffle(proposal_id, "test_randomness".to_string(), &[]).unwrap();
+        
+        let raffle = system.raffles.get(&raffle_id).unwrap();
+        assert!(raffle.result.is_some());
+        
+        if let Some(result) = &raffle.result {
+            assert_eq!(result.counted.len() + result.uncounted.len(), system.current_state.teams.len());
+        } else {
+            panic!("Expected raffle result");
+        }
+    }
+
+    #[test]
+    fn test_raffle_with_custom_allocation_and_selection() {
+        let mut system = setup_system();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        
+        let custom_allocation: Vec<(Uuid, u64)> = system.current_state.teams.keys()
+            .map(|&id| (id, 2))
+            .collect();
+        
+        let raffle_id = system.conduct_raffle_with_custom_allocation(
+            proposal_id, 
+            custom_allocation, 
+            &[], 
+            "test_randomness".to_string()
+        ).unwrap();
+        
+        let raffle = system.raffles.get(&raffle_id).unwrap();
+        assert_eq!(raffle.tickets.len(), system.current_state.teams.len() * 2);
+        assert!(raffle.result.is_some());
+    }
+
+    #[test]
+    fn test_raffle_with_custom_team_order_and_selection() {
+        let mut system = setup_system();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        
+        let team_order: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
+        
+        let raffle_id = system.create_raffle_with_custom_order(
+            proposal_id,
+            &team_order,
+            &[],
+            "test_randomness".to_string()
+        ).unwrap();
+        
+        let raffle = system.raffles.get(&raffle_id).unwrap();
+        assert_eq!(raffle.tickets.len(), system.current_state.teams.len());
+        assert!(raffle.result.is_some());
     }
     
     #[test]
@@ -1678,6 +2081,129 @@ mod tests {
         let mut system = setup_system();
         let non_existent_id = Uuid::new_v4();
         assert!(system.close_with_reason(non_existent_id, Resolution::Invalid).is_err());
+    }
+
+    #[test]
+    fn test_create_formal_vote() {
+        let mut system = setup_system();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let raffle_id = system.conduct_raffle(proposal_id, "test_randomness".to_string(), &[]).unwrap();
+        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
+        
+        let vote = system.votes.get(&vote_id).unwrap();
+        assert!(matches!(vote.vote_type, VoteType::Formal { .. }));
+        assert_eq!(vote.status, VoteStatus::Open);
+    }
+
+    #[test]
+    fn test_create_informal_vote() {
+        let mut system = setup_system();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let vote_id = system.create_informal_vote(proposal_id).unwrap();
+        
+        let vote = system.votes.get(&vote_id).unwrap();
+        assert!(matches!(vote.vote_type, VoteType::Informal));
+        assert_eq!(vote.status, VoteStatus::Open);
+    }
+
+    #[test]
+    fn test_cast_formal_votes() {
+        let mut system = setup_system();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let raffle_id = system.conduct_raffle(proposal_id, "test_randomness".to_string(), &[]).unwrap();
+        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
+        
+        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
+        let votes: Vec<(Uuid, VoteChoice)> = team_ids.iter().map(|&id| (id, VoteChoice::Yes)).collect();
+        
+        system.cast_votes(vote_id, votes).unwrap();
+        
+        let vote = system.votes.get(&vote_id).unwrap();
+        if let VoteParticipation::Formal { counted, uncounted } = &vote.participation {
+            assert!(!counted.is_empty() || !uncounted.is_empty());
+        } else {
+            panic!("Expected formal vote participation");
+        }
+    }
+
+    #[test]
+    fn test_cast_informal_votes() {
+        let mut system = setup_system();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let vote_id = system.create_informal_vote(proposal_id).unwrap();
+        
+        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
+        let votes: Vec<(Uuid, VoteChoice)> = team_ids.iter().map(|&id| (id, VoteChoice::Yes)).collect();
+        
+        system.cast_votes(vote_id, votes).unwrap();
+        
+        let vote = system.votes.get(&vote_id).unwrap();
+        if let VoteParticipation::Informal(participants) = &vote.participation {
+            assert!(!participants.is_empty());
+        } else {
+            panic!("Expected informal vote participation");
+        }
+    }
+
+    #[test]
+    fn test_close_formal_vote() {
+        let mut system = setup_system();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let raffle_id = system.conduct_raffle(proposal_id, "test_randomness".to_string(), &[]).unwrap();
+        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
+        
+        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
+        let votes: Vec<(Uuid, VoteChoice)> = team_ids.iter().map(|&id| (id, VoteChoice::Yes)).collect();
+        system.cast_votes(vote_id, votes).unwrap();
+        
+        let result = system.close_vote(vote_id).unwrap();
+        assert!(result);  // Assuming all votes are "Yes", it should pass
+        
+        let vote = system.votes.get(&vote_id).unwrap();
+        assert_eq!(vote.status, VoteStatus::Closed);
+        assert!(vote.result.is_some());
+    }
+
+    #[test]
+    fn test_close_informal_vote() {
+        let mut system = setup_system();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let vote_id = system.create_informal_vote(proposal_id).unwrap();
+        
+        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
+        let votes: Vec<(Uuid, VoteChoice)> = team_ids.iter().map(|&id| (id, VoteChoice::Yes)).collect();
+        system.cast_votes(vote_id, votes).unwrap();
+        
+        let result = system.close_vote(vote_id).unwrap();
+        assert!(!result);  // Informal votes don't automatically pass
+        
+        let vote = system.votes.get(&vote_id).unwrap();
+        assert_eq!(vote.status, VoteStatus::Closed);
+        assert!(vote.result.is_some());
+    }
+
+    #[test]
+    fn test_vote_result_calculation() {
+        let mut system = setup_system();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let raffle_id = system.conduct_raffle(proposal_id, "test_randomness".to_string(), &[]).unwrap();
+        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
+        
+        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
+        let votes: Vec<(Uuid, VoteChoice)> = team_ids.iter().enumerate().map(|(i, &id)| {
+            if i % 2 == 0 { (id, VoteChoice::Yes) } else { (id, VoteChoice::No) }
+        }).collect();
+        system.cast_votes(vote_id, votes).unwrap();
+        
+        system.close_vote(vote_id).unwrap();
+        
+        let vote = system.votes.get(&vote_id).unwrap();
+        if let Some(VoteResult::Formal { counted, uncounted, .. }) = &vote.result {
+            assert_eq!(counted.yes + counted.no, Raffle::DEFAULT_TOTAL_COUNTED_SEATS as u32);
+            assert_eq!(uncounted.yes + uncounted.no, (team_ids.len() - Raffle::DEFAULT_TOTAL_COUNTED_SEATS) as u32);
+        } else {
+            panic!("Expected formal vote result");
+        }
     }
 
 }
