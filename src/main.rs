@@ -27,7 +27,8 @@ struct Team {
     id: Uuid,
     name: String,
     representative: String,
-    status: TeamStatus
+    status: TeamStatus,
+    points: u32,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -199,13 +200,27 @@ enum EpochStatus {
     Closed,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct EpochReward {
+    token: String,
+    amount: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct TeamReward {
+    percentage: f64,
+    amount: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Epoch {
     id: Uuid,
     start_date: DateTime<Utc>,
     end_date: DateTime<Utc>,
     status: EpochStatus,
     associated_proposals: Vec<Uuid>,
+    reward: Option<EpochReward>,
+    team_rewards: HashMap<Uuid, TeamReward>,
 }
 
 impl Team {
@@ -227,7 +242,8 @@ impl Team {
             id: Uuid::new_v4(),
             name,
             representative,
-            status
+            status,
+            points: 0,
         })
     }
 
@@ -287,6 +303,14 @@ impl Team {
         }
         self.status = TeamStatus::Supporter;
         Ok(())
+    }
+
+    fn add_points(&mut self, points: u32) {
+        self.points += points;
+    }
+
+    fn reset_points(&mut self) {
+        self.points = 0;
     }
 
 }
@@ -818,6 +842,13 @@ impl BudgetSystem {
         Ok(())
     }
 
+    fn retract_vote(&mut self, vote_id: Uuid, team_id: Uuid) -> Result<(), &'static str> {
+        let vote = self.votes.get_mut(&vote_id).ok_or("Vote not found")?;
+        vote.retract_vote(&team_id)?;
+        self.save_state();
+        Ok(())
+    }
+
     fn close_vote(&mut self, vote_id: Uuid) -> Result<bool, &'static str> {
         let vote = self.votes.get_mut(&vote_id).ok_or("Vote not found")?;
         
@@ -825,12 +856,27 @@ impl BudgetSystem {
             return Err("Vote is already closed");
         }
 
-        let (proposal_id, vote_type) = (vote.proposal_id, vote.vote_type.clone());
-        let result = vote.close()?;
+        let team_points_option = vote.close()?;
+
+        // If it's a formal vote, add points to team
+        if let Some(team_points) = team_points_option {
+            for (team_id, points) in team_points {
+                if let Some(team) = self.current_state.teams.get_mut(&team_id) {
+                    team.add_points(points);
+                }
+            }
+        }
+
+        let result = match &vote.result {
+            Some(VoteResult::Formal { passed, .. }) => *passed,
+            Some(VoteResult::Informal { .. }) => false,
+            None => return Err("Vote result not available"),
+        };
 
         // If it's a formal vote and it passed, approve the proposal
-        if result && matches!(vote_type, VoteType::Formal { .. }) {
-            let proposal = self.proposals.get_mut(&proposal_id).ok_or("Associated proposal not found")?;
+        if result {
+            let proposal = self.proposals.get_mut(&vote.proposal_id)
+                .ok_or("Associated proposal not found")?;
             proposal.approve()?;
         }
 
@@ -851,6 +897,7 @@ impl BudgetSystem {
 
         let epoch_id = new_epoch.id();
         self.epochs.insert(epoch_id, new_epoch);
+        self.save_state();
         Ok(epoch_id)
     }
 
@@ -867,6 +914,44 @@ impl BudgetSystem {
 
         epoch.status = EpochStatus::Active;
         self.current_epoch = Some(epoch_id);
+
+        // Reset points for all teams
+        for team in self.current_state.teams.values_mut() {
+            team.reset_points();
+        }
+        self.save_state();
+        Ok(())
+    }
+
+    fn set_epoch_reward(&mut self, token: String, amount: f64) -> Result<(), &'static str> {
+        let epoch_id = self.current_epoch.ok_or("No active epoch")?;
+        let epoch = self.epochs.get_mut(&epoch_id).ok_or("Epoch not found")?;
+        
+        epoch.set_reward(token, amount);
+        self.save_state();
+        Ok(())
+    }
+
+    fn calculate_epoch_rewards(&self) -> Result<HashMap<Uuid, TeamReward>, &'static str> {
+        let epoch_id = self.current_epoch.ok_or("No active epoch")?;
+        let epoch = self.epochs.get(&epoch_id).ok_or("Epoch not found")?;
+        
+        epoch.calculate_rewards(&self.current_state.teams)
+    }
+
+    fn close_epoch_with_rewards(&mut self) -> Result<(), &'static str> {
+        let epoch_id = self.current_epoch.ok_or("No active epoch")?;
+        let epoch = self.epochs.get_mut(&epoch_id).ok_or("Epoch not found")?;
+        
+        epoch.close_with_rewards(&self.current_state.teams)?;
+        
+        // Reset points for all teams
+        for team in self.current_state.teams.values_mut() {
+            team.reset_points();
+        }
+
+        self.current_epoch = None;
+        self.save_state();
         Ok(())
     }
 
@@ -874,8 +959,9 @@ impl BudgetSystem {
         let epoch_id = self.current_epoch.ok_or("No active epoch");
         let epoch = self.epochs.get_mut(&epoch_id?).unwrap();
 
-        epoch.status = EpochStatus::Closed;
+        epoch.close_current_epoch();
         self.current_epoch = None;
+        self.save_state();
         Ok(())
     }
 
@@ -889,7 +975,7 @@ impl BudgetSystem {
             .collect()
     }
 
-    pub fn get_proposals_for_epoch(&self, epoch_id: Uuid) -> Vec<&Proposal> {
+    fn get_proposals_for_epoch(&self, epoch_id: Uuid) -> Vec<&Proposal> {
         if let Some(epoch) = self.epochs.get(&epoch_id) {
             epoch.associated_proposals.iter()
                 .filter_map(|&id| self.proposals.get(&id))
@@ -1280,6 +1366,8 @@ impl Proposal {
 
 impl Vote {
     const DEFAULT_QUALIFIED_MAJORITY_THRESHOLD:f64 = 0.7;
+    const COUNTED_VOTE_POINTS: u32 = 5;
+    const UNCOUNTED_VOTE_POINTS: u32 = 2;
 
     fn new_formal(proposal_id: Uuid, epoch_id: Uuid, raffle_id: Uuid, total_eligible_seats: u32, threshold: Option<f64>) -> Self {
         Vote {
@@ -1378,8 +1466,9 @@ impl Vote {
         }
     }
 
-    fn count_votes(&self) -> VoteCount {
-        let mut count = VoteCount::default();
+    fn count_informal_votes(&self) -> VoteCount {
+        let mut count = VoteCount { yes: 0, no: 0 };
+
         for &choice in self.votes.values() {
             match choice {
                 VoteChoice::Yes => count.yes += 1,
@@ -1390,15 +1479,22 @@ impl Vote {
     }
 
     fn count_formal_votes(&self) -> (VoteCount, VoteCount) {
-        let mut counted = VoteCount::default();
-        let mut uncounted = VoteCount::default();
+        let mut counted = VoteCount { yes: 0, no: 0 };
+        let mut uncounted = VoteCount { yes: 0, no: 0 };
 
-        if let VoteParticipation::Formal { counted: counted_participants, uncounted: uncounted_participants } = &self.participation {
+        if let VoteParticipation::Formal { counted: counted_teams, uncounted: uncounted_teams } = &self.participation {
             for (&team_id, &choice) in &self.votes {
-                let target = if counted_participants.contains(&team_id) { &mut counted } else { &mut uncounted };
-                match choice {
-                    VoteChoice::Yes => target.yes += 1,
-                    VoteChoice::No => target.no += 1,
+                if counted_teams.contains(&team_id) {
+                    match choice {
+                        VoteChoice::Yes => counted.yes += 1,
+                        VoteChoice::No => counted.no += 1,
+                    }
+                } else if uncounted_teams.contains(&team_id) {
+                    match choice {
+                        VoteChoice::Yes => uncounted.yes += 1,
+                        VoteChoice::No => uncounted.no += 1,
+                    }
+
                 }
             }
         }
@@ -1406,7 +1502,7 @@ impl Vote {
         (counted, uncounted)
     }
 
-    fn close(&mut self) -> Result<bool, &'static str> {
+    fn close(&mut self) -> Result<Option<HashMap<Uuid, u32>>, &'static str> {
         if self.status == VoteStatus::Closed {
             return Err("Vote is already closed");
         }
@@ -1414,72 +1510,85 @@ impl Vote {
         self.status = VoteStatus::Closed;
         self.closed_at = Some(Utc::now());
 
-        let result = match &self.vote_type {
+        match &self.vote_type {
             VoteType::Formal { total_eligible_seats, threshold, .. } => {
-                let counted_yes = self.votes.iter()
-                    .filter(|(&team_id, &choice)| {
-                        if let VoteParticipation::Formal { counted, .. } = &self.participation {
-                            counted.contains(&team_id) && choice == VoteChoice::Yes
-                        } else {
-                            false
-                        }
-                    })
-                    .count() as f64;
+                let (counted_result, uncounted_result) = self.count_formal_votes();
+                let passed = (counted_result.yes as f64 / *total_eligible_seats as f64) >= *threshold;
 
-                let passed = counted_yes / *total_eligible_seats as f64 >= *threshold;
-                
-                let counted = VoteCount {
-                    yes: counted_yes as u32,
-                    no: *total_eligible_seats as u32 - counted_yes as u32,
-                };
-                
-                let uncounted = VoteCount {
-                    yes: self.votes.iter()
-                        .filter(|(&team_id, &choice)| {
-                            if let VoteParticipation::Formal { uncounted, .. } = &self.participation {
-                                uncounted.contains(&team_id) && choice == VoteChoice::Yes
-                            } else {
-                                false
-                            }
-                        })
-                        .count() as u32,
-                    no: self.votes.iter()
-                        .filter(|(&team_id, &choice)| {
-                            if let VoteParticipation::Formal { uncounted, .. } = &self.participation {
-                                uncounted.contains(&team_id) && choice == VoteChoice::No
-                            } else {
-                                false
-                            }
-                        })
-                        .count() as u32,
-                };
-
-                self.result = Some(VoteResult::Formal {
-                    counted,
-                    uncounted,
+                self.result = Some(VoteResult::Formal { 
+                    counted: counted_result, 
+                    uncounted: uncounted_result,
                     passed,
                 });
 
-                passed
+                let team_points = self.calculate_formal_vote_points();
+                self.votes.clear();
+                Ok(Some(team_points))
             },
             VoteType::Informal => {
-                let count = VoteCount {
-                    yes: self.votes.values().filter(|&&choice| choice == VoteChoice::Yes).count() as u32,
-                    no: self.votes.values().filter(|&&choice| choice == VoteChoice::No).count() as u32,
-                };
-
+                let count = self.count_informal_votes();
                 self.result = Some(VoteResult::Informal { count });
-
-                false // Informal votes don't automatically pass
+                self.votes.clear();
+                Ok(None)
             },
-        };
-
-        self.votes.clear();
-        Ok(result)
+        }
     }
 
     fn get_result(&self) -> Option<&VoteResult> {
         self.result.as_ref()
+    }
+
+    fn add_points_for_vote(&self, team_id: &Uuid) -> u32 {
+        match &self.vote_type {
+            VoteType::Formal { .. } => {
+                if let VoteParticipation:: Formal { counted, uncounted } = &self.participation {
+                    if counted.contains(team_id) {
+                        Self::COUNTED_VOTE_POINTS
+                    } else if uncounted.contains(team_id) {
+                        Self::UNCOUNTED_VOTE_POINTS
+                    } else { 0 }
+                } else { 0 }
+            },
+            VoteType::Informal => 0
+        }
+    }
+
+    fn calculate_formal_vote_points(&self) -> HashMap<Uuid, u32> {
+        let mut team_points = HashMap::new();
+
+        if let VoteParticipation::Formal { counted, uncounted } = &self.participation {
+            for &team_id in counted {
+                if self.votes.contains_key(&team_id) {
+                    team_points.insert(team_id, Self::COUNTED_VOTE_POINTS);
+                }
+            }
+            for &team_id in uncounted {
+                if self.votes.contains_key(&team_id) {
+                    team_points.insert(team_id, Self::UNCOUNTED_VOTE_POINTS);
+                }
+            }
+        }
+        team_points
+    }
+
+    fn retract_vote(&mut self, team_id: &Uuid) -> Result<(), &'static str> {
+        if self.status == VoteStatus::Closed {
+            return Err("Cannot retract vote: Vote is closed");
+        }
+
+        self.votes.remove(team_id);
+
+        match &mut self.participation {
+            VoteParticipation::Formal { counted, uncounted } => {
+                counted.retain(|&id| id != *team_id);
+                uncounted.retain(|&id| id != *team_id);
+            },
+            VoteParticipation::Informal(participants) => {
+                participants.retain(|&id| id != *team_id);
+            },
+        }
+
+        Ok(())
     }
     
 }
@@ -1496,7 +1605,52 @@ impl Epoch {
             end_date,
             status: EpochStatus::Planned,
             associated_proposals: Vec::new(),
+            reward: None,
+            team_rewards: HashMap::new(),
         })
+    }
+
+    fn set_reward(&mut self, token: String, amount: f64) -> Result<(), &'static str> {
+        self.reward = Some(EpochReward { token, amount });
+        Ok(())
+    }
+
+    fn calculate_rewards(&self, teams: &HashMap<Uuid, Team>) -> Result<HashMap<Uuid, TeamReward>, &'static str> {
+        let reward = self.reward.as_ref().ok_or("No reward set for this epoch")?;
+        
+        let total_points: u32 = teams.values().map(|team| team.points).sum();
+        if total_points == 0 {
+            return Err("No points earned in this epoch");
+        }
+
+        let mut rewards = HashMap::new();
+        for (team_id, team) in teams {
+            if team.points > 0 {
+                let percentage = team.points as f64 / total_points as f64;
+                let amount = percentage * reward.amount;
+                rewards.insert(*team_id, TeamReward { percentage, amount });
+            }
+        }
+
+        Ok(rewards)
+    }
+
+    fn close_current_epoch(&mut self) -> Result<(), &'static str> {
+        if self.status != EpochStatus::Active {
+            return Err("Only active epochs can be closed");
+        }
+        self.status = EpochStatus::Closed;
+        Ok(())
+    }
+
+    fn close_with_rewards(&mut self, teams: &HashMap<Uuid, Team>) -> Result<(), &'static str> {
+        if self.status != EpochStatus::Active {
+            return Err("Only active epochs can be closed");
+        }
+
+        self.team_rewards = self.calculate_rewards(teams)?;
+        self.status = EpochStatus::Closed;
+        Ok(())
     }
 
     fn id(&self) -> Uuid {
@@ -1605,6 +1759,43 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let informal_proposal = budget_system.get_proposal(informal_proposal_id).ok_or("Informal proposal not found")?;
     println!("Informal proposal status: {:?}", informal_proposal.status);
     println!("Informal proposal resolution: {:?}", informal_proposal.resolution);
+
+    // Print current points for each team
+    for (team_id, team) in &budget_system.current_state.teams {
+        println!("Team {} points: {}", team.name, team.points);
+    }
+
+    // Set epoch reward
+    budget_system.set_epoch_reward("ETH".to_string(), 100.0)?;
+    println!("Epoch reward set successfully.");
+
+    // Calculate and print epoch rewards
+    let rewards = budget_system.calculate_epoch_rewards()?;
+    for (team_id, reward) in &rewards {
+        let team = budget_system.current_state.teams.get(team_id).unwrap();
+        println!("Team {} reward: {:.2} ETH ({:.2}%)", team.name, reward.amount, reward.percentage * 100.0);
+    }
+
+    // Close the epoch with rewards
+    budget_system.close_epoch_with_rewards()?;
+    println!("Epoch closed with rewards distributed.");
+
+    // Verify that points have been reset after closing the epoch
+    for (team_id, team) in &budget_system.current_state.teams {
+        println!("Team {} points after epoch close: {}", team.name, team.points);
+    }
+
+    // Create and activate a new epoch
+    let new_start_date = end_date + chrono::Duration::seconds(1);
+    let new_end_date = new_start_date + chrono::Duration::days(30);
+    let new_epoch_id = budget_system.create_epoch(new_start_date, new_end_date)?;
+    budget_system.activate_epoch(new_epoch_id)?;
+    println!("New epoch created and activated successfully.");
+
+    // Verify that points are still 0 after activating the new epoch
+    for (team_id, team) in &budget_system.current_state.teams {
+        println!("Team {} points in new epoch: {}", team.name, team.points);
+    }
 
     Ok(())
 }
@@ -2323,67 +2514,6 @@ mod tests {
         assert!(system.close_with_reason(non_existent_id, Resolution::Invalid).is_err());
     }
 
-    #[test]
-    fn test_create_formal_vote() {
-        let (mut system, _) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let raffle_id = system.conduct_raffle(proposal_id, "test_randomness".to_string(), &[]).unwrap();
-        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
-        
-        let vote = system.votes.get(&vote_id).unwrap();
-        assert!(matches!(vote.vote_type, VoteType::Formal { .. }));
-        assert_eq!(vote.status, VoteStatus::Open);
-    }
-
-    #[test]
-    fn test_create_informal_vote() {
-        let (mut system, _) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let vote_id = system.create_informal_vote(proposal_id).unwrap();
-        
-        let vote = system.votes.get(&vote_id).unwrap();
-        assert!(matches!(vote.vote_type, VoteType::Informal));
-        assert_eq!(vote.status, VoteStatus::Open);
-    }
-
-    #[test]
-    fn test_cast_formal_votes() {
-        let (mut system, _) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let raffle_id = system.conduct_raffle(proposal_id, "test_randomness".to_string(), &[]).unwrap();
-        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
-        
-        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
-        let votes: Vec<(Uuid, VoteChoice)> = team_ids.iter().map(|&id| (id, VoteChoice::Yes)).collect();
-        
-        system.cast_votes(vote_id, votes).unwrap();
-        
-        let vote = system.votes.get(&vote_id).unwrap();
-        if let VoteParticipation::Formal { counted, uncounted } = &vote.participation {
-            assert!(!counted.is_empty() || !uncounted.is_empty());
-        } else {
-            panic!("Expected formal vote participation");
-        }
-    }
-
-    #[test]
-    fn test_cast_informal_votes() {
-        let (mut system, _) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let vote_id = system.create_informal_vote(proposal_id).unwrap();
-        
-        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
-        let votes: Vec<(Uuid, VoteChoice)> = team_ids.iter().map(|&id| (id, VoteChoice::Yes)).collect();
-        
-        system.cast_votes(vote_id, votes).unwrap();
-        
-        let vote = system.votes.get(&vote_id).unwrap();
-        if let VoteParticipation::Informal(participants) = &vote.participation {
-            assert!(!participants.is_empty());
-        } else {
-            panic!("Expected informal vote participation");
-        }
-    }
 
     #[test]
     fn test_close_formal_vote() {
@@ -2511,5 +2641,361 @@ mod tests {
         assert_eq!(system.epochs.get(&epoch_1_id).unwrap().status(), &EpochStatus::Closed);
     }
 
+    #[test]
+    fn test_retract_vote() {
+        let (mut system, _) = setup_system_with_epoch();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let raffle_id = system.conduct_raffle(proposal_id, "test_randomness".to_string(), &[]).unwrap();
+        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
+        
+        let team_id = *system.current_state.teams.keys().next().unwrap();
+        system.cast_votes(vote_id, vec![(team_id, VoteChoice::Yes)]).unwrap();
+        
+        assert!(system.retract_vote(vote_id, team_id).is_ok());
+        
+        let vote = system.votes.get(&vote_id).unwrap();
+        assert!(vote.votes.is_empty());
+    }
+
+    #[test]
+    fn test_create_formal_vote() {
+        let (mut system, _) = setup_system_with_epoch();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let raffle_id = system.conduct_raffle(proposal_id, "test_randomness".to_string(), &[]).unwrap();
+        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
+        
+        let vote = system.votes.get(&vote_id).unwrap();
+        assert!(matches!(vote.vote_type, VoteType::Formal { .. }));
+        assert_eq!(vote.status, VoteStatus::Open);
+    }
+
+    #[test]
+    fn test_create_informal_vote() {
+        let (mut system, _) = setup_system_with_epoch();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let vote_id = system.create_informal_vote(proposal_id).unwrap();
+        
+        let vote = system.votes.get(&vote_id).unwrap();
+        assert!(matches!(vote.vote_type, VoteType::Informal));
+        assert_eq!(vote.status, VoteStatus::Open);
+    }
+
+    #[test]
+    fn test_cast_formal_votes() {
+        let (mut system, _) = setup_system_with_epoch();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let raffle_id = system.conduct_raffle(proposal_id, "test_randomness".to_string(), &[]).unwrap();
+        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
+        
+        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
+        let votes: Vec<(Uuid, VoteChoice)> = team_ids.iter().map(|&id| (id, VoteChoice::Yes)).collect();
+        
+        assert!(system.cast_votes(vote_id, votes).is_ok());
+        
+        let vote = system.votes.get(&vote_id).unwrap();
+        match &vote.participation {
+            VoteParticipation::Formal { counted, uncounted } => {
+                assert!(!counted.is_empty() || !uncounted.is_empty());
+            },
+            _ => panic!("Expected formal vote participation"),
+        }
+    }
+
+    #[test]
+    fn test_cast_informal_votes() {
+        let (mut system, _) = setup_system_with_epoch();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let vote_id = system.create_informal_vote(proposal_id).unwrap();
+        
+        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
+        let votes: Vec<(Uuid, VoteChoice)> = team_ids.iter().map(|&id| (id, VoteChoice::Yes)).collect();
+        
+        assert!(system.cast_votes(vote_id, votes).is_ok());
+        
+        let vote = system.votes.get(&vote_id).unwrap();
+        match &vote.participation {
+            VoteParticipation::Informal(participants) => {
+                assert!(!participants.is_empty());
+            },
+            _ => panic!("Expected informal vote participation"),
+        }
+    }
+
+    #[test]
+    fn test_cannot_retract_vote_after_closing() {
+        let (mut system, _) = setup_system_with_epoch();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let raffle_id = system.conduct_raffle(proposal_id, "test_randomness".to_string(), &[]).unwrap();
+        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
+        
+        let team_id = *system.current_state.teams.keys().next().unwrap();
+        system.cast_votes(vote_id, vec![(team_id, VoteChoice::Yes)]).unwrap();
+        
+        system.close_vote(vote_id).unwrap();
+        
+        assert!(system.retract_vote(vote_id, team_id).is_err());
+    }
+
+    #[test]
+    fn test_close_formal_vote_with_points() {
+        let (mut system, _) = setup_system_with_epoch();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let raffle_id = system.conduct_raffle(proposal_id, "test_randomness".to_string(), &[]).unwrap();
+        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
+        
+        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
+        let votes: Vec<(Uuid, VoteChoice)> = team_ids.iter().map(|&id| (id, VoteChoice::Yes)).collect();
+        system.cast_votes(vote_id, votes).unwrap();
+        
+        assert!(system.close_vote(vote_id).unwrap());
+        
+        // Check that points were awarded
+        for team in system.current_state.teams.values() {
+            assert!(team.points > 0);
+        }
+    }
+
+    #[test]
+    fn test_close_informal_vote_no_points() {
+        let (mut system, _) = setup_system_with_epoch();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let vote_id = system.create_informal_vote(proposal_id).unwrap();
+        
+        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
+        let votes: Vec<(Uuid, VoteChoice)> = team_ids.iter().map(|&id| (id, VoteChoice::Yes)).collect();
+        system.cast_votes(vote_id, votes).unwrap();
+        
+        assert!(!system.close_vote(vote_id).unwrap());
+        
+        // Check that no points were awarded
+        for team in system.current_state.teams.values() {
+            assert_eq!(team.points, 0);
+        }
+    }
+
+    #[test]
+    fn test_formal_vote_points_calculation() {
+        let (mut system, _) = setup_system_with_epoch();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let raffle_id = system.conduct_raffle(proposal_id, "test_randomness".to_string(), &[]).unwrap();
+        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
+        
+        let raffle = system.raffles.get(&raffle_id).unwrap();
+        let counted_team_id = raffle.result.as_ref().unwrap().counted[0];
+        let uncounted_team_id = raffle.result.as_ref().unwrap().uncounted[0];
+        
+        system.cast_votes(vote_id, vec![(counted_team_id, VoteChoice::Yes), (uncounted_team_id, VoteChoice::Yes)]).unwrap();
+        
+        system.close_vote(vote_id).unwrap();
+        
+        assert_eq!(system.current_state.teams[&counted_team_id].points, Vote::COUNTED_VOTE_POINTS);
+        assert_eq!(system.current_state.teams[&uncounted_team_id].points, Vote::UNCOUNTED_VOTE_POINTS);
+    }
+
+    #[test]
+    fn test_set_epoch_reward() {
+        let (mut system, epoch_id) = setup_system_with_epoch();
+        assert!(system.set_epoch_reward("ETH".to_string(), 10.0).is_ok());
+        
+        let epoch = system.epochs.get(&epoch_id).unwrap();
+        assert!(epoch.reward.is_some());
+        assert_eq!(epoch.reward.as_ref().unwrap().token, "ETH");
+        assert_eq!(epoch.reward.as_ref().unwrap().amount, 10.0);
+    }
+
+    #[test]
+    fn test_calculate_epoch_rewards() {
+        let (mut system, _) = setup_system_with_epoch();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let raffle_id = system.conduct_raffle(proposal_id, "test_randomness".to_string(), &[]).unwrap();
+        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
+        
+        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
+        let votes: Vec<(Uuid, VoteChoice)> = team_ids.iter().map(|&id| (id, VoteChoice::Yes)).collect();
+        system.cast_votes(vote_id, votes).unwrap();
+        
+        system.close_vote(vote_id).unwrap();
+        
+        system.set_epoch_reward("ETH".to_string(), 10.0).unwrap();
+        
+        let rewards = system.calculate_epoch_rewards().unwrap();
+        assert_eq!(rewards.len(), system.current_state.teams.len());
+        
+        let total_reward: f64 = rewards.values().map(|r| r.amount).sum();
+        assert!((total_reward - 10.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_epoch_transition_resets_points() {
+        let (mut system, _) = setup_system_with_epoch();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let raffle_id = system.conduct_raffle(proposal_id, "test_randomness".to_string(), &[]).unwrap();
+        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
+        
+        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
+        let votes: Vec<(Uuid, VoteChoice)> = team_ids.iter().map(|&id| (id, VoteChoice::Yes)).collect();
+        system.cast_votes(vote_id, votes).unwrap();
+        
+        system.close_vote(vote_id).unwrap();
+        
+        // Create and activate a new epoch
+        let start_date = Utc::now() + Duration::days(31);
+        let end_date = start_date + Duration::days(30);
+        let new_epoch_id = system.create_epoch(start_date, end_date).unwrap();
+        
+        system.close_epoch_with_rewards().unwrap();
+        system.activate_epoch(new_epoch_id).unwrap();
+        
+        // Check that all teams' points are reset
+        for team in system.current_state.teams.values() {
+            assert_eq!(team.points, 0);
+        }
+    }
+
+    #[test]
+    fn test_cannot_set_reward_for_non_existent_epoch() {
+        let mut system = BudgetSystem::new();
+        assert!(system.set_epoch_reward("ETH".to_string(), 10.0).is_err());
+    }
+
+    #[test]
+    fn test_cannot_calculate_rewards_without_set_reward() {
+        let (mut system, _) = setup_system_with_epoch();
+        assert!(system.calculate_epoch_rewards().is_err());
+    }
+
+    #[test]
+    fn test_cannot_calculate_rewards_with_no_points() {
+        let (mut system, _) = setup_system_with_epoch();
+        system.set_epoch_reward("ETH".to_string(), 10.0).unwrap();
+        assert!(system.calculate_epoch_rewards().is_err());
+    }
+
+    #[test]
+    fn test_points_allocation_after_formal_vote() {
+        let (mut system, _) = setup_system_with_epoch();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let raffle_id = system.conduct_raffle(proposal_id, "test_randomness".to_string(), &[]).unwrap();
+        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
+
+        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
+        let votes: Vec<(Uuid, VoteChoice)> = team_ids.iter().map(|&id| (id, VoteChoice::Yes)).collect();
+        
+        system.cast_votes(vote_id, votes).unwrap();
+        system.close_vote(vote_id).unwrap();
+
+        // Check that points were allocated
+        for team in system.current_state.teams.values() {
+            assert!(team.points > 0, "Team {} should have points after voting", team.name);
+        }
+    }
+
+    #[test]
+    fn test_no_points_allocation_after_informal_vote() {
+        let (mut system, _) = setup_system_with_epoch();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let vote_id = system.create_informal_vote(proposal_id).unwrap();
+
+        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
+        let votes: Vec<(Uuid, VoteChoice)> = team_ids.iter().map(|&id| (id, VoteChoice::Yes)).collect();
+        
+        system.cast_votes(vote_id, votes).unwrap();
+        system.close_vote(vote_id).unwrap();
+
+        // Check that no points were allocated
+        for team in system.current_state.teams.values() {
+            assert_eq!(team.points, 0, "Team {} should have no points after informal voting", team.name);
+        }
+    }
+
+    #[test]
+    fn test_points_reset_on_epoch_activation() {
+        let (mut system, _) = setup_system_with_epoch();
+        
+        // Simulate points allocation
+        for team in system.current_state.teams.values_mut() {
+            team.add_points(10);
+        }
+
+        // Create and activate a new epoch
+        let start_date = Utc::now() + chrono::Duration::days(31);
+        let end_date = start_date + chrono::Duration::days(30);
+        let new_epoch_id = system.create_epoch(start_date, end_date).unwrap();
+        system.activate_epoch(new_epoch_id).unwrap();
+
+        // Check that all teams' points are reset
+        for team in system.current_state.teams.values() {
+            assert_eq!(team.points, 0, "Team {} should have 0 points after new epoch activation", team.name);
+        }
+    }
+
+    #[test]
+    fn test_points_calculation_for_counted_and_uncounted_votes() {
+        let (mut system, _) = setup_system_with_epoch();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let raffle_id = system.conduct_raffle(proposal_id, "test_randomness".to_string(), &[]).unwrap();
+        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
+
+        let raffle = system.raffles.get(&raffle_id).unwrap();
+        let counted_team_id = raffle.result.as_ref().unwrap().counted[0];
+        let uncounted_team_id = raffle.result.as_ref().unwrap().uncounted[0];
+        
+        system.cast_votes(vote_id, vec![(counted_team_id, VoteChoice::Yes), (uncounted_team_id, VoteChoice::Yes)]).unwrap();
+        system.close_vote(vote_id).unwrap();
+
+        assert_eq!(system.current_state.teams[&counted_team_id].points, Vote::COUNTED_VOTE_POINTS);
+        assert_eq!(system.current_state.teams[&uncounted_team_id].points, Vote::UNCOUNTED_VOTE_POINTS);
+    }
+
+    #[test]
+    fn test_epoch_reward_calculation() {
+        let (mut system, _) = setup_system_with_epoch();
+        
+        // Simulate points allocation
+        for (i, team) in system.current_state.teams.values_mut().enumerate() {
+            team.add_points((i as u32 + 1) * 5); // 5, 10, 15, 20, 25 points
+        }
+
+        system.set_epoch_reward("ETH".to_string(), 100.0).unwrap();
+        let rewards = system.calculate_epoch_rewards().unwrap();
+
+        let total_points: u32 = system.current_state.teams.values().map(|t| t.points).sum();
+        let total_reward: f64 = rewards.values().map(|r| r.amount).sum();
+
+        assert!((total_reward - 100.0).abs() < f64::EPSILON);
+
+        for (team_id, reward) in rewards {
+            let team = &system.current_state.teams[&team_id];
+            let expected_percentage = team.points as f64 / total_points as f64;
+            let expected_amount = expected_percentage * 100.0;
+            
+            assert!((reward.percentage - expected_percentage).abs() < f64::EPSILON);
+            assert!((reward.amount - expected_amount).abs() < f64::EPSILON);
+        }
+    }
+
+    #[test]
+    fn test_close_epoch_with_rewards() {
+        let (mut system, epoch_id) = setup_system_with_epoch();
+        
+        // Simulate points allocation
+        for (i, team) in system.current_state.teams.values_mut().enumerate() {
+            team.add_points((i as u32 + 1) * 5); // 5, 10, 15, 20, 25 points
+        }
+
+        system.set_epoch_reward("ETH".to_string(), 100.0).unwrap();
+        system.close_epoch_with_rewards().unwrap();
+
+        let closed_epoch = system.epochs.get(&epoch_id).unwrap();
+        assert_eq!(closed_epoch.status, EpochStatus::Closed);
+        assert!(!closed_epoch.team_rewards.is_empty());
+
+        // Check that all teams' points are reset
+        for team in system.current_state.teams.values() {
+            assert_eq!(team.points, 0, "Team points should be reset after closing epoch");
+        }
+
+        assert!(system.current_epoch.is_none());
+    }
 
 }
