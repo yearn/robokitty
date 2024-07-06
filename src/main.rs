@@ -113,8 +113,7 @@ enum Resolution {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct BudgetRequestDetails {
     team: Option<Uuid>,
-    request_amount: f64,
-    request_token: String,
+    request_amounts: HashMap<String, f64>,
     start_date: Option<NaiveDate>,
     end_date: Option<NaiveDate>,
     payment_status: Option<PaymentStatus>,
@@ -602,6 +601,15 @@ impl BudgetSystem {
             // Ensure payment_status is None for new proposals
             if details.payment_status.is_some() {
                 return Err("New proposals should not have a payment status");
+            }
+            // Validate request_amounts
+            if details.request_amounts.is_empty() {
+                return Err("Budget request must include at least one token amount");
+            }
+            for &amount in details.request_amounts.values() {
+                if amount <= 0.0 {
+                    return Err("All requested amounts must be positive");
+                }
             }
         }
     
@@ -1674,6 +1682,46 @@ impl Epoch {
     }
 }
 
+impl BudgetRequestDetails {
+    fn add_token_amount(&mut self, token: String, amount: f64) -> Result<(), &'static str> {
+        if amount <= 0.0 {
+            return Err("Amount must be positive");
+        }
+        self.request_amounts.insert(token, amount);
+        Ok(())
+    }
+
+    fn remove_token(&mut self, token: &str) -> Option<f64> {
+        self.request_amounts.remove(token)
+    }
+
+    fn update_token_amount(&mut self, token: &str, amount: f64) -> Result<(), &'static str> {
+        if amount <= 0.0 {
+            return Err("Amount must be positive");
+        }
+        if let Some(existing_amount) = self.request_amounts.get_mut(token) {
+            *existing_amount = amount;
+            Ok(())
+        } else {
+            Err("Token not found in request")
+        }
+    }
+
+    fn total_value_in(&self, target_token: &str, exchange_rates: &HashMap<String, f64>) -> Result<f64, &'static str> {
+        let mut total = 0.0;
+        for (token, &amount) in &self.request_amounts {
+            if token == target_token {
+                total += amount;
+            } else if let Some(&rate) = exchange_rates.get(token) {
+                total += amount * rate;
+            } else {
+                return Err("Exchange rate not available for token");
+            }
+        }
+        Ok(total)
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let mut budget_system = BudgetSystem::new();
@@ -2235,13 +2283,15 @@ mod tests {
     fn test_add_proposal() {
         let (mut system, _) = setup_system_with_epoch();
         let team_id = *system.current_state.teams.keys().next().unwrap();
+        let mut request_amounts = HashMap::new();
+        request_amounts.insert("USD".to_string(), 50000.0);
+        request_amounts.insert("ETH".to_string(), 10.0);
         let proposal_id = system.add_proposal(
             "Test Proposal".to_string(),
             Some("https://example.com".to_string()),
             Some(BudgetRequestDetails {
                 team: Some(team_id),
-                request_amount: 50000.0,
-                request_token: "USD".to_string(),
+                request_amounts,
                 start_date: Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()),
                 end_date: Some(NaiveDate::from_ymd_opt(2024, 12, 31).unwrap()),
                 payment_status: None,
@@ -2314,13 +2364,15 @@ mod tests {
     fn test_mark_proposal_as_paid() {
         let (mut system, _) = setup_system_with_epoch();
         let team_id = *system.current_state.teams.keys().next().unwrap();
+        let mut request_amounts = HashMap::new();
+        request_amounts.insert("USD".to_string(), 50000.0);
+        request_amounts.insert("ETH".to_string(), 10.0);
         let proposal_id = system.add_proposal(
             "Test Proposal".to_string(),
             None,
             Some(BudgetRequestDetails {
                 team: Some(team_id),
-                request_amount: 50000.0,
-                request_token: "USD".to_string(),
+                request_amounts,
                 start_date: None,
                 end_date: None,
                 payment_status: None,
@@ -2346,13 +2398,15 @@ mod tests {
     fn test_cannot_reject_paid_proposal() {
         let (mut system, _) = setup_system_with_epoch();
         let team_id = *system.current_state.teams.keys().next().unwrap();
+        let mut request_amounts = HashMap::new();
+        request_amounts.insert("USD".to_string(), 50000.0);
+        request_amounts.insert("ETH".to_string(), 10.0);
         let proposal_id = system.add_proposal(
             "Test Proposal".to_string(),
             None,
             Some(BudgetRequestDetails {
                 team: Some(team_id),
-                request_amount: 50000.0,
-                request_token: "USD".to_string(),
+                request_amounts,
                 start_date: None,
                 end_date: None,
                 payment_status: None,
@@ -2368,13 +2422,15 @@ mod tests {
     fn test_cannot_retract_resolution_on_paid_proposal() {
         let (mut system, _) = setup_system_with_epoch();
         let team_id = *system.current_state.teams.keys().next().unwrap();
+        let mut request_amounts = HashMap::new();
+        request_amounts.insert("USD".to_string(), 50000.0);
+        request_amounts.insert("ETH".to_string(), 10.0);
         let proposal_id = system.add_proposal(
             "Test Proposal".to_string(),
             None,
             Some(BudgetRequestDetails {
                 team: Some(team_id),
-                request_amount: 50000.0,
-                request_token: "USD".to_string(),
+                request_amounts,
                 start_date: None,
                 end_date: None,
                 payment_status: None,
@@ -2435,13 +2491,15 @@ mod tests {
     fn test_cannot_close_with_reason_paid_proposal() {
         let (mut system, _) = setup_system_with_epoch();
         let team_id = *system.current_state.teams.keys().next().unwrap();
+        let mut request_amounts = HashMap::new();
+        request_amounts.insert("USD".to_string(), 50000.0);
+        request_amounts.insert("ETH".to_string(), 10.0);
         let proposal_id = system.add_proposal(
             "Test Proposal".to_string(),
             None,
             Some(BudgetRequestDetails {
                 team: Some(team_id),
-                request_amount: 50000.0,
-                request_token: "USD".to_string(),
+                request_amounts,
                 start_date: None,
                 end_date: None,
                 payment_status: None,
@@ -2996,6 +3054,37 @@ mod tests {
         }
 
         assert!(system.current_epoch.is_none());
+    }
+
+    #[test]
+    fn test_budget_request_details_operations() {
+        let mut details = BudgetRequestDetails {
+            team: None,
+            request_amounts: HashMap::new(),
+            start_date: None,
+            end_date: None,
+            payment_status: None,
+        };
+
+        // Test adding token amounts
+        assert!(details.add_token_amount("USD".to_string(), 1000.0).is_ok());
+        assert!(details.add_token_amount("ETH".to_string(), 5.0).is_ok());
+        assert!(details.add_token_amount("BTC".to_string(), -1.0).is_err());
+
+        // Test updating token amounts
+        assert!(details.update_token_amount("USD", 1500.0).is_ok());
+        assert!(details.update_token_amount("XRP", 100.0).is_err());
+
+        // Test removing token
+        assert_eq!(details.remove_token("ETH"), Some(5.0));
+        assert_eq!(details.remove_token("XRP"), None);
+
+        // Test total value calculation
+        let mut exchange_rates = HashMap::new();
+        exchange_rates.insert("USD".to_string(), 1.0);
+        exchange_rates.insert("ETH".to_string(), 2000.0);
+        let total_usd = details.total_value_in("USD", &exchange_rates).unwrap();
+        assert_eq!(total_usd, 1500.0);
     }
 
 }
