@@ -3,7 +3,7 @@ use ethers::prelude::*;
 use serde::{Serialize, Deserialize};
 use sha2::{Sha256, Digest};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     error::Error,
     fs,
     str,
@@ -39,19 +39,21 @@ struct Team {
     points: u32,
 }
 
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-enum RaffleTeamStatus {
-    Earner { trailing_monthly_revenue: Vec<u64> },
-    Supporter,
-    Excluded, // For teams with conflict of interest in a particular Vote
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct RaffleTeam {
+struct TeamSnapshot {
     id: Uuid,
     name: String,
-    status: RaffleTeamStatus,
+    representative: String,
+    status: TeamStatus,
+    points: u32,
+    snapshot_time: DateTime<Utc>,
+    raffle_status: RaffleParticipationStatus,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum RaffleParticipationStatus {
+    Included,
+    Excluded,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -90,7 +92,7 @@ struct RaffleBuilder {
 struct Raffle {
     id: Uuid,
     config: RaffleConfig,
-    teams: HashMap<Uuid, RaffleTeam>,
+    team_snapshots: HashMap<Uuid, TeamSnapshot>,
     tickets: Vec<RaffleTicket>,
     result: Option<RaffleResult>,
 }
@@ -321,6 +323,18 @@ impl Team {
         self.points = 0;
     }
 
+    fn create_snapshot(&self, raffle_status: RaffleParticipationStatus) -> TeamSnapshot {
+        TeamSnapshot {
+            id: self.id,
+            name: self.name.clone(),
+            representative: self.representative.clone(),
+            status: self.status.clone(),
+            points: self.points,
+            snapshot_time: Utc::now(),
+            raffle_status,
+        }
+    }
+
 }
 
 impl RaffleService {
@@ -400,26 +414,22 @@ impl RaffleBuilder {
 
 impl Raffle {
     fn new(config: RaffleConfig, teams: &HashMap<Uuid, Team>) -> Result<Self, &'static str> {
-        let raffle_teams = teams.iter()
+        let team_snapshots = teams.iter()
             .filter(|(_, team)| !matches!(team.status, TeamStatus::Inactive))
             .map(|(id, team)| {
-                let status = if config.excluded_teams.contains(id) {
-                    RaffleTeamStatus::Excluded
+                let raffle_status = if config.excluded_teams.contains(id) {
+                    RaffleParticipationStatus::Excluded
                 } else {
-                    match &team.status {
-                        TeamStatus::Earner { trailing_monthly_revenue } => 
-                            RaffleTeamStatus::Earner { trailing_monthly_revenue: trailing_monthly_revenue.clone() },
-                        TeamStatus::Supporter => RaffleTeamStatus::Supporter,
-                        TeamStatus::Inactive => unreachable!(),
-                    }
+                    RaffleParticipationStatus::Included
                 };
-                (*id, RaffleTeam { id: *id, name: team.name.clone(), status })
-            }).collect();
+                (*id, team.create_snapshot(raffle_status))
+            })
+            .collect();
 
         let mut raffle = Raffle {
             id: Uuid::new_v4(),
             config,
-            teams: raffle_teams,
+            team_snapshots,
             tickets: Vec::new(),
             result: None,
         };
@@ -433,23 +443,25 @@ impl Raffle {
     
         let ticket_allocations: Vec<(Uuid, u64)> = if let Some(custom_allocation) = &self.config.custom_allocation {
             custom_allocation.iter()
-                .filter(|(&team_id, _)| self.teams.contains_key(&team_id) && !self.config.excluded_teams.contains(&team_id))
+                .filter(|(&team_id, _)| self.team_snapshots.contains_key(&team_id) && 
+                    self.team_snapshots[&team_id].raffle_status == RaffleParticipationStatus::Included)
                 .map(|(&team_id, &ticket_count)| (team_id, ticket_count))
                 .collect()
         } else if let Some(custom_order) = &self.config.custom_team_order {
             custom_order.iter()
-                .filter(|&team_id| self.teams.contains_key(team_id) && !self.config.excluded_teams.contains(team_id))
+                .filter(|&team_id| self.team_snapshots.contains_key(team_id) && 
+                    self.team_snapshots[team_id].raffle_status == RaffleParticipationStatus::Included)
                 .filter_map(|&team_id| {
-                    self.teams.get(&team_id)
-                        .and_then(|team| team.calculate_ticket_count().ok())
+                    self.team_snapshots.get(&team_id)
+                        .and_then(|snapshot| snapshot.calculate_ticket_count().ok())
                         .map(|count| (team_id, count))
                 })
                 .collect()
         } else {
-            self.teams.iter()
-                .filter(|(&team_id, _)| !self.config.excluded_teams.contains(&team_id))
-                .filter_map(|(&team_id, team)| {
-                    team.calculate_ticket_count().ok().map(|count| (team_id, count))
+            self.team_snapshots.iter()
+                .filter(|(_, snapshot)| snapshot.raffle_status == RaffleParticipationStatus::Included)
+                .filter_map(|(&team_id, snapshot)| {
+                    snapshot.calculate_ticket_count().ok().map(|count| (team_id, count))
                 })
                 .collect()
         };
@@ -464,7 +476,7 @@ impl Raffle {
     }
 
     fn generate_tickets_for_team(&mut self, team_id: Uuid) -> Result<(), &'static str> {
-        if let Some(team) = self.teams.get(&team_id) {
+        if let Some(team) = self.team_snapshots.get(&team_id) {
             let ticket_count = team.calculate_ticket_count()?;
             for _ in 0..ticket_count {
                 self.tickets.push(RaffleTicket::new(team_id, self.tickets.len() as u64));
@@ -483,14 +495,14 @@ impl Raffle {
 
     fn select_teams(&mut self) {
         let mut earner_teams: Vec<_> = self.tickets.iter()
-            .filter(|ticket| matches!(self.teams[&ticket.team_id].status, RaffleTeamStatus::Earner { .. }))
+            .filter(|ticket| matches!(self.team_snapshots[&ticket.team_id].status, TeamStatus::Earner { .. }))
             .map(|ticket| (ticket.team_id, ticket.score))
             .collect();
         earner_teams.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         earner_teams.dedup_by(|a, b| a.0 == b.0);
 
         let mut supporter_teams: Vec<_> = self.tickets.iter()
-            .filter(|ticket| matches!(self.teams[&ticket.team_id].status, RaffleTeamStatus::Supporter))
+            .filter(|ticket| matches!(self.team_snapshots[&ticket.team_id].status, TeamStatus::Supporter))
             .map(|ticket| (ticket.team_id, ticket.score))
             .collect();
         supporter_teams.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
@@ -509,8 +521,8 @@ impl Raffle {
         uncounted.extend(supporter_teams.iter().skip(supporter_seats).map(|(id, _)| *id));
 
         uncounted.extend(
-            self.teams.iter()
-                .filter(|(_, team)| matches!(team.status, RaffleTeamStatus::Excluded))
+            self.team_snapshots.iter()
+                .filter(|(_, snapshot)| snapshot.raffle_status == RaffleParticipationStatus::Excluded)
                 .map(|(id, _)| *id)
         );
 
@@ -530,10 +542,12 @@ impl Raffle {
     }
 }
 
-impl RaffleTeam {
+impl TeamSnapshot {
     fn calculate_ticket_count(&self) -> Result<u64, &'static str> {
-        match &self.status {
-            RaffleTeamStatus::Earner { trailing_monthly_revenue } => {
+        match self.raffle_status {
+            RaffleParticipationStatus::Excluded => Ok(0),
+            RaffleParticipationStatus::Included => match &self.status {
+                TeamStatus::Earner { trailing_monthly_revenue } => {
                 if trailing_monthly_revenue.len() > 3 { 
                     return Err("Trailing monthly revenue cannot exceed 3 entries");
                 }
@@ -544,10 +558,11 @@ impl RaffleTeam {
                 let ticket_count = scaled_average.sqrt().floor() as u64;
         
                 Ok(ticket_count.max(1))
-            },
-            RaffleTeamStatus::Supporter => Ok(1),
-            RaffleTeamStatus::Excluded => Ok(0),
-        }
+                },
+                TeamStatus::Supporter => Ok(1),
+                TeamStatus::Inactive => Ok(0),
+            }
+         }
     }
 }
 
@@ -1841,7 +1856,10 @@ mod tests {
         
         let raffle = system.raffles.get(&raffle_id).unwrap();
         assert!(raffle.config.excluded_teams.contains(&team_c_id));
-        assert_eq!(raffle.teams.values().filter(|t| t.status == RaffleTeamStatus::Excluded).count(), 1);
+        assert_eq!(
+            raffle.team_snapshots.get(&team_c_id).unwrap().raffle_status,
+            RaffleParticipationStatus::Excluded
+        );
     }
 
     #[test]
@@ -1879,6 +1897,125 @@ mod tests {
         
         let raffle = system.raffles.get(&raffle_id).unwrap();
         assert_eq!(raffle.config.custom_team_order, Some(team_ids));
+    }
+
+    #[test]
+    fn test_team_snapshot_creation() {
+        let (system, _) = setup_system_with_epoch();
+        let team = system.current_state.teams.values().next().unwrap();
+        let snapshot = team.create_snapshot(RaffleParticipationStatus::Included);
+
+        assert_eq!(snapshot.id, team.id);
+        assert_eq!(snapshot.name, team.name);
+        assert_eq!(snapshot.representative, team.representative);
+        assert_eq!(snapshot.status, team.status);
+        assert_eq!(snapshot.points, team.points);
+        assert_eq!(snapshot.raffle_status, RaffleParticipationStatus::Included);
+    }
+
+    #[test]
+    fn test_raffle_ticket_allocation_with_snapshots() {
+        let (mut system, epoch_id) = setup_system_with_epoch();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        
+        let raffle_id = system.create_raffle(
+            RaffleBuilder::new(proposal_id, epoch_id)
+                .with_randomness("test_randomness".to_string())
+        ).unwrap();
+        
+        let raffle = system.raffles.get(&raffle_id).unwrap();
+        
+        let ticket_counts: HashMap<_, _> = raffle.tickets.iter()
+            .fold(HashMap::new(), |mut acc, ticket| {
+                *acc.entry(ticket.team_id).or_insert(0) += 1;
+                acc
+            });
+
+        for (team_id, snapshot) in &raffle.team_snapshots {
+            match snapshot.status {
+                TeamStatus::Earner { .. } => {
+                    assert!(*ticket_counts.get(team_id).unwrap_or(&0) > 1);
+                },
+                TeamStatus::Supporter => {
+                    assert_eq!(*ticket_counts.get(team_id).unwrap_or(&0), 1);
+                },
+                TeamStatus::Inactive => {
+                    assert_eq!(ticket_counts.get(team_id), None);
+                },
+            }
+        }
+    }
+
+    #[test]
+    fn test_raffle_with_inactive_team() {
+        let (mut system, epoch_id) = setup_system_with_epoch();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        
+        // Deactivate one team
+        let team_to_deactivate = system.current_state.teams.values().next().unwrap().id;
+        system.deactivate_team(team_to_deactivate).unwrap();
+        
+        let raffle_id = system.create_raffle(
+            RaffleBuilder::new(proposal_id, epoch_id)
+                .with_randomness("test_randomness".to_string())
+        ).unwrap();
+        
+        let raffle = system.raffles.get(&raffle_id).unwrap();
+        assert!(!raffle.team_snapshots.contains_key(&team_to_deactivate));
+    }
+
+    #[test]
+    fn test_raffle_result_generation_with_snapshots() {
+        let (mut system, epoch_id) = setup_system_with_epoch();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        
+        let raffle_id = system.create_raffle(
+            RaffleBuilder::new(proposal_id, epoch_id)
+                .with_randomness("test_randomness".to_string())
+        ).unwrap();
+        
+        system.conduct_raffle(raffle_id).unwrap();
+        
+        let raffle = system.raffles.get(&raffle_id).unwrap();
+        assert!(raffle.result.is_some());
+        
+        if let Some(result) = &raffle.result {
+            let active_teams = raffle.team_snapshots.values()
+                .filter(|snapshot| snapshot.raffle_status == RaffleParticipationStatus::Included)
+                .count();
+            assert_eq!(result.counted.len() + result.uncounted.len(), active_teams);
+            assert_eq!(result.counted.len(), raffle.config.total_counted_seats);
+        } else {
+            panic!("Expected raffle result");
+        }
+    }
+
+    #[test]
+    fn test_raffle_with_custom_allocation() {
+        let (mut system, epoch_id) = setup_system_with_epoch();
+        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
+        let team_ids: Vec<_> = system.current_state.teams.keys().cloned().collect();
+        let mut custom_allocation = HashMap::new();
+        for (i, id) in team_ids.iter().enumerate() {
+            custom_allocation.insert(*id, (i + 1) as u64);
+        }
+        
+        let raffle_id = system.create_raffle(
+            RaffleBuilder::new(proposal_id, epoch_id)
+                .with_randomness("test_randomness".to_string())
+                .with_custom_allocation(custom_allocation.clone())
+        ).unwrap();
+        
+        let raffle = system.raffles.get(&raffle_id).unwrap();
+        assert_eq!(raffle.config.custom_allocation, Some(custom_allocation.clone()));
+        
+        let total_tickets: u64 = raffle.tickets.iter()
+            .map(|ticket| {
+                custom_allocation.get(&ticket.team_id).cloned().unwrap_or(0)
+            })
+            .sum();
+        
+        assert_eq!(raffle.tickets.len() as u64, total_tickets);
     }
 
     #[test]
@@ -1931,24 +2068,6 @@ mod tests {
                 assert_eq!(*ticket_counts.get(team_id).unwrap_or(&0), 1);
             }
         }
-    }
-
-    #[test]
-    fn test_raffle_with_inactive_team() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        
-        // Deactivate one team
-        let team_to_deactivate = system.current_state.teams.values().next().unwrap().id;
-        system.deactivate_team(team_to_deactivate).unwrap();
-        
-        let raffle_id = system.create_raffle(
-            RaffleBuilder::new(proposal_id, epoch_id)
-                .with_randomness("test_randomness".to_string())
-        ).unwrap();
-        
-        let raffle = system.raffles.get(&raffle_id).unwrap();
-        assert!(!raffle.teams.contains_key(&team_to_deactivate));
     }
 
     #[test]
