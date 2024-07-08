@@ -75,12 +75,15 @@ struct RaffleService;
 struct RaffleConfig {
     proposal_id: Uuid,
     epoch_id: Uuid,
+    initiation_block: u64,
+    randomness_block: u64,
+    block_randomness: String,
     total_counted_seats: usize,
     max_earner_seats: usize,
-    block_randomness: String,
     excluded_teams: Vec<Uuid>,
     custom_allocation: Option<HashMap<Uuid, u64>>,
     custom_team_order: Option<Vec<Uuid>>,
+    is_historical: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -218,6 +221,11 @@ struct EpochReward {
 struct TeamReward {
     percentage: f64,
     amount: f64,
+}
+
+struct EthereumService {
+    client: Arc<Provider<Ipc>>,
+    future_block_offset: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -363,12 +371,15 @@ impl RaffleBuilder {
             config: RaffleConfig {
                 proposal_id,
                 epoch_id,
+                initiation_block: 0,
+                randomness_block: 0,
+                block_randomness: String::new(),
                 total_counted_seats: RaffleConfig::DEFAULT_TOTAL_COUNTED_SEATS,
                 max_earner_seats: RaffleConfig::DEFAULT_MAX_EARNER_SEATS,
-                block_randomness: String::new(),
                 excluded_teams: Vec::new(),
                 custom_allocation: None,
                 custom_team_order: None,
+                is_historical: false,
             },
         }
     }
@@ -379,7 +390,9 @@ impl RaffleBuilder {
         self
     }
 
-    fn with_randomness(mut self, randomness: String) -> Self {
+    fn with_randomness(mut self, initiation_block: u64, randomness_block: u64, randomness: String) -> Self {
+        self.config.initiation_block = initiation_block;
+        self.config.randomness_block = randomness_block;
         self.config.block_randomness = randomness;
         self
     }
@@ -396,6 +409,11 @@ impl RaffleBuilder {
 
     fn with_custom_team_order(mut self, order: Vec<Uuid>) -> Self {
         self.config.custom_team_order = Some(order);
+        self
+    }
+
+    fn historical(mut self) -> Self {
+        self.config.is_historical = true;
         self
     }
 
@@ -981,6 +999,41 @@ impl BudgetRequestDetails {
     }
 }
 
+impl EthereumService {
+    async fn new(ipc_path: &str, future_block_offset: u64) -> Result<Self, Box<dyn std::error::Error>> {
+        let provider = Provider::connect_ipc(ipc_path).await?;
+        Ok(Self {
+            client: Arc::new(provider),
+            future_block_offset,
+        })
+    }
+
+    async fn get_current_block(&self) -> Result<u64, Box<dyn std::error::Error>> {
+        Ok(self.client.get_block_number().await?.as_u64())
+    }
+
+    async fn get_randomness(&self, block_number: u64) -> Result<String, Box<dyn std::error::Error>> {
+        let block = self.client.get_block(block_number).await?
+            .ok_or("Block not found")?;
+        block.mix_hash
+            .ok_or_else(|| "Randomness not found".into())
+            .map(|hash| format!("0x{:x}", hash))
+    }
+
+    async fn get_raffle_randomness(&self) -> Result<(u64, u64, String), Box<dyn std::error::Error>> {
+        let initiation_block = self.get_current_block().await?;
+        let randomness_block = initiation_block + self.future_block_offset;
+
+        // Wait for the randomness block
+        while self.get_current_block().await? < randomness_block {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+
+        let randomness = self.get_randomness(randomness_block).await?;
+
+        Ok((initiation_block, randomness_block, randomness))
+    }
+}
 
 // Main BudgetSystem struct and its methods
 
@@ -991,7 +1044,7 @@ struct SystemState {
 }
 
 #[derive(Serialize, Deserialize)]
-struct BudgetSystem {
+struct BudgetSystemState {
     current_state: SystemState,
     history: Vec<SystemState>,
     proposals: HashMap<Uuid, Proposal>,
@@ -1001,33 +1054,42 @@ struct BudgetSystem {
     current_epoch: Option<Uuid>,
 }
 
-impl BudgetSystem {
-    fn new() -> Self {
-        BudgetSystem {
-            current_state: SystemState {
-                teams: HashMap::new(),
-                timestamp: Utc::now(),
-            },
-            history: Vec::new(),
-            proposals: HashMap::new(),
-            raffles: HashMap::new(),
-            votes: HashMap::new(),
-            epochs: HashMap::new(),
-            current_epoch: None,
-        }
+struct BudgetSystem {
+    state: BudgetSystemState,
+    ethereum_service: Arc<EthereumService>,
+}
 
+impl BudgetSystem {
+    async fn new(ipc_path: &str, future_block_offset: u64) -> Result<Self, Box<dyn std::error::Error>> {
+        let ethereum_service = Arc::new(EthereumService::new(ipc_path, future_block_offset).await?);
+        
+        Ok(Self {
+            state: BudgetSystemState {
+                current_state: SystemState {
+                    teams: HashMap::new(),
+                    timestamp: Utc::now(),
+                },
+                history: Vec::new(),
+                proposals: HashMap::new(),
+                raffles: HashMap::new(),
+                votes: HashMap::new(),
+                epochs: HashMap::new(),
+                current_epoch: None,
+            },
+            ethereum_service,
+        })
     }
 
     fn add_team(&mut self, name: String, representative: String, trailing_monthly_revenue: Option<Vec<u64>>) -> Result<Uuid, &'static str> {
         let team = Team::new(name, representative, trailing_monthly_revenue)?;
         let id = team.id;
-        self.current_state.teams.insert(id, team);
+        self.state.current_state.teams.insert(id, team);
         self.save_state();
         Ok(id)
     }
 
     fn remove_team(&mut self, team_id: Uuid) -> Result<(), &'static str> {
-        if self.current_state.teams.remove(&team_id).is_some() {
+        if self.state.current_state.teams.remove(&team_id).is_some() {
             self.save_state();
             Ok(())
         } else {
@@ -1036,7 +1098,7 @@ impl BudgetSystem {
     }
 
     fn deactivate_team(&mut self, team_id: Uuid) -> Result<(), &'static str> {
-        match self.current_state.teams.get_mut(&team_id) {
+        match self.state.current_state.teams.get_mut(&team_id) {
             Some(team) => {
                 team.deactivate()?;
                 self.save_state();
@@ -1047,7 +1109,7 @@ impl BudgetSystem {
     }
 
     fn reactivate_team(&mut self, team_id: Uuid) -> Result<(), &'static str> {
-        match self.current_state.teams.get_mut(&team_id) {
+        match self.state.current_state.teams.get_mut(&team_id) {
             Some(team) => {
                 team.reactivate()?;
                 self.save_state();
@@ -1058,7 +1120,7 @@ impl BudgetSystem {
     }
 
     fn update_team_status(&mut self, team_id: Uuid, new_status: TeamStatus) -> Result<(), &'static str> {
-        match self.current_state.teams.get_mut(&team_id) {
+        match self.state.current_state.teams.get_mut(&team_id) {
             Some(team) => {
                 team.change_status(new_status)?;
                 self.save_state();
@@ -1069,7 +1131,7 @@ impl BudgetSystem {
     }
 
     fn update_team_representative(&mut self, team_id: Uuid, new_representative: String) -> Result<(), &'static str> {
-        match self.current_state.teams.get_mut(&team_id) {
+        match self.state.current_state.teams.get_mut(&team_id) {
             Some(team) => {
                 team.representative = new_representative;
                 self.save_state();
@@ -1080,7 +1142,7 @@ impl BudgetSystem {
     }
 
     fn update_team_revenue(&mut self, team_id: Uuid, new_revenue: Vec<u64>) -> Result<(), &'static str> {
-        match self.current_state.teams.get_mut(&team_id) {
+        match self.state.current_state.teams.get_mut(&team_id) {
             Some(team) => {
                 team.update_revenue_data(new_revenue)?;
                 self.save_state();
@@ -1090,40 +1152,72 @@ impl BudgetSystem {
         }
     }
 
-    fn save_state(&mut self) {
-        self.current_state.timestamp = Utc::now();
-        self.history.push(self.current_state.clone());
-        let json = serde_json::to_string_pretty(&self).unwrap();
-        fs::write("budget_system.json", json).unwrap();
+    fn save_state(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let json = serde_json::to_string_pretty(&self.state)?;
+        fs::write("budget_system_state.json", json)?;
+        Ok(())
     }
 
-    fn load_from_file() -> Result<Self, Box<dyn std::error::Error>> {
-        let json = fs::read_to_string("budget_system.json")?;
-        let system: BudgetSystem = serde_json::from_str(&json)?;
-        Ok(system)
+    fn load_state(path: &str) -> Result<BudgetSystemState, Box<dyn std::error::Error>> {
+        let json = fs::read_to_string(path)?;
+        let state: BudgetSystemState = serde_json::from_str(&json)?;
+        Ok(state)
+    }
+
+    async fn load_from_file(path: &str, ipc_path: &str, future_block_offset: u64) -> Result<Self, Box<dyn std::error::Error>> {
+        let state = Self::load_state(path)?;
+        let ethereum_service = Arc::new(EthereumService::new(ipc_path, future_block_offset).await?);
+        
+        Ok(Self {
+            state,
+            ethereum_service,
+        })
     }
 
     fn get_state_at(&self, index: usize) -> Option<&SystemState> {
-        self.history.get(index)
+        self.state.history.get(index)
     }
 
-    fn create_raffle(&mut self, builder: RaffleBuilder) -> Result<Uuid, &'static str> {
-        let raffle = builder.build(&self.current_state.teams)?;
+    async fn create_raffle(&mut self, mut builder: RaffleBuilder) -> Result<Uuid, Box<dyn std::error::Error>> {
+        let (initiation_block, randomness_block, randomness) = self.ethereum_service.get_raffle_randomness().await?;
+        
+        let raffle = builder
+            .with_randomness(initiation_block, randomness_block, randomness)
+            .build(&self.state.current_state.teams)?;
+        
         let raffle_id = raffle.id;
-        self.raffles.insert(raffle_id, raffle);
-        self.save_state();
+        self.state.raffles.insert(raffle_id, raffle);
+        self.save_state()?;
+        Ok(raffle_id)
+    }
+
+    async fn create_historical_raffle(
+        &mut self,
+        mut builder: RaffleBuilder,
+        historical_block: u64
+    ) -> Result<Uuid, Box<dyn std::error::Error>> {
+        let randomness = self.ethereum_service.get_randomness(historical_block).await?;
+        
+        let raffle = builder
+            .historical()
+            .with_randomness(historical_block, historical_block, randomness)
+            .build(&self.state.current_state.teams)?;
+        
+        let raffle_id = raffle.id;
+        self.state.raffles.insert(raffle_id, raffle);
+        self.save_state()?;
         Ok(raffle_id)
     }
 
     fn conduct_raffle(&mut self, raffle_id: Uuid) -> Result<(), &'static str> {
-        let raffle = self.raffles.get_mut(&raffle_id).ok_or("Raffle not found")?;
+        let raffle = self.state.raffles.get_mut(&raffle_id).ok_or("Raffle not found")?;
         RaffleService::conduct_raffle(raffle)?;
         self.save_state();
         Ok(())
     }
 
     fn add_proposal(&mut self, title: String, url: Option<String>, budget_request_details: Option<BudgetRequestDetails>) -> Result<Uuid, &'static str> {
-        let current_epoch_id = self.current_epoch.ok_or("No active epoch")?;
+        let current_epoch_id = self.state.current_epoch.ok_or("No active epoch")?;
 
         // Validate dates if present
         if let Some(details) = &budget_request_details {
@@ -1149,9 +1243,9 @@ impl BudgetSystem {
     
         let proposal = Proposal::new(title, url, budget_request_details);
         let proposal_id = proposal.id;
-        self.proposals.insert(proposal_id, proposal);
+        self.state.proposals.insert(proposal_id, proposal);
 
-        if let Some(epoch) = self.epochs.get_mut(&current_epoch_id) {
+        if let Some(epoch) = self.state.epochs.get_mut(&current_epoch_id) {
             epoch.associated_proposals.push(proposal_id);
         } else {
             return Err("Current epoch not found");
@@ -1161,11 +1255,11 @@ impl BudgetSystem {
     }
 
     fn get_proposal(&self, id: Uuid) -> Option<&Proposal> {
-        self.proposals.get(&id)
+        self.state.proposals.get(&id)
     }
 
     fn update_proposal_status(&mut self, id: Uuid, new_status: ProposalStatus) -> Result<(), &'static str> {
-        if let Some(proposal) = self.proposals.get_mut(&id) {
+        if let Some(proposal) = self.state.proposals.get_mut(&id) {
            proposal.update_status(new_status);
             self.save_state();
             Ok(())
@@ -1175,7 +1269,7 @@ impl BudgetSystem {
     }
 
     fn approve(&mut self, id: Uuid) -> Result<(), &'static str> {
-        if let Some(proposal) = self.proposals.get_mut(&id) {
+        if let Some(proposal) = self.state.proposals.get_mut(&id) {
             if proposal.resolution.is_some() {
                 return Err("Cannot approve: Proposal already has a resolution");
             }
@@ -1198,7 +1292,7 @@ impl BudgetSystem {
     }
 
     fn reject(&mut self, id: Uuid) -> Result<(), &'static str> {
-        if let Some(proposal) = self.proposals.get_mut(&id) {
+        if let Some(proposal) = self.state.proposals.get_mut(&id) {
             if let Some(details) = &proposal.budget_request_details {
                 if matches!(details.payment_status, Some(PaymentStatus::Paid)) {
                     return Err("Cannot reject: Proposal is already paid");
@@ -1214,7 +1308,7 @@ impl BudgetSystem {
     }
 
     fn retract_resolution(&mut self, id: Uuid) -> Result<(), &'static str> {
-        if let Some(proposal) = self.proposals.get_mut(&id) {
+        if let Some(proposal) = self.state.proposals.get_mut(&id) {
             if proposal.resolution.is_none() {
                 return Err("No resolution to retract");
             }
@@ -1235,7 +1329,7 @@ impl BudgetSystem {
     }
 
     fn reopen(&mut self, id: Uuid) -> Result<(), &'static str> {
-        if let Some(proposal) = self.proposals.get_mut(&id) {
+        if let Some(proposal) = self.state.proposals.get_mut(&id) {
             match proposal.status {
                 ProposalStatus::Closed => {
                     proposal.update_status(ProposalStatus::Reopened);
@@ -1252,7 +1346,7 @@ impl BudgetSystem {
     }
     
     fn close(&mut self, id: Uuid) -> Result<(), &'static str> {
-        if let Some(proposal) = self.proposals.get_mut(&id) {
+        if let Some(proposal) = self.state.proposals.get_mut(&id) {
             match proposal.status {
                 ProposalStatus::Open | ProposalStatus::Reopened => {
                     proposal.update_status(ProposalStatus::Closed);
@@ -1267,7 +1361,7 @@ impl BudgetSystem {
     }
 
     fn close_with_reason(&mut self, id: Uuid, resolution: Resolution) -> Result<(), &'static str> {
-        if let Some(proposal) = self.proposals.get_mut(&id) {
+        if let Some(proposal) = self.state.proposals.get_mut(&id) {
             if proposal.status == ProposalStatus::Closed {
                 return Err("Proposal is already closed");
             }
@@ -1286,7 +1380,7 @@ impl BudgetSystem {
     }
 
     fn mark_proposal_as_paid(&mut self, id: Uuid) -> Result<(), &'static str> {
-        if let Some(proposal) = self.proposals.get_mut(&id) {
+        if let Some(proposal) = self.state.proposals.get_mut(&id) {
             let result = proposal.mark_as_paid();
             if result.is_ok() {
                 self.save_state();
@@ -1298,16 +1392,16 @@ impl BudgetSystem {
     }
 
     fn create_formal_vote(&mut self, proposal_id: Uuid, raffle_id: Uuid, threshold: Option<f64>) -> Result<Uuid, &'static str> {
-        let current_epoch_id = self.current_epoch.ok_or("No active epoch")?;
+        let current_epoch_id = self.state.current_epoch.ok_or("No active epoch")?;
         
-        let proposal = self.proposals.get(&proposal_id)
+        let proposal = self.state.proposals.get(&proposal_id)
             .ok_or("Proposal not found")?;
 
         if !proposal.is_actionable() {
             return Err("Proposal is not in a votable state");
         }
 
-        let raffle = &self.raffles.get(&raffle_id)
+        let raffle = &self.state.raffles.get(&raffle_id)
             .ok_or("Raffle not found")?;
 
         if raffle.result.is_none() {
@@ -1322,15 +1416,15 @@ impl BudgetSystem {
             threshold
         );
         let vote_id = vote.id;
-        self.votes.insert(vote_id, vote);
+        self.state.votes.insert(vote_id, vote);
         self.save_state();
         Ok(vote_id)
     }
 
     fn create_informal_vote(&mut self, proposal_id: Uuid) -> Result<Uuid, &'static str> {
-        let current_epoch_id = self.current_epoch.ok_or("No active epoch")?;
+        let current_epoch_id = self.state.current_epoch.ok_or("No active epoch")?;
         
-        let proposal = self.proposals.get(&proposal_id)
+        let proposal = self.state.proposals.get(&proposal_id)
             .ok_or("Proposal not found")?;
 
         if !proposal.is_actionable() {
@@ -1339,17 +1433,17 @@ impl BudgetSystem {
 
         let vote = Vote::new_informal(proposal_id, current_epoch_id);
         let vote_id = vote.id;
-        self.votes.insert(vote_id, vote);
+        self.state.votes.insert(vote_id, vote);
         self.save_state();
         Ok(vote_id)
     }
 
     fn cast_votes(&mut self, vote_id: Uuid, votes: Vec<(Uuid, VoteChoice)>) -> Result<(), &'static str> {
-        let vote = self.votes.get_mut(&vote_id).ok_or("Vote not found")?;
+        let vote = self.state.votes.get_mut(&vote_id).ok_or("Vote not found")?;
 
         match &vote.vote_type {
             VoteType::Formal { raffle_id, .. } => {
-                let raffle = self.raffles.get(raffle_id).ok_or("Associated raffle not found")?;
+                let raffle = self.state.raffles.get(raffle_id).ok_or("Associated raffle not found")?;
                 let raffle_result = raffle.result.as_ref().ok_or("Raffle teams have not been selected")?;
 
                 let mut counted_votes = Vec::new();
@@ -1370,7 +1464,7 @@ impl BudgetSystem {
             VoteType::Informal => {
                 let eligible_votes: Vec<_> = votes.into_iter()
                     .filter(|(team_id, _)| {
-                        self.current_state.teams.get(team_id)
+                        self.state.current_state.teams.get(team_id)
                             .map(|team| !matches!(team.status, TeamStatus::Inactive))
                             .unwrap_or(false)
                     })
@@ -1385,14 +1479,14 @@ impl BudgetSystem {
     }
 
     fn retract_vote(&mut self, vote_id: Uuid, team_id: Uuid) -> Result<(), &'static str> {
-        let vote = self.votes.get_mut(&vote_id).ok_or("Vote not found")?;
+        let vote = self.state.votes.get_mut(&vote_id).ok_or("Vote not found")?;
         vote.retract_vote(&team_id)?;
         self.save_state();
         Ok(())
     }
 
     fn close_vote(&mut self, vote_id: Uuid) -> Result<bool, &'static str> {
-        let vote = self.votes.get_mut(&vote_id).ok_or("Vote not found")?;
+        let vote = self.state.votes.get_mut(&vote_id).ok_or("Vote not found")?;
         
         if vote.status == VoteStatus::Closed {
             return Err("Vote is already closed");
@@ -1403,7 +1497,7 @@ impl BudgetSystem {
         // If it's a formal vote, add points to team
         if let Some(team_points) = team_points_option {
             for (team_id, points) in team_points {
-                if let Some(team) = self.current_state.teams.get_mut(&team_id) {
+                if let Some(team) = self.state.current_state.teams.get_mut(&team_id) {
                     team.add_points(points);
                 }
             }
@@ -1417,7 +1511,7 @@ impl BudgetSystem {
 
         // If it's a formal vote and it passed, approve the proposal
         if result {
-            let proposal = self.proposals.get_mut(&vote.proposal_id)
+            let proposal = self.state.proposals.get_mut(&vote.proposal_id)
                 .ok_or("Associated proposal not found")?;
             proposal.approve()?;
         }
@@ -1430,7 +1524,7 @@ impl BudgetSystem {
         let new_epoch = Epoch::new(start_date, end_date)?;
 
         // Check for overlapping epochs
-        for epoch in self.epochs.values() {
+        for epoch in self.state.epochs.values() {
             if (start_date < epoch.end_date && end_date > epoch.start_date) ||
             (epoch.start_date < end_date && epoch.end_date > start_date) {
                 return Err("New epoch overlaps with an existing epoch");
@@ -1438,27 +1532,27 @@ impl BudgetSystem {
         }
 
         let epoch_id = new_epoch.id();
-        self.epochs.insert(epoch_id, new_epoch);
+        self.state.epochs.insert(epoch_id, new_epoch);
         self.save_state();
         Ok(epoch_id)
     }
 
     fn activate_epoch(&mut self, epoch_id: Uuid) -> Result<(), &'static str> {
-        if self.current_epoch.is_some() {
+        if self.state.current_epoch.is_some() {
             return Err("Another epoch is currently active");
         }
 
-        let epoch = self.epochs.get_mut(&epoch_id).ok_or("Epoch not found")?;
+        let epoch = self.state.epochs.get_mut(&epoch_id).ok_or("Epoch not found")?;
 
         if epoch.status != EpochStatus::Planned {
             return Err("Only planned epochs can be activated");
         }
 
         epoch.status = EpochStatus::Active;
-        self.current_epoch = Some(epoch_id);
+        self.state.current_epoch = Some(epoch_id);
 
         // Reset points for all teams
-        for team in self.current_state.teams.values_mut() {
+        for team in self.state.current_state.teams.values_mut() {
             team.reset_points();
         }
         self.save_state();
@@ -1466,8 +1560,8 @@ impl BudgetSystem {
     }
 
     fn set_epoch_reward(&mut self, token: String, amount: f64) -> Result<(), &'static str> {
-        let epoch_id = self.current_epoch.ok_or("No active epoch")?;
-        let epoch = self.epochs.get_mut(&epoch_id).ok_or("Epoch not found")?;
+        let epoch_id = self.state.current_epoch.ok_or("No active epoch")?;
+        let epoch = self.state.epochs.get_mut(&epoch_id).ok_or("Epoch not found")?;
         
         epoch.set_reward(token, amount);
         self.save_state();
@@ -1475,52 +1569,52 @@ impl BudgetSystem {
     }
 
     fn calculate_epoch_rewards(&self) -> Result<HashMap<Uuid, TeamReward>, &'static str> {
-        let epoch_id = self.current_epoch.ok_or("No active epoch")?;
-        let epoch = self.epochs.get(&epoch_id).ok_or("Epoch not found")?;
+        let epoch_id = self.state.current_epoch.ok_or("No active epoch")?;
+        let epoch = self.state.epochs.get(&epoch_id).ok_or("Epoch not found")?;
         
-        epoch.calculate_rewards(&self.current_state.teams)
+        epoch.calculate_rewards(&self.state.current_state.teams)
     }
 
     fn close_epoch_with_rewards(&mut self) -> Result<(), &'static str> {
-        let epoch_id = self.current_epoch.ok_or("No active epoch")?;
-        let epoch = self.epochs.get_mut(&epoch_id).ok_or("Epoch not found")?;
+        let epoch_id = self.state.current_epoch.ok_or("No active epoch")?;
+        let epoch = self.state.epochs.get_mut(&epoch_id).ok_or("Epoch not found")?;
         
-        epoch.close_with_rewards(&self.current_state.teams)?;
+        epoch.close_with_rewards(&self.state.current_state.teams)?;
         
         // Reset points for all teams
-        for team in self.current_state.teams.values_mut() {
+        for team in self.state.current_state.teams.values_mut() {
             team.reset_points();
         }
 
-        self.current_epoch = None;
+        self.state.current_epoch = None;
         self.save_state();
         Ok(())
     }
 
     fn close_current_epoch(&mut self) -> Result<(), &'static str> {
-        let epoch_id = self.current_epoch.ok_or("No active epoch");
-        let epoch = self.epochs.get_mut(&epoch_id?).unwrap();
+        let epoch_id = self.state.current_epoch.ok_or("No active epoch");
+        let epoch = self.state.epochs.get_mut(&epoch_id?).unwrap();
 
         epoch.close_current_epoch();
-        self.current_epoch = None;
+        self.state.current_epoch = None;
         self.save_state();
         Ok(())
     }
 
     fn get_current_epoch(&self) -> Option<&Epoch> {
-        self.current_epoch.and_then(|id| self.epochs.get(&id))
+        self.state.current_epoch.and_then(|id| self.state.epochs.get(&id))
     }
 
     fn list_epochs(&self, status: Option<EpochStatus>) -> Vec<&Epoch> {
-        self.epochs.values()
+        self.state.epochs.values()
             .filter(|&epoch| status.map_or(true, |s| epoch.status == s))
             .collect()
     }
 
     fn get_proposals_for_epoch(&self, epoch_id: Uuid) -> Vec<&Proposal> {
-        if let Some(epoch) = self.epochs.get(&epoch_id) {
+        if let Some(epoch) = self.state.epochs.get(&epoch_id) {
             epoch.associated_proposals.iter()
-                .filter_map(|&id| self.proposals.get(&id))
+                .filter_map(|&id| self.state.proposals.get(&id))
                 .collect()
         } else {
             vec![]
@@ -1528,29 +1622,29 @@ impl BudgetSystem {
     }
 
     fn get_votes_for_epoch(&self, epoch_id: Uuid) -> Vec<&Vote> {
-        self.votes.values()
+        self.state.votes.values()
             .filter(|vote| vote.epoch_id == epoch_id)
             .collect()
     }
 
     fn get_raffles_for_epoch(&self, epoch_id: Uuid) -> Vec<&Raffle> {
-        self.raffles.values()
+        self.state.raffles.values()
             .filter(|raffle| raffle.config.epoch_id == epoch_id)
             .collect()
     }
 
     fn get_epoch_for_vote(&self, vote_id: Uuid) -> Option<&Epoch> {
-        self.votes.get(&vote_id).and_then(|vote| self.epochs.get(&vote.epoch_id))
+        self.state.votes.get(&vote_id).and_then(|vote| self.state.epochs.get(&vote.epoch_id))
     }
 
     fn get_epoch_for_raffle(&self, raffle_id: Uuid) -> Option<&Epoch> {
-        self.raffles.get(&raffle_id).and_then(|raffle| self.epochs.get(&raffle.config.epoch_id))
+        self.state.raffles.get(&raffle_id).and_then(|raffle| self.state.epochs.get(&raffle.config.epoch_id))
     }
 
     fn transition_to_next_epoch(&mut self) -> Result<(), &'static str> {
         self.close_current_epoch()?;
 
-        let next_epoch = self.epochs.values()
+        let next_epoch = self.state.epochs.values()
             .filter(|&epoch| epoch.status == EpochStatus::Planned)
             .min_by_key(|&epoch| epoch.start_date)
             .ok_or("No planned epochs available")?;
@@ -1560,7 +1654,7 @@ impl BudgetSystem {
 
     fn update_epoch_dates(&mut self, epoch_id: Uuid, new_start: DateTime<Utc>, new_end: DateTime<Utc>) -> Result<(), &'static str> {
         // Check for overlaps with other epochs
-        for other_epoch in self.epochs.values() {
+        for other_epoch in self.state.epochs.values() {
             if other_epoch.id != epoch_id &&
                ((new_start < other_epoch.end_date && new_end > other_epoch.start_date) ||
                 (other_epoch.start_date < new_end && other_epoch.end_date > new_start)) {
@@ -1568,7 +1662,7 @@ impl BudgetSystem {
             }
         }
         
-        let epoch = self.epochs.get_mut(&epoch_id).ok_or("Epoch not found")?;
+        let epoch = self.state.epochs.get_mut(&epoch_id).ok_or("Epoch not found")?;
 
         if epoch.status != EpochStatus::Planned {
             return Err("Can only modify dates of planned epochs");
@@ -1584,1375 +1678,85 @@ impl BudgetSystem {
     }
 
     fn cancel_planned_epoch(&mut self, epoch_id: Uuid) -> Result<(), &'static str> {
-        let epoch = self.epochs.get(&epoch_id).ok_or("Epoch not found")?;
+        let epoch = self.state.epochs.get(&epoch_id).ok_or("Epoch not found")?;
 
         if epoch.status != EpochStatus::Planned {
             return Err("Can only cancel planned epochs");
         }
 
-        self.epochs.remove(&epoch_id);
+        self.state.epochs.remove(&epoch_id);
         Ok(())
     }
 
 }
 
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let mut budget_system = BudgetSystem::new();
+    // Configuration
+    const IPC_PATH: &str = "/tmp/reth.ipc";
+    const FUTURE_BLOCK_OFFSET: u64 = 10;
+    const STATE_FILE: &str = "budget_system_state.json";
 
-    // Create and activate an epoch
-    let start_date = Utc::now();
+    // Try to load existing state, or create a new BudgetSystem if no state exists
+    let mut budget_system = match BudgetSystem::load_from_file(STATE_FILE, IPC_PATH, FUTURE_BLOCK_OFFSET).await {
+        Ok(system) => {
+            println!("Loaded existing state from {}", STATE_FILE);
+            system
+        },
+        Err(_) => {
+            println!("No existing state found. Creating a new BudgetSystem.");
+            BudgetSystem::new(IPC_PATH, FUTURE_BLOCK_OFFSET).await?
+        },
+    };
+
+    // Example: Create and activate an epoch
+    let start_date = chrono::Utc::now();
     let end_date = start_date + chrono::Duration::days(30);
     let epoch_id = budget_system.create_epoch(start_date, end_date)?;
     budget_system.activate_epoch(epoch_id)?;
+    println!("Created and activated new epoch: {}", epoch_id);
 
-    println!("Epoch created and activated successfully.");
-
-    // Add teams
+    // Example: Add some teams
     let team_a = budget_system.add_team("Team A".to_string(), "Alice".to_string(), Some(vec![100000, 120000, 110000]))?;
     let team_b = budget_system.add_team("Team B".to_string(), "Bob".to_string(), Some(vec![90000, 95000, 100000]))?;
     let team_c = budget_system.add_team("Team C".to_string(), "Charlie".to_string(), None)?;
-    let team_d = budget_system.add_team("Team D".to_string(), "David".to_string(), Some(vec![150000, 160000, 170000]))?;
-    let team_e = budget_system.add_team("Team E".to_string(), "Eve".to_string(), None)?;
+    println!("Added teams: {}, {}, {}", team_a, team_b, team_c);
 
-    println!("Teams added successfully.");
-
-    // Create a proposal
+    // Example: Create a proposal
     let proposal_id = budget_system.add_proposal(
         "Q3 Budget Allocation".to_string(),
         Some("https://example.com/q3-budget".to_string()),
         None
     )?;
-    println!("Proposal created with ID: {}", proposal_id);
+    println!("Created proposal: {}", proposal_id);
 
-    // Create a raffle using RaffleBuilder
+    // Example: Create a raffle
     let raffle_id = budget_system.create_raffle(
         RaffleBuilder::new(proposal_id, epoch_id)
-            .with_randomness("random_seed_123".to_string())
-            .with_seats(7, 5)  // Using default values, but you can change these
-    )?;
-    println!("Raffle created with ID: {}", raffle_id);
+            .with_seats(7, 5)
+    ).await?;
+    println!("Created raffle: {}", raffle_id);
 
-    // Conduct the raffle
-    budget_system.conduct_raffle(raffle_id)?;
-    println!("Raffle conducted successfully.");
+    // Example: Create a historical raffle
+    let historical_block = 1_000_000; // Replace with an actual historical block number
+    let historical_team_order = vec![team_a, team_b, team_c];
+    let historical_raffle_id = budget_system.create_historical_raffle(
+        RaffleBuilder::new(Uuid::new_v4(), epoch_id)
+            .with_custom_team_order(historical_team_order),
+        historical_block
+    ).await?;
+    println!("Created historical raffle: {}", historical_raffle_id);
 
-    // Create a formal vote based on the raffle results
-    let vote_id = budget_system.create_formal_vote(proposal_id, raffle_id, Some(0.7))?;
-    println!("Formal vote created with ID: {}", vote_id);
+    // Save the current state
+    budget_system.save_state()?;
+    println!("Saved current state to {}", STATE_FILE);
 
-    // Cast votes
-    let votes = vec![
-        (team_a, VoteChoice::Yes),
-        (team_b, VoteChoice::Yes),
-        (team_c, VoteChoice::No),
-        (team_d, VoteChoice::Yes),
-        (team_e, VoteChoice::No),
-    ];
-    budget_system.cast_votes(vote_id, votes)?;
-    println!("Votes cast successfully.");
-
-    // Close the vote
-    let vote_result = budget_system.close_vote(vote_id)?;
-    println!("Vote closed. Result: {}", if vote_result { "Passed" } else { "Failed" });
-
-    // Check proposal status
-    let proposal = budget_system.get_proposal(proposal_id).ok_or("Proposal not found")?;
-    println!("Proposal status: {:?}", proposal.status);
-    println!("Proposal resolution: {:?}", proposal.resolution);
-
-    // Create an informal vote for another proposal
-    let informal_proposal_id = budget_system.add_proposal(
-        "Team Building Event".to_string(),
-        None,
-        None
-    )?;
-    let informal_vote_id = budget_system.create_informal_vote(informal_proposal_id)?;
-    println!("Informal vote created with ID: {}", informal_vote_id);
-
-    // Cast informal votes
-    let informal_votes = vec![
-        (team_a, VoteChoice::Yes),
-        (team_b, VoteChoice::Yes),
-        (team_c, VoteChoice::Yes),
-        (team_d, VoteChoice::No),
-        (team_e, VoteChoice::Yes),
-    ];
-    budget_system.cast_votes(informal_vote_id, informal_votes)?;
-    println!("Informal votes cast successfully.");
-
-    // Close the informal vote
-    let informal_vote_result = budget_system.close_vote(informal_vote_id)?;
-    println!("Informal vote closed. Result: {}", if informal_vote_result { "Passed" } else { "Not automatically passed" });
-
-    // Check informal proposal status
-    let informal_proposal = budget_system.get_proposal(informal_proposal_id).ok_or("Informal proposal not found")?;
-    println!("Informal proposal status: {:?}", informal_proposal.status);
-    println!("Informal proposal resolution: {:?}", informal_proposal.resolution);
-
-    // Print current points for each team
-    for (team_id, team) in &budget_system.current_state.teams {
-        println!("Team {} points: {}", team.name, team.points);
-    }
-
-    // Set epoch reward
-    budget_system.set_epoch_reward("ETH".to_string(), 100.0)?;
-    println!("Epoch reward set successfully.");
-
-    // Calculate and print epoch rewards
-    let rewards = budget_system.calculate_epoch_rewards()?;
-    for (team_id, reward) in &rewards {
-        let team = budget_system.current_state.teams.get(team_id).unwrap();
-        println!("Team {} reward: {:.2} ETH ({:.2}%)", team.name, reward.amount, reward.percentage * 100.0);
-    }
-
-    // Close the epoch with rewards
-    budget_system.close_epoch_with_rewards()?;
-    println!("Epoch closed with rewards distributed.");
-
-    // Verify that points have been reset after closing the epoch
-    for (team_id, team) in &budget_system.current_state.teams {
-        println!("Team {} points after epoch close: {}", team.name, team.points);
-    }
+    // Example: Print some system statistics
+    println!("System statistics:");
+    println!("  Teams: {}", budget_system.state.current_state.teams.len());
+    println!("  Proposals: {}", budget_system.state.proposals.len());
+    println!("  Raffles: {}", budget_system.state.raffles.len());
+    println!("  Current epoch: {:?}", budget_system.state.current_epoch);
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::{NaiveDate, Duration};
-
-    // Helper function to set up a system with an epoch and some teams
-    fn setup_system_with_epoch() -> (BudgetSystem, Uuid) {
-        let mut system = BudgetSystem::new();
-        let start_date = Utc::now();
-        let end_date = start_date + Duration::days(30);
-        let epoch_id = system.create_epoch(start_date, end_date).unwrap();
-        system.activate_epoch(epoch_id).unwrap();
-        system.add_team("Team A".to_string(), "Alice".to_string(), Some(vec![100000])).unwrap();
-        system.add_team("Team B".to_string(), "Bob".to_string(), Some(vec![90000])).unwrap();
-        system.add_team("Team C".to_string(), "Charlie".to_string(), None).unwrap();
-        (system, epoch_id)
-    }
-
-    #[test]
-    fn test_add_team() {
-        let mut system = BudgetSystem::new();
-        let result = system.add_team("Team A".to_string(), "Alice".to_string(), None);
-        assert!(result.is_ok());
-        assert_eq!(system.current_state.teams.len(), 1);
-    }
-
-    #[test]
-    fn test_deactivate_team() {
-        let (mut system, _) = setup_system_with_epoch();
-        let team_id = *system.current_state.teams.keys().next().unwrap();
-        system.deactivate_team(team_id).unwrap();
-        assert!(matches!(system.current_state.teams[&team_id].status, TeamStatus::Inactive));
-    }
-
-    #[test]
-    fn test_reactivate_team() {
-        let (mut system, _) = setup_system_with_epoch();
-        let team_id = *system.current_state.teams.keys().next().unwrap();
-        system.deactivate_team(team_id).unwrap();
-        system.reactivate_team(team_id).unwrap();
-        assert!(matches!(system.current_state.teams[&team_id].status, TeamStatus::Supporter));
-    }
-
-    #[test]
-    fn test_add_team_with_revenue() {
-        let mut system = BudgetSystem::new();
-        let team_id = system.add_team("Team A".to_string(), "Alice".to_string(), Some(vec![100000])).unwrap();
-        assert_eq!(system.current_state.teams.len(), 1);
-        assert!(matches!(system.current_state.teams[&team_id].status, TeamStatus::Earner { .. }));
-    }
-
-    #[test]
-    fn test_add_team_with_invalid_revenue() {
-        let mut system = BudgetSystem::new();
-        let result = system.add_team("Team A".to_string(), "Alice".to_string(), Some(vec![]));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_remove_team() {
-        let mut system = BudgetSystem::new();
-        let team_id = system.add_team("Team A".to_string(), "Alice".to_string(), None).unwrap();
-        let result = system.remove_team(team_id);
-        assert!(result.is_ok());
-        assert_eq!(system.current_state.teams.len(), 0);
-    }
-
-    #[test]
-    fn test_update_team_status() {
-        let mut system = BudgetSystem::new();
-        let team_id = system.add_team("Team A".to_string(), "Alice".to_string(), None).unwrap();
-        let result = system.update_team_status(team_id, TeamStatus::Earner { trailing_monthly_revenue: vec![100000] });
-        assert!(result.is_ok());
-        assert!(matches!(system.current_state.teams[&team_id].status, TeamStatus::Earner { .. }));
-    }
-
-    #[test]
-    fn test_update_team_revenue() {
-        let mut system = BudgetSystem::new();
-        let team_id = system.add_team("Team A".to_string(), "Alice".to_string(), Some(vec![100000])).unwrap();
-        let result = system.update_team_revenue(team_id, vec![120000]);
-        assert!(result.is_ok());
-        if let TeamStatus::Earner { trailing_monthly_revenue } = &system.current_state.teams[&team_id].status {
-            assert_eq!(trailing_monthly_revenue, &vec![100000, 120000]);
-        } else {
-            panic!("Team A should be an Earner");
-        }
-    }
-
-    #[test]
-    fn test_create_raffle() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        
-        let raffle_id = system.create_raffle(
-            RaffleBuilder::new(proposal_id, epoch_id)
-                .with_randomness("test_randomness".to_string())
-        ).unwrap();
-        
-        assert!(system.raffles.contains_key(&raffle_id));
-        let raffle = system.raffles.get(&raffle_id).unwrap();
-        assert_eq!(raffle.config.proposal_id, proposal_id);
-        assert_eq!(raffle.config.epoch_id, epoch_id);
-        assert_eq!(raffle.config.total_counted_seats, RaffleConfig::DEFAULT_TOTAL_COUNTED_SEATS);
-        assert_eq!(raffle.config.max_earner_seats, RaffleConfig::DEFAULT_MAX_EARNER_SEATS);
-    }
-
-    #[test]
-    fn test_create_raffle_with_custom_seats() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        
-        let raffle_id = system.create_raffle(
-            RaffleBuilder::new(proposal_id, epoch_id)
-                .with_randomness("test_randomness".to_string())
-                .with_seats(9, 6)
-        ).unwrap();
-        
-        let raffle = system.raffles.get(&raffle_id).unwrap();
-        assert_eq!(raffle.config.total_counted_seats, 9);
-        assert_eq!(raffle.config.max_earner_seats, 6);
-    }
-
-    #[test]
-    fn test_create_raffle_with_excluded_teams() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let team_c_id = system.current_state.teams.values().find(|t| t.name == "Team C").unwrap().id;
-        
-        let raffle_id = system.create_raffle(
-            RaffleBuilder::new(proposal_id, epoch_id)
-                .with_randomness("test_randomness".to_string())
-                .with_excluded_teams(vec![team_c_id])
-        ).unwrap();
-        
-        let raffle = system.raffles.get(&raffle_id).unwrap();
-        assert!(raffle.config.excluded_teams.contains(&team_c_id));
-        assert_eq!(
-            raffle.team_snapshots.get(&team_c_id).unwrap().raffle_status,
-            RaffleParticipationStatus::Excluded
-        );
-    }
-
-    #[test]
-    fn test_create_raffle_with_custom_allocation() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let team_ids: Vec<_> = system.current_state.teams.keys().cloned().collect();
-        let mut custom_allocation = HashMap::new();
-        for (i, id) in team_ids.iter().enumerate() {
-            custom_allocation.insert(*id, (i + 1) as u64);
-        }
-        
-        let raffle_id = system.create_raffle(
-            RaffleBuilder::new(proposal_id, epoch_id)
-                .with_randomness("test_randomness".to_string())
-                .with_custom_allocation(custom_allocation.clone())
-        ).unwrap();
-        
-        let raffle = system.raffles.get(&raffle_id).unwrap();
-        assert_eq!(raffle.config.custom_allocation, Some(custom_allocation));
-        assert_eq!(raffle.tickets.len(), 6); // 1 + 2 + 3 = 6 total tickets
-    }
-
-    #[test]
-    fn test_create_raffle_with_custom_team_order() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let team_ids: Vec<_> = system.current_state.teams.keys().cloned().collect();
-        
-        let raffle_id = system.create_raffle(
-            RaffleBuilder::new(proposal_id, epoch_id)
-                .with_randomness("test_randomness".to_string())
-                .with_custom_team_order(team_ids.clone())
-        ).unwrap();
-        
-        let raffle = system.raffles.get(&raffle_id).unwrap();
-        assert_eq!(raffle.config.custom_team_order, Some(team_ids));
-    }
-
-    #[test]
-    fn test_team_snapshot_creation() {
-        let (system, _) = setup_system_with_epoch();
-        let team = system.current_state.teams.values().next().unwrap();
-        let snapshot = team.create_snapshot(RaffleParticipationStatus::Included);
-
-        assert_eq!(snapshot.id, team.id);
-        assert_eq!(snapshot.name, team.name);
-        assert_eq!(snapshot.representative, team.representative);
-        assert_eq!(snapshot.status, team.status);
-        assert_eq!(snapshot.points, team.points);
-        assert_eq!(snapshot.raffle_status, RaffleParticipationStatus::Included);
-    }
-
-    #[test]
-    fn test_raffle_ticket_allocation_with_snapshots() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        
-        let raffle_id = system.create_raffle(
-            RaffleBuilder::new(proposal_id, epoch_id)
-                .with_randomness("test_randomness".to_string())
-        ).unwrap();
-        
-        let raffle = system.raffles.get(&raffle_id).unwrap();
-        
-        let ticket_counts: HashMap<_, _> = raffle.tickets.iter()
-            .fold(HashMap::new(), |mut acc, ticket| {
-                *acc.entry(ticket.team_id).or_insert(0) += 1;
-                acc
-            });
-
-        for (team_id, snapshot) in &raffle.team_snapshots {
-            match snapshot.status {
-                TeamStatus::Earner { .. } => {
-                    assert!(*ticket_counts.get(team_id).unwrap_or(&0) > 1);
-                },
-                TeamStatus::Supporter => {
-                    assert_eq!(*ticket_counts.get(team_id).unwrap_or(&0), 1);
-                },
-                TeamStatus::Inactive => {
-                    assert_eq!(ticket_counts.get(team_id), None);
-                },
-            }
-        }
-    }
-
-    #[test]
-    fn test_raffle_with_inactive_team() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        
-        // Deactivate one team
-        let team_to_deactivate = system.current_state.teams.values().next().unwrap().id;
-        system.deactivate_team(team_to_deactivate).unwrap();
-        
-        let raffle_id = system.create_raffle(
-            RaffleBuilder::new(proposal_id, epoch_id)
-                .with_randomness("test_randomness".to_string())
-        ).unwrap();
-        
-        let raffle = system.raffles.get(&raffle_id).unwrap();
-        assert!(!raffle.team_snapshots.contains_key(&team_to_deactivate));
-    }
-
-    #[test]
-    fn test_raffle_result_generation_with_snapshots() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        
-        let raffle_id = system.create_raffle(
-            RaffleBuilder::new(proposal_id, epoch_id)
-                .with_randomness("test_randomness".to_string())
-        ).unwrap();
-        
-        system.conduct_raffle(raffle_id).unwrap();
-        
-        let raffle = system.raffles.get(&raffle_id).unwrap();
-        assert!(raffle.result.is_some());
-        
-        if let Some(result) = &raffle.result {
-            let active_teams = raffle.team_snapshots.values()
-                .filter(|snapshot| snapshot.raffle_status == RaffleParticipationStatus::Included)
-                .count();
-            assert_eq!(result.counted.len() + result.uncounted.len(), active_teams);
-            assert_eq!(result.counted.len(), raffle.config.total_counted_seats);
-        } else {
-            panic!("Expected raffle result");
-        }
-    }
-
-    #[test]
-    fn test_raffle_with_custom_allocation() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let team_ids: Vec<_> = system.current_state.teams.keys().cloned().collect();
-        let mut custom_allocation = HashMap::new();
-        for (i, id) in team_ids.iter().enumerate() {
-            custom_allocation.insert(*id, (i + 1) as u64);
-        }
-        
-        let raffle_id = system.create_raffle(
-            RaffleBuilder::new(proposal_id, epoch_id)
-                .with_randomness("test_randomness".to_string())
-                .with_custom_allocation(custom_allocation.clone())
-        ).unwrap();
-        
-        let raffle = system.raffles.get(&raffle_id).unwrap();
-        assert_eq!(raffle.config.custom_allocation, Some(custom_allocation.clone()));
-        
-        let total_tickets: u64 = raffle.tickets.iter()
-            .map(|ticket| {
-                custom_allocation.get(&ticket.team_id).cloned().unwrap_or(0)
-            })
-            .sum();
-        
-        assert_eq!(raffle.tickets.len() as u64, total_tickets);
-    }
-
-    #[test]
-    fn test_conduct_raffle() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        
-        let raffle_id = system.create_raffle(
-            RaffleBuilder::new(proposal_id, epoch_id)
-                .with_randomness("test_randomness".to_string())
-        ).unwrap();
-        
-        assert!(system.conduct_raffle(raffle_id).is_ok());
-        
-        let raffle = system.raffles.get(&raffle_id).unwrap();
-        assert!(raffle.result.is_some());
-        if let Some(result) = &raffle.result {
-            assert_eq!(result.counted.len() + result.uncounted.len(), system.current_state.teams.len());
-        }
-    }
-
-    #[test]
-    fn test_raffle_ticket_allocation() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        
-        let raffle_id = system.create_raffle(
-            RaffleBuilder::new(proposal_id, epoch_id)
-                .with_randomness("test_randomness".to_string())
-        ).unwrap();
-        
-        let raffle = system.raffles.get(&raffle_id).unwrap();
-        
-        let ticket_counts: HashMap<_, _> = raffle.tickets.iter()
-            .fold(HashMap::new(), |mut acc, ticket| {
-                *acc.entry(ticket.team_id).or_insert(0) += 1;
-                acc
-            });
-
-        // Check that Earner teams have more than 1 ticket
-        for (team_id, team) in &system.current_state.teams {
-            if let TeamStatus::Earner { .. } = team.status {
-                assert!(*ticket_counts.get(team_id).unwrap_or(&0) > 1);
-            }
-        }
-
-        // Check that Supporter teams have exactly 1 ticket
-        for (team_id, team) in &system.current_state.teams {
-            if let TeamStatus::Supporter = team.status {
-                assert_eq!(*ticket_counts.get(team_id).unwrap_or(&0), 1);
-            }
-        }
-    }
-
-    #[test]
-    fn test_raffle_result_generation() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        
-        let raffle_id = system.create_raffle(
-            RaffleBuilder::new(proposal_id, epoch_id)
-                .with_randomness("test_randomness".to_string())
-        ).unwrap();
-        
-        system.conduct_raffle(raffle_id).unwrap();
-        
-        let raffle = system.raffles.get(&raffle_id).unwrap();
-        assert!(raffle.result.is_some());
-        
-        if let Some(result) = &raffle.result {
-            assert_eq!(result.counted.len() + result.uncounted.len(), system.current_state.teams.len());
-            assert_eq!(result.counted.len(), raffle.config.total_counted_seats);
-        } else {
-            panic!("Expected raffle result");
-        }
-    }
-
-    
-    #[test]
-    fn test_add_proposal() {
-        let (mut system, _) = setup_system_with_epoch();
-        let team_id = *system.current_state.teams.keys().next().unwrap();
-        let mut request_amounts = HashMap::new();
-        request_amounts.insert("USD".to_string(), 50000.0);
-        request_amounts.insert("ETH".to_string(), 10.0);
-        let proposal_id = system.add_proposal(
-            "Test Proposal".to_string(),
-            Some("https://example.com".to_string()),
-            Some(BudgetRequestDetails {
-                team: Some(team_id),
-                request_amounts,
-                start_date: Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()),
-                end_date: Some(NaiveDate::from_ymd_opt(2024, 12, 31).unwrap()),
-                payment_status: None,
-            })
-        ).unwrap();
-        
-        let proposal = system.get_proposal(proposal_id).unwrap();
-        assert_eq!(proposal.title, "Test Proposal");
-        assert_eq!(proposal.status, ProposalStatus::Open);
-        assert!(proposal.is_budget_request());
-        assert!(proposal.resolution.is_none());
-    }
-
-    #[test]
-    fn test_approve_proposal() {
-        let (mut system, _) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        
-        system.approve(proposal_id).unwrap();
-        let proposal = system.get_proposal(proposal_id).unwrap();
-        assert_eq!(proposal.resolution, Some(Resolution::Approved));
-        assert_eq!(proposal.status, ProposalStatus::Open);
-    }
-
-    #[test]
-    fn test_reject_proposal() {
-        let (mut system, _) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        
-        system.reject(proposal_id).unwrap();
-        let proposal = system.get_proposal(proposal_id).unwrap();
-        assert_eq!(proposal.resolution, Some(Resolution::Rejected));
-        assert_eq!(proposal.status, ProposalStatus::Closed);
-    }
-
-    #[test]
-    fn test_close_proposal() {
-        let (mut system, _) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        
-        system.close(proposal_id).unwrap();
-        let proposal = system.get_proposal(proposal_id).unwrap();
-        assert_eq!(proposal.status, ProposalStatus::Closed);
-    }
-
-    #[test]
-    fn test_reopen_proposal() {
-        let (mut system, _) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        
-        system.close(proposal_id).unwrap();
-        system.reopen(proposal_id).unwrap();
-        let proposal = system.get_proposal(proposal_id).unwrap();
-        assert_eq!(proposal.status, ProposalStatus::Reopened);
-        assert!(proposal.resolution.is_none());
-    }
-
-    #[test]
-    fn test_retract_resolution() {
-        let (mut system, _) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        
-        system.approve(proposal_id).unwrap();
-        system.retract_resolution(proposal_id).unwrap();
-        let proposal = system.get_proposal(proposal_id).unwrap();
-        assert!(proposal.resolution.is_none());
-    }
-
-    #[test]
-    fn test_mark_proposal_as_paid() {
-        let (mut system, _) = setup_system_with_epoch();
-        let team_id = *system.current_state.teams.keys().next().unwrap();
-        let mut request_amounts = HashMap::new();
-        request_amounts.insert("USD".to_string(), 50000.0);
-        request_amounts.insert("ETH".to_string(), 10.0);
-        let proposal_id = system.add_proposal(
-            "Test Proposal".to_string(),
-            None,
-            Some(BudgetRequestDetails {
-                team: Some(team_id),
-                request_amounts,
-                start_date: None,
-                end_date: None,
-                payment_status: None,
-            })
-        ).unwrap();
-        
-        system.approve(proposal_id).unwrap();
-        system.mark_proposal_as_paid(proposal_id).unwrap();
-        let proposal = system.get_proposal(proposal_id).unwrap();
-        assert_eq!(proposal.budget_request_details.as_ref().unwrap().payment_status, Some(PaymentStatus::Paid));
-    }
-
-    #[test]
-    fn test_cannot_approve_already_resolved_proposal() {
-        let (mut system, _) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        
-        system.approve(proposal_id).unwrap();
-        assert!(system.approve(proposal_id).is_err());
-    }
-
-    #[test]
-    fn test_cannot_reject_paid_proposal() {
-        let (mut system, _) = setup_system_with_epoch();
-        let team_id = *system.current_state.teams.keys().next().unwrap();
-        let mut request_amounts = HashMap::new();
-        request_amounts.insert("USD".to_string(), 50000.0);
-        request_amounts.insert("ETH".to_string(), 10.0);
-        let proposal_id = system.add_proposal(
-            "Test Proposal".to_string(),
-            None,
-            Some(BudgetRequestDetails {
-                team: Some(team_id),
-                request_amounts,
-                start_date: None,
-                end_date: None,
-                payment_status: None,
-            })
-        ).unwrap();
-        
-        system.approve(proposal_id).unwrap();
-        system.mark_proposal_as_paid(proposal_id).unwrap();
-        assert!(system.reject(proposal_id).is_err());
-    }
-
-    #[test]
-    fn test_cannot_retract_resolution_on_paid_proposal() {
-        let (mut system, _) = setup_system_with_epoch();
-        let team_id = *system.current_state.teams.keys().next().unwrap();
-        let mut request_amounts = HashMap::new();
-        request_amounts.insert("USD".to_string(), 50000.0);
-        request_amounts.insert("ETH".to_string(), 10.0);
-        let proposal_id = system.add_proposal(
-            "Test Proposal".to_string(),
-            None,
-            Some(BudgetRequestDetails {
-                team: Some(team_id),
-                request_amounts,
-                start_date: None,
-                end_date: None,
-                payment_status: None,
-            })
-        ).unwrap();
-        
-        system.approve(proposal_id).unwrap();
-        system.mark_proposal_as_paid(proposal_id).unwrap();
-        assert!(system.retract_resolution(proposal_id).is_err());
-    }
-
-    #[test]
-    fn test_cannot_reopen_open_proposal() {
-        let (mut system, _) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        
-        assert!(system.reopen(proposal_id).is_err());
-    }
-
-    #[test]
-    fn test_full_proposal_lifecycle() {
-        let (mut system, _) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        
-        // Open -> Approved -> Closed -> Reopened -> Rejected -> Closed
-        system.approve(proposal_id).unwrap();
-        system.close(proposal_id).unwrap();
-        system.reopen(proposal_id).unwrap();
-        system.retract_resolution(proposal_id).unwrap();
-        system.reject(proposal_id).unwrap();
-        
-        let proposal = system.get_proposal(proposal_id).unwrap();
-        assert_eq!(proposal.status, ProposalStatus::Closed);
-        assert_eq!(proposal.resolution, Some(Resolution::Rejected));
-    }
-
-    #[test]
-    fn test_close_with_reason() {
-        let (mut system, _) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        
-        system.close_with_reason(proposal_id, Resolution::Invalid).unwrap();
-        let proposal = system.get_proposal(proposal_id).unwrap();
-        assert_eq!(proposal.status, ProposalStatus::Closed);
-        assert_eq!(proposal.resolution, Some(Resolution::Invalid));
-    }
-
-    #[test]
-    fn test_cannot_close_with_reason_already_closed_proposal() {
-        let (mut system, _) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        
-        system.close(proposal_id).unwrap();
-        assert!(system.close_with_reason(proposal_id, Resolution::Duplicate).is_err());
-    }
-
-    #[test]
-    fn test_cannot_close_with_reason_paid_proposal() {
-        let (mut system, _) = setup_system_with_epoch();
-        let team_id = *system.current_state.teams.keys().next().unwrap();
-        let mut request_amounts = HashMap::new();
-        request_amounts.insert("USD".to_string(), 50000.0);
-        request_amounts.insert("ETH".to_string(), 10.0);
-        let proposal_id = system.add_proposal(
-            "Test Proposal".to_string(),
-            None,
-            Some(BudgetRequestDetails {
-                team: Some(team_id),
-                request_amounts,
-                start_date: None,
-                end_date: None,
-                payment_status: None,
-            })
-        ).unwrap();
-        
-        system.approve(proposal_id).unwrap();
-        system.mark_proposal_as_paid(proposal_id).unwrap();
-        assert!(system.close_with_reason(proposal_id, Resolution::Retracted).is_err());
-    }
-
-    #[test]
-    fn test_reopen_removes_resolution() {
-        let (mut system, _) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        
-        system.close_with_reason(proposal_id, Resolution::Invalid).unwrap();
-        system.reopen(proposal_id).unwrap();
-        let proposal = system.get_proposal(proposal_id).unwrap();
-        assert_eq!(proposal.status, ProposalStatus::Reopened);
-        assert!(proposal.resolution.is_none());
-    }
-
-    #[test]
-    fn test_cannot_approve_non_existent_proposal() {
-        let (mut system, _) = setup_system_with_epoch();
-        let non_existent_id = Uuid::new_v4();
-        assert!(system.approve(non_existent_id).is_err());
-    }
-
-    #[test]
-    fn test_cannot_reject_non_existent_proposal() {
-        let (mut system, _) = setup_system_with_epoch();
-        let non_existent_id = Uuid::new_v4();
-        assert!(system.reject(non_existent_id).is_err());
-    }
-
-    #[test]
-    fn test_cannot_close_non_existent_proposal() {
-        let (mut system, _) = setup_system_with_epoch();
-        let non_existent_id = Uuid::new_v4();
-        assert!(system.close(non_existent_id).is_err());
-    }
-
-    #[test]
-    fn test_cannot_reopen_non_existent_proposal() {
-        let (mut system, _) = setup_system_with_epoch();
-        let non_existent_id = Uuid::new_v4();
-        assert!(system.reopen(non_existent_id).is_err());
-    }
-
-    #[test]
-    fn test_cannot_retract_resolution_non_existent_proposal() {
-        let (mut system, _) = setup_system_with_epoch();
-        let non_existent_id = Uuid::new_v4();
-        assert!(system.retract_resolution(non_existent_id).is_err());
-    }
-
-    #[test]
-    fn test_cannot_mark_as_paid_non_existent_proposal() {
-        let (mut system, _) = setup_system_with_epoch();
-        let non_existent_id = Uuid::new_v4();
-        assert!(system.mark_proposal_as_paid(non_existent_id).is_err());
-    }
-
-    #[test]
-    fn test_cannot_close_with_reason_non_existent_proposal() {
-        let (mut system, _) = setup_system_with_epoch();
-        let non_existent_id = Uuid::new_v4();
-        assert!(system.close_with_reason(non_existent_id, Resolution::Invalid).is_err());
-    }
-
-
-    #[test]
-    fn test_close_formal_vote() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let raffle_id = system.create_raffle(
-            RaffleBuilder::new(proposal_id, epoch_id)
-                .with_randomness("test_randomness".to_string())
-        ).unwrap();
-        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
-        
-        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
-        let votes: Vec<(Uuid, VoteChoice)> = team_ids.iter().map(|&id| (id, VoteChoice::Yes)).collect();
-        system.cast_votes(vote_id, votes).unwrap();
-        
-        let result = system.close_vote(vote_id).unwrap();
-        assert!(result);  // Assuming all votes are "Yes", it should pass
-        
-        let vote = system.votes.get(&vote_id).unwrap();
-        assert_eq!(vote.status, VoteStatus::Closed);
-        assert!(vote.result.is_some());
-    }
-
-    #[test]
-    fn test_close_informal_vote() {
-        let (mut system, _) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let vote_id = system.create_informal_vote(proposal_id).unwrap();
-        
-        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
-        let votes: Vec<(Uuid, VoteChoice)> = team_ids.iter().map(|&id| (id, VoteChoice::Yes)).collect();
-        system.cast_votes(vote_id, votes).unwrap();
-        
-        let result = system.close_vote(vote_id).unwrap();
-        assert!(!result);  // Informal votes don't automatically pass
-        
-        let vote = system.votes.get(&vote_id).unwrap();
-        assert_eq!(vote.status, VoteStatus::Closed);
-        assert!(vote.result.is_some());
-    }
-
-    #[test]
-    fn test_vote_result_calculation() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let raffle_id = system.create_raffle(
-            RaffleBuilder::new(proposal_id, epoch_id)
-                .with_randomness("test_randomness".to_string())
-        ).unwrap();
-        system.conduct_raffle(raffle_id).unwrap();
-        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
-        
-        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
-        let votes: Vec<(Uuid, VoteChoice)> = team_ids.iter().enumerate().map(|(i, &id)| {
-            if i % 2 == 0 { (id, VoteChoice::Yes) } else { (id, VoteChoice::No) }
-        }).collect();
-        system.cast_votes(vote_id, votes).unwrap();
-        
-        system.close_vote(vote_id).unwrap();
-        
-        let vote = system.votes.get(&vote_id).unwrap();
-        if let Some(VoteResult::Formal { counted, uncounted, .. }) = &vote.result {
-            let raffle = system.raffles.get(&raffle_id).unwrap();
-            assert_eq!(counted.yes + counted.no, raffle.config.total_counted_seats as u32);
-            assert_eq!(uncounted.yes + uncounted.no, (team_ids.len() - raffle.config.total_counted_seats) as u32);
-        } else {
-            panic!("Expected formal vote result");
-        }
-    }
-
-    #[test]
-    fn test_create_and_activate_epoch() {
-        let mut system = BudgetSystem::new();
-        let start_date = Utc::now();
-        let end_date = start_date + Duration::days(30);
-        let epoch_id = system.create_epoch(start_date, end_date).unwrap();
-        assert!(system.activate_epoch(epoch_id).is_ok());
-        assert_eq!(system.get_current_epoch().unwrap().id(), epoch_id);
-    }
-
-    #[test]
-    fn test_add_proposal_to_epoch() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let epoch = system.epochs.get(&epoch_id).unwrap();
-        assert!(epoch.associated_proposals().contains(&proposal_id));
-    }
-
-    #[test]
-    fn test_get_proposals_for_epoch() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let proposals = system.get_proposals_for_epoch(epoch_id);
-        assert_eq!(proposals.len(), 1);
-        assert_eq!(proposals[0].id, proposal_id);
-    }
-
-    #[test]
-    fn test_get_votes_for_epoch() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let raffle_id = system.create_raffle(
-            RaffleBuilder::new(proposal_id, epoch_id)
-                .with_randomness("test_randomness".to_string())
-        ).unwrap();
-        system.conduct_raffle(raffle_id).unwrap();
-        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
-        let votes = system.get_votes_for_epoch(epoch_id);
-        assert_eq!(votes.len(), 1);
-        assert_eq!(votes[0].id, vote_id);
-    }
-
-    #[test]
-    fn test_get_raffles_for_epoch() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-
-        // Create a raffle using the new RaffleBuilder
-        let raffle_id = system.create_raffle(
-            RaffleBuilder::new(proposal_id, epoch_id)
-                .with_randomness("test_randomness".to_string())
-        ).unwrap();
-
-        // Conduct the raffle
-        system.conduct_raffle(raffle_id).unwrap();
-
-        // Get raffles for the epoch
-        let raffles = system.get_raffles_for_epoch(epoch_id);
-        
-        assert_eq!(raffles.len(), 1);
-        assert_eq!(raffles[0].id, raffle_id);
-    }
-
-    #[test]
-    fn test_epoch_transition() {
-        let mut system = BudgetSystem::new();
-        let start_date = Utc::now();
-        let end_date = start_date + Duration::days(30);
-        let epoch_1_id = system.create_epoch(start_date, end_date).unwrap();
-        system.activate_epoch(epoch_1_id).unwrap();
-
-        let start_date_2 = end_date + Duration::seconds(1);
-        let end_date_2 = start_date_2 + Duration::days(30);
-        let epoch_2_id = system.create_epoch(start_date_2, end_date_2).unwrap();
-
-        system.transition_to_next_epoch().unwrap();
-        assert_eq!(system.get_current_epoch().unwrap().id(), epoch_2_id);
-        assert_eq!(system.epochs.get(&epoch_1_id).unwrap().status(), &EpochStatus::Closed);
-    }
-
-    #[test]
-    fn test_retract_vote() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let raffle_id = system.create_raffle(
-            RaffleBuilder::new(proposal_id, epoch_id)
-                .with_randomness("test_randomness".to_string())
-        ).unwrap();
-        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
-        
-        let team_id = *system.current_state.teams.keys().next().unwrap();
-        system.cast_votes(vote_id, vec![(team_id, VoteChoice::Yes)]).unwrap();
-        
-        assert!(system.retract_vote(vote_id, team_id).is_ok());
-        
-        let vote = system.votes.get(&vote_id).unwrap();
-        assert!(vote.votes.is_empty());
-    }
-
-    #[test]
-    fn test_create_formal_vote() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let raffle_id = system.create_raffle(
-            RaffleBuilder::new(proposal_id, epoch_id)
-                .with_randomness("test_randomness".to_string())
-        ).unwrap();
-        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
-        
-        let vote = system.votes.get(&vote_id).unwrap();
-        assert!(matches!(vote.vote_type, VoteType::Formal { .. }));
-        assert_eq!(vote.status, VoteStatus::Open);
-    }
-
-    #[test]
-    fn test_create_informal_vote() {
-        let (mut system, _) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let vote_id = system.create_informal_vote(proposal_id).unwrap();
-        
-        let vote = system.votes.get(&vote_id).unwrap();
-        assert!(matches!(vote.vote_type, VoteType::Informal));
-        assert_eq!(vote.status, VoteStatus::Open);
-    }
-
-    #[test]
-    fn test_cast_formal_votes() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let raffle_id = system.create_raffle(
-            RaffleBuilder::new(proposal_id, epoch_id)
-                .with_randomness("test_randomness".to_string())
-        ).unwrap();
-        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
-        
-        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
-        let votes: Vec<(Uuid, VoteChoice)> = team_ids.iter().map(|&id| (id, VoteChoice::Yes)).collect();
-        
-        assert!(system.cast_votes(vote_id, votes).is_ok());
-        
-        let vote = system.votes.get(&vote_id).unwrap();
-        match &vote.participation {
-            VoteParticipation::Formal { counted, uncounted } => {
-                assert!(!counted.is_empty() || !uncounted.is_empty());
-            },
-            _ => panic!("Expected formal vote participation"),
-        }
-    }
-
-    #[test]
-    fn test_cast_informal_votes() {
-        let (mut system, _) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let vote_id = system.create_informal_vote(proposal_id).unwrap();
-        
-        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
-        let votes: Vec<(Uuid, VoteChoice)> = team_ids.iter().map(|&id| (id, VoteChoice::Yes)).collect();
-        
-        assert!(system.cast_votes(vote_id, votes).is_ok());
-        
-        let vote = system.votes.get(&vote_id).unwrap();
-        match &vote.participation {
-            VoteParticipation::Informal(participants) => {
-                assert!(!participants.is_empty());
-            },
-            _ => panic!("Expected informal vote participation"),
-        }
-    }
-
-    #[test]
-    fn test_cannot_retract_vote_after_closing() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let raffle_id = system.create_raffle(
-            RaffleBuilder::new(proposal_id, epoch_id)
-                .with_randomness("test_randomness".to_string())
-        ).unwrap();
-        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
-        
-        let team_id = *system.current_state.teams.keys().next().unwrap();
-        system.cast_votes(vote_id, vec![(team_id, VoteChoice::Yes)]).unwrap();
-        
-        system.close_vote(vote_id).unwrap();
-        
-        assert!(system.retract_vote(vote_id, team_id).is_err());
-    }
-
-    #[test]
-    fn test_close_formal_vote_with_points() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let raffle_id = system.create_raffle(
-            RaffleBuilder::new(proposal_id, epoch_id)
-                .with_randomness("test_randomness".to_string())
-        ).unwrap();
-        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
-        
-        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
-        let votes: Vec<(Uuid, VoteChoice)> = team_ids.iter().map(|&id| (id, VoteChoice::Yes)).collect();
-        system.cast_votes(vote_id, votes).unwrap();
-        
-        assert!(system.close_vote(vote_id).unwrap());
-        
-        // Check that points were awarded
-        for team in system.current_state.teams.values() {
-            assert!(team.points > 0);
-        }
-    }
-
-    #[test]
-    fn test_close_informal_vote_no_points() {
-        let (mut system, _) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let vote_id = system.create_informal_vote(proposal_id).unwrap();
-        
-        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
-        let votes: Vec<(Uuid, VoteChoice)> = team_ids.iter().map(|&id| (id, VoteChoice::Yes)).collect();
-        system.cast_votes(vote_id, votes).unwrap();
-        
-        assert!(!system.close_vote(vote_id).unwrap());
-        
-        // Check that no points were awarded
-        for team in system.current_state.teams.values() {
-            assert_eq!(team.points, 0);
-        }
-    }
-
-    #[test]
-    fn test_formal_vote_points_calculation() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let raffle_id = system.create_raffle(
-            RaffleBuilder::new(proposal_id, epoch_id)
-                .with_randomness("test_randomness".to_string())
-        ).unwrap();
-        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
-        
-        let raffle = system.raffles.get(&raffle_id).unwrap();
-        let counted_team_id = raffle.result.as_ref().unwrap().counted[0];
-        let uncounted_team_id = raffle.result.as_ref().unwrap().uncounted[0];
-        
-        system.cast_votes(vote_id, vec![(counted_team_id, VoteChoice::Yes), (uncounted_team_id, VoteChoice::Yes)]).unwrap();
-        
-        system.close_vote(vote_id).unwrap();
-        
-        assert_eq!(system.current_state.teams[&counted_team_id].points, Vote::COUNTED_VOTE_POINTS);
-        assert_eq!(system.current_state.teams[&uncounted_team_id].points, Vote::UNCOUNTED_VOTE_POINTS);
-    }
-
-    #[test]
-    fn test_set_epoch_reward() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        assert!(system.set_epoch_reward("ETH".to_string(), 10.0).is_ok());
-        
-        let epoch = system.epochs.get(&epoch_id).unwrap();
-        assert!(epoch.reward.is_some());
-        assert_eq!(epoch.reward.as_ref().unwrap().token, "ETH");
-        assert_eq!(epoch.reward.as_ref().unwrap().amount, 10.0);
-    }
-
-    #[test]
-    fn test_calculate_epoch_rewards() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let raffle_id = system.create_raffle(
-            RaffleBuilder::new(proposal_id, epoch_id)
-                .with_randomness("test_randomness".to_string())
-        ).unwrap();
-        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
-        
-        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
-        let votes: Vec<(Uuid, VoteChoice)> = team_ids.iter().map(|&id| (id, VoteChoice::Yes)).collect();
-        system.cast_votes(vote_id, votes).unwrap();
-        
-        system.close_vote(vote_id).unwrap();
-        
-        system.set_epoch_reward("ETH".to_string(), 10.0).unwrap();
-        
-        let rewards = system.calculate_epoch_rewards().unwrap();
-        assert_eq!(rewards.len(), system.current_state.teams.len());
-        
-        let total_reward: f64 = rewards.values().map(|r| r.amount).sum();
-        assert!((total_reward - 10.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_epoch_transition_resets_points() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let raffle_id = system.create_raffle(
-            RaffleBuilder::new(proposal_id, epoch_id)
-                .with_randomness("test_randomness".to_string())
-        ).unwrap();
-        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
-        
-        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
-        let votes: Vec<(Uuid, VoteChoice)> = team_ids.iter().map(|&id| (id, VoteChoice::Yes)).collect();
-        system.cast_votes(vote_id, votes).unwrap();
-        
-        system.close_vote(vote_id).unwrap();
-        
-        // Create and activate a new epoch
-        let start_date = Utc::now() + Duration::days(31);
-        let end_date = start_date + Duration::days(30);
-        let new_epoch_id = system.create_epoch(start_date, end_date).unwrap();
-        
-        system.close_epoch_with_rewards().unwrap();
-        system.activate_epoch(new_epoch_id).unwrap();
-        
-        // Check that all teams' points are reset
-        for team in system.current_state.teams.values() {
-            assert_eq!(team.points, 0);
-        }
-    }
-
-    #[test]
-    fn test_cannot_set_reward_for_non_existent_epoch() {
-        let mut system = BudgetSystem::new();
-        assert!(system.set_epoch_reward("ETH".to_string(), 10.0).is_err());
-    }
-
-    #[test]
-    fn test_cannot_calculate_rewards_without_set_reward() {
-        let (mut system, _) = setup_system_with_epoch();
-        assert!(system.calculate_epoch_rewards().is_err());
-    }
-
-    #[test]
-    fn test_cannot_calculate_rewards_with_no_points() {
-        let (mut system, _) = setup_system_with_epoch();
-        system.set_epoch_reward("ETH".to_string(), 10.0).unwrap();
-        assert!(system.calculate_epoch_rewards().is_err());
-    }
-
-    #[test]
-    fn test_points_allocation_after_formal_vote() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let raffle_id = system.create_raffle(
-            RaffleBuilder::new(proposal_id, epoch_id)
-                .with_randomness("test_randomness".to_string())
-        ).unwrap();
-        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
-
-        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
-        let votes: Vec<(Uuid, VoteChoice)> = team_ids.iter().map(|&id| (id, VoteChoice::Yes)).collect();
-        
-        system.cast_votes(vote_id, votes).unwrap();
-        system.close_vote(vote_id).unwrap();
-
-        // Check that points were allocated
-        for team in system.current_state.teams.values() {
-            assert!(team.points > 0, "Team {} should have points after voting", team.name);
-        }
-    }
-
-    #[test]
-    fn test_no_points_allocation_after_informal_vote() {
-        let (mut system, _) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let vote_id = system.create_informal_vote(proposal_id).unwrap();
-
-        let team_ids: Vec<Uuid> = system.current_state.teams.keys().cloned().collect();
-        let votes: Vec<(Uuid, VoteChoice)> = team_ids.iter().map(|&id| (id, VoteChoice::Yes)).collect();
-        
-        system.cast_votes(vote_id, votes).unwrap();
-        system.close_vote(vote_id).unwrap();
-
-        // Check that no points were allocated
-        for team in system.current_state.teams.values() {
-            assert_eq!(team.points, 0, "Team {} should have no points after informal voting", team.name);
-        }
-    }
-
-    #[test]
-    fn test_points_reset_on_epoch_activation() {
-        let (mut system, _) = setup_system_with_epoch();
-        
-        // Simulate points allocation
-        for team in system.current_state.teams.values_mut() {
-            team.add_points(10);
-        }
-
-        // Create and activate a new epoch
-        let start_date = Utc::now() + chrono::Duration::days(31);
-        let end_date = start_date + chrono::Duration::days(30);
-        let new_epoch_id = system.create_epoch(start_date, end_date).unwrap();
-        system.activate_epoch(new_epoch_id).unwrap();
-
-        // Check that all teams' points are reset
-        for team in system.current_state.teams.values() {
-            assert_eq!(team.points, 0, "Team {} should have 0 points after new epoch activation", team.name);
-        }
-    }
-
-    #[test]
-    fn test_points_calculation_for_counted_and_uncounted_votes() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        let proposal_id = system.add_proposal("Test Proposal".to_string(), None, None).unwrap();
-        let raffle_id = system.create_raffle(
-            RaffleBuilder::new(proposal_id, epoch_id)
-                .with_randomness("test_randomness".to_string())
-        ).unwrap();
-        let vote_id = system.create_formal_vote(proposal_id, raffle_id, Some(0.7)).unwrap();
-
-        let raffle = system.raffles.get(&raffle_id).unwrap();
-        let counted_team_id = raffle.result.as_ref().unwrap().counted[0];
-        let uncounted_team_id = raffle.result.as_ref().unwrap().uncounted[0];
-        
-        system.cast_votes(vote_id, vec![(counted_team_id, VoteChoice::Yes), (uncounted_team_id, VoteChoice::Yes)]).unwrap();
-        system.close_vote(vote_id).unwrap();
-
-        assert_eq!(system.current_state.teams[&counted_team_id].points, Vote::COUNTED_VOTE_POINTS);
-        assert_eq!(system.current_state.teams[&uncounted_team_id].points, Vote::UNCOUNTED_VOTE_POINTS);
-    }
-
-    #[test]
-    fn test_epoch_reward_calculation() {
-        let (mut system, _) = setup_system_with_epoch();
-        
-        // Simulate points allocation
-        for (i, team) in system.current_state.teams.values_mut().enumerate() {
-            team.add_points((i as u32 + 1) * 5); // 5, 10, 15, 20, 25 points
-        }
-
-        system.set_epoch_reward("ETH".to_string(), 100.0).unwrap();
-        let rewards = system.calculate_epoch_rewards().unwrap();
-
-        let total_points: u32 = system.current_state.teams.values().map(|t| t.points).sum();
-        let total_reward: f64 = rewards.values().map(|r| r.amount).sum();
-
-        assert!((total_reward - 100.0).abs() < f64::EPSILON);
-
-        for (team_id, reward) in rewards {
-            let team = &system.current_state.teams[&team_id];
-            let expected_percentage = team.points as f64 / total_points as f64;
-            let expected_amount = expected_percentage * 100.0;
-            
-            assert!((reward.percentage - expected_percentage).abs() < f64::EPSILON);
-            assert!((reward.amount - expected_amount).abs() < f64::EPSILON);
-        }
-    }
-
-    #[test]
-    fn test_close_epoch_with_rewards() {
-        let (mut system, epoch_id) = setup_system_with_epoch();
-        
-        // Simulate points allocation
-        for (i, team) in system.current_state.teams.values_mut().enumerate() {
-            team.add_points((i as u32 + 1) * 5); // 5, 10, 15, 20, 25 points
-        }
-
-        system.set_epoch_reward("ETH".to_string(), 100.0).unwrap();
-        system.close_epoch_with_rewards().unwrap();
-
-        let closed_epoch = system.epochs.get(&epoch_id).unwrap();
-        assert_eq!(closed_epoch.status, EpochStatus::Closed);
-        assert!(!closed_epoch.team_rewards.is_empty());
-
-        // Check that all teams' points are reset
-        for team in system.current_state.teams.values() {
-            assert_eq!(team.points, 0, "Team points should be reset after closing epoch");
-        }
-
-        assert!(system.current_epoch.is_none());
-    }
-
-    #[test]
-    fn test_budget_request_details_operations() {
-        let mut details = BudgetRequestDetails {
-            team: None,
-            request_amounts: HashMap::new(),
-            start_date: None,
-            end_date: None,
-            payment_status: None,
-        };
-
-        // Test adding token amounts
-        assert!(details.add_token_amount("USD".to_string(), 1000.0).is_ok());
-        assert!(details.add_token_amount("ETH".to_string(), 5.0).is_ok());
-        assert!(details.add_token_amount("BTC".to_string(), -1.0).is_err());
-
-        // Test updating token amounts
-        assert!(details.update_token_amount("USD", 1500.0).is_ok());
-        assert!(details.update_token_amount("XRP", 100.0).is_err());
-
-        // Test removing token
-        assert_eq!(details.remove_token("ETH"), Some(5.0));
-        assert_eq!(details.remove_token("XRP"), None);
-
-        // Test total value calculation
-        let mut exchange_rates = HashMap::new();
-        exchange_rates.insert("USD".to_string(), 1.0);
-        exchange_rates.insert("ETH".to_string(), 2000.0);
-        let total_usd = details.total_value_in("USD", &exchange_rates).unwrap();
-        assert_eq!(total_usd, 1500.0);
-    }
-
 }
