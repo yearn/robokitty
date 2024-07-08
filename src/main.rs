@@ -231,6 +231,7 @@ struct EthereumService {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Epoch {
     id: Uuid,
+    name: String,
     start_date: DateTime<Utc>,
     end_date: DateTime<Utc>,
     status: EpochStatus,
@@ -879,13 +880,14 @@ impl Vote {
 }
 
 impl Epoch {
-    fn new(start_date: DateTime<Utc>, end_date: DateTime<Utc>) -> Result<Self, &'static str> {
+    fn new(name: String, start_date: DateTime<Utc>, end_date: DateTime<Utc>) -> Result<Self, &'static str> {
         if start_date >= end_date {
             return Err("Start date must be before end date")
         }
 
         Ok(Self {
             id: Uuid::new_v4(),
+            name,
             start_date,
             end_date,
             status: EpochStatus::Planned,
@@ -893,6 +895,18 @@ impl Epoch {
             reward: None,
             team_rewards: HashMap::new(),
         })
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn set_name(&mut self, new_name: String) -> Result<(), &'static str> {
+        if new_name.trim().is_empty() {
+            return Err("Epoch name cannot be empty");
+        }
+        self.name = new_name;
+        Ok(())
     }
 
     fn set_reward(&mut self, token: String, amount: f64) -> Result<(), &'static str> {
@@ -1520,8 +1534,8 @@ impl BudgetSystem {
         Ok(result)
     }
 
-    fn create_epoch(&mut self, start_date:DateTime<Utc>, end_date: DateTime<Utc>) -> Result<Uuid, &'static str> {
-        let new_epoch = Epoch::new(start_date, end_date)?;
+    fn create_epoch(&mut self, name: String, start_date:DateTime<Utc>, end_date: DateTime<Utc>) -> Result<Uuid, &'static str> {
+        let new_epoch = Epoch::new(name, start_date, end_date)?;
 
         // Check for overlapping epochs
         for epoch in self.state.epochs.values() {
@@ -1535,6 +1549,13 @@ impl BudgetSystem {
         self.state.epochs.insert(epoch_id, new_epoch);
         self.save_state();
         Ok(epoch_id)
+    }
+
+    fn update_epoch_name(&mut self, epoch_id: Uuid, new_name: String) -> Result<(), &'static str> {
+        let epoch = self.state.epochs.get_mut(&epoch_id).ok_or("Epoch not found")?;
+        epoch.set_name(new_name)?;
+        self.save_state();
+        Ok(())
     }
 
     fn activate_epoch(&mut self, epoch_id: Uuid) -> Result<(), &'static str> {
@@ -1712,7 +1733,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Example: Create and activate an epoch
     let start_date = chrono::Utc::now();
     let end_date = start_date + chrono::Duration::days(30);
-    let epoch_id = budget_system.create_epoch(start_date, end_date)?;
+    let name = "Test Epoch I".to_string();
+    let epoch_id = budget_system.create_epoch(name, start_date, end_date)?;
     budget_system.activate_epoch(epoch_id)?;
     println!("Created and activated new epoch: {}", epoch_id);
 
