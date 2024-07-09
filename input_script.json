@@ -1,0 +1,135 @@
+[
+    {
+      "type": "CreateEpoch",
+      "params": {
+        "name": "E1",
+        "start_date": "2023-05-01T00:00:00Z",
+        "end_date": "2023-07-31T23:59:59Z"
+      }
+    },
+    {
+      "type": "ActivateEpoch",
+      "params": {
+        "name": "E1"
+      }
+    },
+    {
+      "type": "SetEpochReward",
+      "params": {
+        "token": "YFI",
+        "amount": 16.0
+      }
+    },
+    {
+      "type": "AddTeam",
+      "params": {
+        "name": "V3 Protocol",
+        "representative": "Schlag",
+        "trailing_monthly_revenue": [3180, 3180, 3180]
+      }
+    },
+    {
+      "type": "AddTeam",
+      "params": {
+        "name": "SMS",
+        "representative": "FP",
+        "trailing_monthly_revenue": [11250,11250,11250]
+      }
+    },
+    {
+      "type": "AddTeam",
+      "params": {
+        "name": "yLockers",
+        "representative": "Dudesahn",
+        "trailing_monthly_revenue": [164900, 164900, 164900]
+      }
+    },
+    {
+      "type": "AddTeam",
+      "params": {
+        "name": "Dinobots",
+        "representative": "Pata",
+        "trailing_monthly_revenue": [138400, 138400, 138400]
+      }
+    },
+    {
+      "type": "AddTeam",
+      "params": {
+        "name": "yFARM",
+        "representative": "Poolpi",
+        "trailing_monthly_revenue": [18930, 18930, 18930]
+      }
+    },
+    {
+      "type": "AddTeam",
+      "params": {
+        "name": "yETH/yPools",
+        "representative": "Korin",
+        "trailing_monthly_revenue": [17370, 17370, 17370]
+      }
+    },
+    {
+      "type": "AddTeam",
+      "params": {
+        "name": "Corn",
+        "representative": "Corn",
+        "trailing_monthly_revenue": [36950, 36950, 36950]
+      }
+    },
+    {
+      "type": "AddTeam",
+      "params": {
+        "name": "MOM",
+        "representative": "Facu",
+        "trailing_monthly_revenue": null
+      }
+    },
+    {
+      "type": "AddTeam",
+      "params": {
+        "name": "ySupport",
+        "representative": "Glenn",
+        "trailing_monthly_revenue": null
+      }
+    },
+    {
+      "type": "AddTeam",
+      "params": {
+        "name": "Zootroop",
+        "representative": "Micky",
+        "trailing_monthly_revenue": null
+      }
+    },
+    {
+      "type": "AddProposal",
+      "params": {
+        "title": "yBudget YFI vote for first epoch",
+        "url": "N/A",
+        "budget_request_details": {
+          "team": null,
+          "request_amounts": {
+            "YFI": 16
+          },
+          "start_date": "2024-05-01",
+          "end_date": "2024-07-31",
+          "payment_status": null
+        }
+      }
+    },
+    {
+      "type": "AddProposal",
+      "params": {
+        "title": "yLockers Front End (part 2)",
+        "url": "https://github.com/yearn/budget/issues/205",
+        "budget_request_details": {
+          "team": "yLockers",
+          "request_amounts": {
+            "DAI": 35000
+          },
+          "start_date": "2024-05-01",
+          "end_date": "2024-07-15",
+          "payment_status": null
+        }
+      }
+    }
+  ]

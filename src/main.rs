@@ -6,6 +6,7 @@ use std::{
     collections::HashMap,
     error::Error,
     fs,
+    path::Path,
     str,
     sync::Arc,
 };
@@ -1534,8 +1535,8 @@ impl BudgetSystem {
         Ok(result)
     }
 
-    fn create_epoch(&mut self, name: String, start_date:DateTime<Utc>, end_date: DateTime<Utc>) -> Result<Uuid, &'static str> {
-        let new_epoch = Epoch::new(name, start_date, end_date)?;
+    fn create_epoch(&mut self, name: &str, start_date:DateTime<Utc>, end_date: DateTime<Utc>) -> Result<Uuid, &'static str> {
+        let new_epoch = Epoch::new(name.to_string(), start_date, end_date)?;
 
         // Check for overlapping epochs
         for epoch in self.state.epochs.values() {
@@ -1580,11 +1581,11 @@ impl BudgetSystem {
         Ok(())
     }
 
-    fn set_epoch_reward(&mut self, token: String, amount: f64) -> Result<(), &'static str> {
+    fn set_epoch_reward(&mut self, token: &str, amount: f64) -> Result<(), &'static str> {
         let epoch_id = self.state.current_epoch.ok_or("No active epoch")?;
         let epoch = self.state.epochs.get_mut(&epoch_id).ok_or("Epoch not found")?;
         
-        epoch.set_reward(token, amount);
+        epoch.set_reward(token.to_string(), amount);
         self.save_state();
         Ok(())
     }
@@ -1709,6 +1710,80 @@ impl BudgetSystem {
         Ok(())
     }
 
+    fn get_epoch_id_by_name(&self, name: &str) -> Option<Uuid> {
+        self.state.epochs.iter()
+            .find(|(_, epoch)| epoch.name() == name)
+            .map(|(id, _)| *id)
+    }
+
+    fn get_team_id_by_name(&self, name: &str) -> Option<Uuid> {
+        self.state.current_state.teams.iter()
+            .find(|(_, team)| team.name == name)
+            .map(|(id, _)| *id)
+    }
+
+}
+
+// Script commands
+
+#[derive(Deserialize, Clone)]
+#[serde(tag = "type", content = "params")]
+enum ScriptCommand {
+    CreateEpoch { name: String, start_date: DateTime<Utc>, end_date: DateTime<Utc> },
+    ActivateEpoch { name: String },
+    SetEpochReward { token: String, amount: f64 },
+    AddTeam { name: String, representative: String, trailing_monthly_revenue: Option<Vec<u64>> },
+    AddProposal { 
+        title: String, 
+        url: Option<String>, 
+        budget_request_details: Option<BudgetRequestDetailsScript> 
+    },
+}
+
+#[derive(Deserialize, Clone)]
+struct BudgetRequestDetailsScript {
+    team: Option<String>,
+    request_amounts: HashMap<String, f64>,
+    start_date: Option<NaiveDate>,
+    end_date: Option<NaiveDate>,
+    payment_status: Option<PaymentStatus>,
+}
+
+async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptCommand) -> Result<(), Box<dyn Error>> {
+    match command {
+        ScriptCommand::CreateEpoch { name, start_date, end_date } => {
+            let epoch_id = budget_system.create_epoch(&name, start_date, end_date)?;
+            println!("Created epoch: {} ({})", name, epoch_id);
+        },
+        ScriptCommand::ActivateEpoch { name } => {
+            let epoch_id = budget_system.get_epoch_id_by_name(&name)
+                .ok_or_else(|| format!("Epoch not found: {}", name))?;
+            budget_system.activate_epoch(epoch_id)?;
+            println!("Activated epoch: {} ({})", name, epoch_id);
+        },
+        ScriptCommand::SetEpochReward { token, amount } => {
+            budget_system.set_epoch_reward(&token, amount)?;
+            println!("Set epoch reward: {} {}", amount, token);
+        },
+        ScriptCommand::AddTeam { name, representative, trailing_monthly_revenue } => {
+            let team_id = budget_system.add_team(name.clone(), representative, trailing_monthly_revenue)?;
+            println!("Added team: {} ({})", name, team_id);
+        },
+        ScriptCommand::AddProposal { title, url, budget_request_details } => {
+            let budget_request_details = budget_request_details.map(|details| {
+                BudgetRequestDetails {
+                    team: details.team.as_ref().and_then(|name| budget_system.get_team_id_by_name(name)),
+                    request_amounts: details.request_amounts,
+                    start_date: details.start_date,
+                    end_date: details.end_date,
+                    payment_status: details.payment_status,
+                }
+            });
+            let proposal_id = budget_system.add_proposal(title.clone(), url, budget_request_details)?;
+            println!("Added proposal: {} ({})", title, proposal_id);
+        },
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -1717,8 +1792,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     const IPC_PATH: &str = "/tmp/reth.ipc";
     const FUTURE_BLOCK_OFFSET: u64 = 10;
     const STATE_FILE: &str = "budget_system_state.json";
+    const SCRIPT_FILE: &str = "input_script.json";
 
-    // Try to load existing state, or create a new BudgetSystem if no state exists
+    // Initialize or load the BudgetSystem
     let mut budget_system = match BudgetSystem::load_from_file(STATE_FILE, IPC_PATH, FUTURE_BLOCK_OFFSET).await {
         Ok(system) => {
             println!("Loaded existing state from {}", STATE_FILE);
@@ -1730,55 +1806,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
         },
     };
 
-    // Example: Create and activate an epoch
-    let start_date = chrono::Utc::now();
-    let end_date = start_date + chrono::Duration::days(30);
-    let name = "Test Epoch I".to_string();
-    let epoch_id = budget_system.create_epoch(name, start_date, end_date)?;
-    budget_system.activate_epoch(epoch_id)?;
-    println!("Created and activated new epoch: {}", epoch_id);
+    // Read and execute the script
+    if Path::new(SCRIPT_FILE).exists() {
+        let script_content = fs::read_to_string(SCRIPT_FILE)?;
+        let script: Vec<ScriptCommand> = serde_json::from_str(&script_content)?;
+        
+        for command in script {
+            execute_command(&mut budget_system, command).await?;
+        }
 
-    // Example: Add some teams
-    let team_a = budget_system.add_team("Team A".to_string(), "Alice".to_string(), Some(vec![100000, 120000, 110000]))?;
-    let team_b = budget_system.add_team("Team B".to_string(), "Bob".to_string(), Some(vec![90000, 95000, 100000]))?;
-    let team_c = budget_system.add_team("Team C".to_string(), "Charlie".to_string(), None)?;
-    println!("Added teams: {}, {}, {}", team_a, team_b, team_c);
-
-    // Example: Create a proposal
-    let proposal_id = budget_system.add_proposal(
-        "Q3 Budget Allocation".to_string(),
-        Some("https://example.com/q3-budget".to_string()),
-        None
-    )?;
-    println!("Created proposal: {}", proposal_id);
-
-    // Example: Create a raffle
-    let raffle_id = budget_system.create_raffle(
-        RaffleBuilder::new(proposal_id, epoch_id)
-            .with_seats(7, 5)
-    ).await?;
-    println!("Created raffle: {}", raffle_id);
-
-    // Example: Create a historical raffle
-    let historical_block = 1_000_000; // Replace with an actual historical block number
-    let historical_team_order = vec![team_a, team_b, team_c];
-    let historical_raffle_id = budget_system.create_historical_raffle(
-        RaffleBuilder::new(Uuid::new_v4(), epoch_id)
-            .with_custom_team_order(historical_team_order),
-        historical_block
-    ).await?;
-    println!("Created historical raffle: {}", historical_raffle_id);
+        println!("Script execution completed.");
+    } else {
+        println!("No script file found at {}. Skipping script execution.", SCRIPT_FILE);
+    }
 
     // Save the current state
     budget_system.save_state()?;
     println!("Saved current state to {}", STATE_FILE);
-
-    // Example: Print some system statistics
-    println!("System statistics:");
-    println!("  Teams: {}", budget_system.state.current_state.teams.len());
-    println!("  Proposals: {}", budget_system.state.proposals.len());
-    println!("  Raffles: {}", budget_system.state.raffles.len());
-    println!("  Current epoch: {:?}", budget_system.state.current_epoch);
 
     Ok(())
 }
