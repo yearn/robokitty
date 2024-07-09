@@ -141,5 +141,14 @@
         "total_counted_seats": 7,
         "max_earner_seats": 5
       }
+    },
+    {
+      "type": "ImportHistoricalVote",
+      "params": {
+        "proposal_name": "yBudget2 YFI allocation for E1",
+        "passed": true,
+        "participating_teams": [],
+        "non_participating_teams": []
+      }
     }
   ]
