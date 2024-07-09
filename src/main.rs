@@ -1722,6 +1722,78 @@ impl BudgetSystem {
             .map(|(id, _)| *id)
     }
 
+    fn get_proposal_id_by_name(&self, name: &str) -> Option<Uuid> {
+        self.state.proposals.iter()
+            .find(|(_, proposal)| proposal.title == name)
+            .map(|(id, _)| *id)
+    }
+
+    fn import_predefined_raffle(
+        &mut self,
+        proposal_name: &str,
+        counted_teams: Vec<String>,
+        uncounted_teams: Vec<String>,
+        total_counted_seats: usize,
+        max_earner_seats: usize
+    ) -> Result<Uuid, Box<dyn Error>> {
+        let proposal_id = self.get_proposal_id_by_name(proposal_name)
+            .ok_or_else(|| format!("Proposal not found: {}", proposal_name))?;
+        
+        let epoch_id = self.state.current_epoch
+            .ok_or("No active epoch")?;
+
+        let counted_team_ids: Vec<Uuid> = counted_teams.iter()
+            .filter_map(|name| self.get_team_id_by_name(name))
+            .collect();
+        
+        let uncounted_team_ids: Vec<Uuid> = uncounted_teams.iter()
+            .filter_map(|name| self.get_team_id_by_name(name))
+            .collect();
+
+        // Check if total_counted_seats matches the number of counted teams
+        if counted_team_ids.len() != total_counted_seats {
+            return Err(format!(
+                "Mismatch between specified total_counted_seats ({}) and actual number of counted teams ({})",
+                total_counted_seats, counted_team_ids.len()
+            ).into());
+        }
+
+        // Additional check to ensure max_earner_seats is not greater than total_counted_seats
+        if max_earner_seats > total_counted_seats {
+            return Err(format!(
+                "max_earner_seats ({}) cannot be greater than total_counted_seats ({})",
+                max_earner_seats, total_counted_seats
+            ).into());
+        }
+
+        let raffle_config = RaffleConfig {
+            proposal_id,
+            epoch_id,
+            initiation_block: 0,
+            randomness_block: 0,
+            block_randomness: "N/A".to_string(),
+            total_counted_seats,
+            max_earner_seats,
+            excluded_teams: Vec::new(),
+            custom_allocation: Some(HashMap::new()),
+            custom_team_order: Some(Vec::new()),
+            is_historical: true,
+        };
+
+        let mut raffle = Raffle::new(raffle_config, &self.state.current_state.teams)?;
+        
+        raffle.result = Some(RaffleResult {
+            counted: counted_team_ids,
+            uncounted: uncounted_team_ids,
+        });
+
+        let raffle_id = raffle.id;
+        self.state.raffles.insert(raffle_id, raffle);
+        self.save_state()?;
+
+        Ok(raffle_id)
+    }
+
 }
 
 // Script commands
@@ -1737,6 +1809,13 @@ enum ScriptCommand {
         title: String, 
         url: Option<String>, 
         budget_request_details: Option<BudgetRequestDetailsScript> 
+    },
+    ImportPredefinedRaffle {
+        proposal_name: String,
+        counted_teams: Vec<String>,
+        uncounted_teams: Vec<String>,
+        total_counted_seats: usize,
+        max_earner_seats: usize,
     },
 }
 
@@ -1781,6 +1860,26 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
             });
             let proposal_id = budget_system.add_proposal(title.clone(), url, budget_request_details)?;
             println!("Added proposal: {} ({})", title, proposal_id);
+        },
+        ScriptCommand::ImportPredefinedRaffle { 
+            proposal_name, 
+            counted_teams, 
+            uncounted_teams, 
+            total_counted_seats, 
+            max_earner_seats 
+        } => {
+            let raffle_id = budget_system.import_predefined_raffle(
+                &proposal_name, 
+                counted_teams.clone(), 
+                uncounted_teams.clone(), 
+                total_counted_seats, 
+                max_earner_seats
+            )?;
+            println!("Imported predefined raffle for proposal '{}' (Raffle ID: {})", proposal_name, raffle_id);
+            println!("  Counted teams: {:?}", counted_teams);
+            println!("  Uncounted teams: {:?}", uncounted_teams);
+            println!("  Total counted seats: {}", total_counted_seats);
+            println!("  Max earner seats: {}", max_earner_seats);
         },
     }
     Ok(())

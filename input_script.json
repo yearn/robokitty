@@ -23,7 +23,7 @@
     {
       "type": "AddTeam",
       "params": {
-        "name": "V3 Protocol",
+        "name": "V3",
         "representative": "Schlag",
         "trailing_monthly_revenue": [3180, 3180, 3180]
       }
@@ -103,7 +103,7 @@
     {
       "type": "AddProposal",
       "params": {
-        "title": "yBudget YFI vote for first epoch",
+        "title": "yBudget2 YFI allocation for E1",
         "url": "N/A",
         "budget_request_details": {
           "team": null,
@@ -130,6 +130,16 @@
           "end_date": "2024-07-15",
           "payment_status": null
         }
+      }
+    },
+    {
+      "type": "ImportPredefinedRaffle",
+      "params": {
+        "proposal_name": "yBudget2 YFI allocation for E1",
+        "counted_teams": ["yLockers", "Dinobots", "yFARM", "yETH/yPools", "Corn", "ySupport", "Zootroop"],
+        "uncounted_teams": ["V3", "SMS", "MOM"],
+        "total_counted_seats": 7,
+        "max_earner_seats": 5
       }
     }
   ]
