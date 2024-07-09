@@ -150,5 +150,15 @@
         "participating_teams": [],
         "non_participating_teams": []
       }
+    },
+    {
+      "type": "ImportHistoricalRaffle",
+      "params": {
+        "proposal_name": "yLockers Front End (part 2)",
+        "initiation_block": 19882889,
+        "randomness_block": 19882899,
+        "team_order": ["V3", "SMS", "yLockers", "Dinobots", "yFARM", "yETH/yPools", "Corn", "MOM", "ySupport", "Zootroop"],
+        "excluded_teams": ["yLockers"]
+      }
     }
   ]
