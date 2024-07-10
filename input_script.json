@@ -169,5 +169,57 @@
         "participating_teams": [],
         "non_participating_teams": []
       }
+    },
+    {
+      "type": "AddTeam",
+      "params": {
+        "name": "DevDocs",
+        "representative": "Ross",
+        "trailing_monthly_revenue": null
+      }
+    },
+    {
+      "type": "ChangeTeamStatus",
+      "params": {
+        "team_name": "DevDocs",
+        "new_status": "Inactive",
+        "trailing_monthly_revenue": null
+      }
+    },
+    {
+      "type": "AddProposal",
+      "params": {
+        "title": "DevDocs Budget Request",
+        "url": "https://github.com/yearn/budget/issues/204",
+        "budget_request_details": {
+          "team": "DevDocs",
+          "request_amounts": {
+            "DAI": 7500,
+            "YFI": 0.3
+          },
+          "start_date": "2024-05-01",
+          "end_date": "2024-07-31",
+          "payment_status": null
+        }
+      }
+    },
+    {
+      "type": "ImportHistoricalRaffle",
+      "params": {
+        "proposal_name": "DevDocs Budget Request",
+        "initiation_block": 19888318,
+        "randomness_block": 19888328,
+        "team_order": ["V3", "SMS", "yLockers", "Dinobots", "yFARM", "yETH/yPools", "Corn", "MOM", "ySupport", "Zootroop"],
+        "excluded_teams": []
+      }
+    },
+    {
+      "type": "ImportHistoricalVote",
+      "params": {
+        "proposal_name": "DevDocs Budget Request",
+        "passed": true,
+        "participating_teams": [],
+        "non_participating_teams": []
+      }
     }
 ]

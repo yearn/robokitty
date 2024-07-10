@@ -1251,10 +1251,10 @@ impl BudgetSystem {
         }
     }
 
-    fn update_team_status(&mut self, team_id: Uuid, new_status: TeamStatus) -> Result<(), &'static str> {
+    fn update_team_status(&mut self, team_id: Uuid, new_status: &TeamStatus) -> Result<(), &'static str> {
         match self.state.current_state.teams.get_mut(&team_id) {
             Some(team) => {
-                team.change_status(new_status)?;
+                team.change_status(new_status.clone())?;
                 self.save_state();
                 Ok(())
             },
@@ -2113,6 +2113,11 @@ enum ScriptCommand {
         total_counted_seats: Option<usize>,
         max_earner_seats: Option<usize>,
     },
+    ChangeTeamStatus {
+        team_name: String,
+        new_status: String,
+        trailing_monthly_revenue: Option<Vec<u64>>,
+    },
 }
 
 #[derive(Deserialize, Clone)]
@@ -2325,6 +2330,25 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
             } else {
                 println!("Raffle result not available");
             }
+        },
+        ScriptCommand::ChangeTeamStatus { team_name, new_status, trailing_monthly_revenue } => {
+            let team_id = budget_system.get_team_id_by_name(&team_name)
+                .ok_or_else(|| format!("Team not found: {}", team_name))?;
+            
+            let new_status = match new_status.to_lowercase().as_str() {
+                "earner" => {
+                    let revenue = trailing_monthly_revenue
+                        .ok_or("Trailing monthly revenue is required for Earner status")?;
+                    TeamStatus::Earner { trailing_monthly_revenue: revenue }
+                },
+                "supporter" => TeamStatus::Supporter,
+                "inactive" => TeamStatus::Inactive,
+                _ => return Err(format!("Invalid status: {}", new_status).into()),
+            };
+
+            budget_system.update_team_status(team_id, &new_status)?;
+            
+            println!("Changed status of team '{}' to {:?}", team_name, new_status);
         },
 
     }
