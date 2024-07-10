@@ -160,5 +160,14 @@
         "team_order": ["V3", "SMS", "yLockers", "Dinobots", "yFARM", "yETH/yPools", "Corn", "MOM", "ySupport", "Zootroop"],
         "excluded_teams": ["yLockers"]
       }
+    },
+    {
+      "type": "ImportHistoricalVote",
+      "params": {
+        "proposal_name": "yLockers Front End (part 2)",
+        "passed": true,
+        "participating_teams": [],
+        "non_participating_teams": []
+      }
     }
-  ]
+]

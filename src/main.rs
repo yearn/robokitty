@@ -895,10 +895,6 @@ impl Vote {
         }
     }
 
-    fn get_result(&self) -> Option<&VoteResult> {
-        self.result.as_ref()
-    }
-
     fn add_points_for_vote(&self, team_id: &Uuid) -> u32 {
         match &self.vote_type {
             VoteType::Formal { .. } => {
@@ -963,6 +959,24 @@ impl Vote {
             }
         }
         points
+    }
+
+    fn get_result(&self) -> Option<bool> {
+        self.result.as_ref().map(|r| match r {
+            VoteResult::Formal { passed, .. } => *passed,
+            VoteResult::Informal { .. } => false, // Informal votes don't have a pass/fail status
+        })
+    }
+
+    fn get_vote_counts(&self) -> Option<(VoteCount, VoteCount)> {
+        match &self.result {
+            Some(VoteResult::Formal { counted, uncounted, .. }) => Some((*counted, *uncounted)),
+            _ => None,
+        }
+    }
+
+    fn is_vote_count_available(&self) -> bool {
+        !self.is_historical
     }
     
 }
@@ -1944,7 +1958,6 @@ impl BudgetSystem {
         let proposal_id = self.get_proposal_id_by_name(proposal_name)
             .ok_or_else(|| format!("Proposal not found: {}", proposal_name))?;
 
-        // Find the associated raffle
         let raffle_id = self.state.raffles.iter()
             .find(|(_, raffle)| raffle.config.proposal_id == proposal_id)
             .map(|(id, _)| *id)
@@ -1955,58 +1968,49 @@ impl BudgetSystem {
 
         let epoch_id = raffle.config.epoch_id;
 
-        // Create a new historical vote
-        let mut vote = Vote::new_formal(
-            proposal_id,
-            epoch_id,
-            raffle_id,
-            raffle.config.total_counted_seats as u32,
-            None // Use default threshold
-        );
-        vote.is_historical = true;
-
-        // Determine participating and non-participating teams
-        let (participating_ids, non_participating_ids) = self.determine_participation(
+        let (participating_ids, _) = self.determine_participation(
             raffle,
             &participating_teams,
             &non_participating_teams
         )?;
 
-        // Record participation without specifying vote choices
-        if let VoteParticipation::Formal { counted, uncounted } = &mut vote.participation {
-            for &team_id in &participating_ids {
-                if raffle.result.as_ref().unwrap().counted.contains(&team_id) {
-                    counted.push(team_id);
-                } else {
-                    uncounted.push(team_id);
-                }
-            }
-        }
+        let participation = VoteParticipation::Formal {
+            counted: participating_ids.iter()
+                .filter(|&id| raffle.result.as_ref().unwrap().counted.contains(id))
+                .cloned()
+                .collect(),
+            uncounted: participating_ids.iter()
+                .filter(|&id| raffle.result.as_ref().unwrap().uncounted.contains(id))
+                .cloned()
+                .collect(),
+        };
 
-        // Set the result based on the 'passed' parameter
-        vote.result = Some(if passed {
-            VoteResult::Formal {
-                counted: VoteCount { yes: vote.participation.counted_count(), no: 0 },
-                uncounted: VoteCount { yes: vote.participation.uncounted_count(), no: 0 },
-                passed: true,
-            }
-        } else {
-            VoteResult::Formal {
-                counted: VoteCount { yes: 0, no: vote.participation.counted_count() },
-                uncounted: VoteCount { yes: 0, no: vote.participation.uncounted_count() },
-                passed: false,
-            }
-        });
+        let vote = Vote {
+            id: Uuid::new_v4(),
+            proposal_id,
+            epoch_id,
+            vote_type: VoteType::Formal {
+                raffle_id,
+                total_eligible_seats: raffle.config.total_counted_seats as u32,
+                threshold: Vote::DEFAULT_QUALIFIED_MAJORITY_THRESHOLD
+            },
+            status: VoteStatus::Closed,
+            participation,
+            result: Some(VoteResult::Formal {
+                counted: VoteCount { yes: 0, no: 0 }, // We don't know the actual counts
+                uncounted: VoteCount { yes: 0, no: 0 }, // We don't know the actual counts
+                passed,
+            }),
+            opened_at: Utc::now(), // Use import time as a placeholder
+            closed_at: Some(Utc::now()), // Use import time as a placeholder
+            is_historical: true,
+            votes: HashMap::new(), // Empty, as we don't know individual votes
+        };
 
-        // Close the vote and allocate points
-        let team_points = vote.calculate_points();
-        for (team_id, points) in team_points.iter() {
-            if let Some(team) = self.state.current_state.teams.get_mut(team_id) {
-                team.add_points(*points);
-            }
-        }
+        let vote_id = vote.id;
+        self.state.votes.insert(vote_id, vote);
 
-        // Approve and close the proposal
+        // Update proposal status based on vote result
         let proposal = self.state.proposals.get_mut(&proposal_id)
             .ok_or_else(|| format!("Proposal not found: {}", proposal_id))?;
         
@@ -2016,10 +2020,6 @@ impl BudgetSystem {
             proposal.reject()?;
         }
         proposal.update_status(ProposalStatus::Closed);
-
-        // Save the vote
-        let vote_id = vote.id;
-        self.state.votes.insert(vote_id, vote);
 
         self.save_state()?;
 
@@ -2174,15 +2174,46 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                 participating_teams.clone(),
                 non_participating_teams.clone()
             )?;
+
+            let vote = budget_system.state.votes.get(&vote_id).unwrap();
+            let proposal = budget_system.state.proposals.get(&vote.proposal_id).unwrap();
+
             println!("Imported historical vote for proposal '{}' (Vote ID: {})", proposal_name, vote_id);
-            println!("  Passed: {}", passed);
-            if !participating_teams.is_empty() {
-                println!("  Participating teams: {:?}", participating_teams);
-            } else if !non_participating_teams.is_empty() {
-                println!("  Non-participating teams: {:?}", non_participating_teams);
-            } else {
-                println!("  All teams participated");
+            println!("Vote passed: {}", passed);
+            
+            println!("\nParticipating teams:");
+            for team_name in &participating_teams {
+                println!("  {}", team_name);
             }
+
+            println!("\nNon-participating teams:");
+            for team_name in &non_participating_teams {
+                println!("  {}", team_name);
+            }
+
+            if let VoteType::Formal { raffle_id, .. } = vote.vote_type {
+                if let Some(raffle) = budget_system.state.raffles.get(&raffle_id) {
+                    if let VoteParticipation::Formal { counted, uncounted } = &vote.participation {
+                        println!("\nCounted seats:");
+                        for &team_id in counted {
+                            let team = &raffle.team_snapshots[&team_id];
+                            println!("  {}", team.name);
+                        }
+
+                        println!("\nUncounted seats:");
+                        for &team_id in uncounted {
+                            let team = &raffle.team_snapshots[&team_id];
+                            println!("  {}", team.name);
+                        }
+                    }
+                } else {
+                    println!("\nAssociated raffle not found. Cannot display seat breakdowns.");
+                }
+            } else {
+                println!("\nThis is an informal vote, no counted/uncounted breakdown available.");
+            }
+
+            println!("\nNote: Detailed vote counts are not available for historical votes.");
         },
         ScriptCommand::ImportHistoricalRaffle { 
             proposal_name, 
