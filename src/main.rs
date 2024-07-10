@@ -2008,6 +2008,21 @@ impl BudgetSystem {
         };
 
         let vote_id = vote.id;
+
+        // Calculate and award points
+        if let VoteParticipation::Formal { counted, uncounted } = &vote.participation {
+            for &team_id in counted {
+                if let Some(team) = self.state.current_state.teams.get_mut(&team_id) {
+                    team.add_points(Vote::COUNTED_VOTE_POINTS);
+                }
+            }
+            for &team_id in uncounted {
+                if let Some(team) = self.state.current_state.teams.get_mut(&team_id) {
+                    team.add_points(Vote::UNCOUNTED_VOTE_POINTS);
+                }
+            }
+        }
+
         self.state.votes.insert(vote_id, vote);
 
         // Update proposal status based on vote result
@@ -2180,11 +2195,6 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
 
             println!("Imported historical vote for proposal '{}' (Vote ID: {})", proposal_name, vote_id);
             println!("Vote passed: {}", passed);
-            
-            println!("\nParticipating teams:");
-            for team_name in &participating_teams {
-                println!("  {}", team_name);
-            }
 
             println!("\nNon-participating teams:");
             for team_name in &non_participating_teams {
@@ -2197,13 +2207,13 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                         println!("\nCounted seats:");
                         for &team_id in counted {
                             let team = &raffle.team_snapshots[&team_id];
-                            println!("  {}", team.name);
+                            println!("  {} (+{} points)", team.name, Vote::COUNTED_VOTE_POINTS);
                         }
 
                         println!("\nUncounted seats:");
                         for &team_id in uncounted {
                             let team = &raffle.team_snapshots[&team_id];
-                            println!("  {}", team.name);
+                            println!("  {} (+{} points)", team.name, Vote::UNCOUNTED_VOTE_POINTS);
                         }
                     }
                 } else {
