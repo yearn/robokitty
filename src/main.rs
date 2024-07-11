@@ -2127,6 +2127,95 @@ impl BudgetSystem {
 
         Ok(report)
     }
+
+    fn print_team_vote_participation(&self, team_name: &str, epoch_name: Option<&str>) -> Result<String, Box<dyn Error>> {
+        let team_id = self.get_team_id_by_name(team_name)
+            .ok_or_else(|| format!("Team not found: {}", team_name))?;
+
+        let epoch = if let Some(name) = epoch_name {
+            self.state.epochs.values()
+                .find(|e| e.name() == name)
+                .ok_or_else(|| format!("Epoch not found: {}", name))?
+        } else {
+            self.get_current_epoch()
+                .ok_or("No active epoch and no epoch specified")?
+        };
+
+        let mut report = format!("Vote Participation Report for Team: {}\n", team_name);
+        report.push_str(&format!("Epoch: {} ({})\n\n", epoch.name(), epoch.id()));
+        let mut vote_reports = Vec::new();
+
+        for vote_id in epoch.associated_proposals.iter()
+            .filter_map(|proposal_id| self.state.votes.values()
+                .find(|v| v.proposal_id == *proposal_id)
+                .map(|v| v.id)) 
+        {
+            let vote = &self.state.votes[&vote_id];
+            let participation_status = match &vote.participation {
+                VoteParticipation::Formal { counted, uncounted } => {
+                    if counted.contains(&team_id) {
+                        Some("Counted")
+                    } else if uncounted.contains(&team_id) {
+                        Some("Uncounted")
+                    } else {
+                        None
+                    }
+                },
+                VoteParticipation::Informal(participants) => {
+                    if participants.contains(&team_id) {
+                        Some("N/A (Informal)")
+                    } else {
+                        None
+                    }
+                },
+            };
+
+            if let Some(status) = participation_status {
+                let proposal = self.state.proposals.get(&vote.proposal_id)
+                    .ok_or_else(|| format!("Proposal not found for vote: {}", vote_id))?;
+
+                let vote_type = match vote.vote_type {
+                    VoteType::Formal { .. } => "Formal",
+                    VoteType::Informal => "Informal",
+                };
+
+                let result = match vote.get_result() {
+                    Some(true) => "Passed",
+                    Some(false) => "Failed",
+                    None => "Pending",
+                };
+
+                let points = vote.add_points_for_vote(&team_id);
+
+                vote_reports.push((
+                    vote.opened_at,
+                    format!(
+                        "Vote ID: {}\n\
+                        Proposal: {}\n\
+                        Type: {}\n\
+                        Participation: {}\n\
+                        Result: {}\n\
+                        Points Earned: {}\n\n",
+                        vote_id, proposal.title, vote_type, status, result, points
+                    )
+                ));
+            }
+        }
+
+        // Sort vote reports by date, most recent first
+        vote_reports.sort_by(|a, b| b.0.cmp(&a.0));
+
+        // Use a reference to iterate over vote_reports
+        for (_, vote_report) in &vote_reports {
+            report.push_str(vote_report);
+        }
+
+        if vote_reports.is_empty() {
+            report.push_str("This team has not participated in any votes during this epoch.\n");
+        }
+
+        Ok(report)
+    }
 }
 
 // Script commands
@@ -2172,6 +2261,10 @@ enum ScriptCommand {
     },
     PrintTeamReport,
     PrintEpochState,
+    PrintTeamVoteParticipation {
+        team_name: String,
+        epoch_name: Option<String> 
+    },
 }
 
 #[derive(Deserialize, Clone)]
@@ -2412,6 +2505,12 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
             match budget_system.print_epoch_state() {
                 Ok(report) => println!("{}", report),
                 Err(e) => println!("Error printing epoch state: {}", e),
+            }
+        },
+        ScriptCommand::PrintTeamVoteParticipation { team_name, epoch_name } => {
+            match budget_system.print_team_vote_participation(&team_name, epoch_name.as_deref()) {
+                Ok(report) => println!("{}", report),
+                Err(e) => println!("Error printing team vote participation: {}", e),
             }
         },
 

@@ -724,5 +724,17 @@
     },
     {
       "type": "PrintEpochState"
+    }, 
+    {
+      "type": "PrintTeamVoteParticipation",
+      "params": {
+          "team_name": "V3"
+      }
+    },
+    {
+      "type": "PrintTeamVoteParticipation",
+      "params": {
+          "team_name": "SMS"
+      }
     }
   ]
