@@ -2075,6 +2075,58 @@ impl BudgetSystem {
             Ok((all_team_ids, Vec::new()))
         }
     }
+
+    fn print_team_report(&self) -> String {
+        let mut teams: Vec<&Team> = self.state.current_state.teams.values().collect();
+        teams.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let mut report = String::from("Team Report:\n\n");
+
+        for team in teams {
+            report.push_str(&format!("Name: {}\n", team.name));
+            report.push_str(&format!("ID: {}\n", team.id));
+            report.push_str(&format!("Representative: {}\n", team.representative));
+            report.push_str(&format!("Status: {:?}\n", team.status));
+            report.push_str(&format!("Points: {}\n", team.points));
+
+            if let TeamStatus::Earner { trailing_monthly_revenue } = &team.status {
+                report.push_str(&format!("Trailing Monthly Revenue: {:?}\n", trailing_monthly_revenue));
+            }
+
+            report.push_str("\n");
+        }
+
+        report
+    }
+
+    fn print_epoch_state(&self) -> Result<String, &'static str> {
+        let epoch = self.get_current_epoch().ok_or("No active epoch")?;
+        let proposals = self.get_proposals_for_epoch(epoch.id());
+
+        let total_proposals = proposals.len();
+        let passed_proposals = proposals.iter().filter(|p| matches!(p.resolution, Some(Resolution::Approved))).count();
+        let failed_proposals = proposals.iter().filter(|p| matches!(p.resolution, Some(Resolution::Rejected))).count();
+        let open_proposals = proposals.iter().filter(|p| p.is_actionable()).count();
+
+        let mut report = String::from("Current Epoch State:\n\n");
+        report.push_str(&format!("Name: {}\n", epoch.name()));
+        report.push_str(&format!("ID: {}\n", epoch.id()));
+        report.push_str(&format!("Start Date: {}\n", epoch.start_date()));
+        report.push_str(&format!("End Date: {}\n", epoch.end_date()));
+        report.push_str(&format!("Status: {:?}\n", epoch.status()));
+        report.push_str(&format!("Total Proposals: {}\n", total_proposals));
+        report.push_str(&format!("Passed Proposals: {}\n", passed_proposals));
+        report.push_str(&format!("Failed Proposals: {}\n", failed_proposals));
+        report.push_str(&format!("Open Proposals: {}\n", open_proposals));
+
+        if let Some(reward) = &epoch.reward {
+            report.push_str(&format!("Epoch Reward: {} {}\n", reward.amount, reward.token));
+        } else {
+            report.push_str("Epoch Reward: Not set\n");
+        }
+
+        Ok(report)
+    }
 }
 
 // Script commands
@@ -2118,6 +2170,8 @@ enum ScriptCommand {
         new_status: String,
         trailing_monthly_revenue: Option<Vec<u64>>,
     },
+    PrintTeamReport,
+    PrintEpochState,
 }
 
 #[derive(Deserialize, Clone)]
@@ -2349,6 +2403,16 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
             budget_system.update_team_status(team_id, &new_status)?;
             
             println!("Changed status of team '{}' to {:?}", team_name, new_status);
+        },
+        ScriptCommand::PrintTeamReport => {
+            let report = budget_system.print_team_report();
+            println!("{}", report);
+        },
+        ScriptCommand::PrintEpochState => {
+            match budget_system.print_epoch_state() {
+                Ok(report) => println!("{}", report),
+                Err(e) => println!("Error printing epoch state: {}", e),
+            }
         },
 
     }

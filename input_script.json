@@ -221,5 +221,508 @@
         "participating_teams": [],
         "non_participating_teams": []
       }
+    },
+    {
+      "type": "AddProposal",
+      "params": {
+        "title": "yFARM 2",
+        "url": "https://hackmd.io/G72KGLQLSTOnzhIXLwxEQQ",
+        "budget_request_details": {
+          "team": "yFARM",
+          "request_amounts": {
+            "YFI": 300
+          },
+          "start_date": "2024-05-01",
+          "end_date": "2024-08-01",
+          "payment_status": null
+        }
+      }
+    },
+    {
+      "type": "ImportHistoricalRaffle",
+      "params": {
+        "proposal_name": "yFARM 2",
+        "initiation_block": 19924686,
+        "randomness_block": 19924696,
+        "team_order": ["V3", "SMS", "yLockers", "Dinobots", "yFARM", "yETH/yPools", "Corn", "MOM", "ySupport", "Zootroop"],
+        "excluded_teams": ["yFARM", "Dinobots"]
+      }
+    },
+    {
+      "type": "ImportHistoricalVote",
+      "params": {
+        "proposal_name": "yFARM 2",
+        "passed": false,
+        "participating_teams": [],
+        "non_participating_teams": []
+      }
+    },
+    {
+      "type": "AddProposal",
+      "params": {
+        "title": "yBudget Cat Herder",
+        "url": "https://github.com/yearn/budget/issues/213",
+        "budget_request_details": {
+          "team": null,
+          "request_amounts": {
+            "DAI": 30000
+          },
+          "start_date": "2024-05-01",
+          "end_date": "2024-07-31",
+          "payment_status": null
+        }
+      }
+    },
+    {
+      "type": "ImportHistoricalRaffle",
+      "params": {
+        "proposal_name": "yBudget Cat Herder",
+        "initiation_block": 19924741,
+        "randomness_block": 19924751,
+        "team_order": ["V3", "SMS", "yLockers", "Dinobots", "yFARM", "yETH/yPools", "Corn", "MOM", "ySupport", "Zootroop"],
+        "excluded_teams": []
+      }
+    },
+    {
+      "type": "ImportHistoricalVote",
+      "params": {
+        "proposal_name": "yBudget Cat Herder",
+        "passed": true,
+        "participating_teams": [],
+        "non_participating_teams": []
+      }
+    },
+    {
+      "type": "AddProposal",
+      "params": {
+        "title": "MOM Budget Request",
+        "url": "https://github.com/yearn/budget/issues/214",
+        "budget_request_details": {
+          "team": "MOM",
+          "request_amounts": {
+            "DAI": 365250
+          },
+          "start_date": "2024-05-01",
+          "end_date": "2024-07-31",
+          "payment_status": null
+        }
+      }
+    },
+    {
+      "type": "ImportHistoricalRaffle",
+      "params": {
+        "proposal_name": "MOM Budget Request",
+        "initiation_block": 19969369,
+        "randomness_block": 19969379,
+        "team_order": ["V3", "SMS", "yLockers", "Dinobots", "yFARM", "yETH/yPools", "Corn", "MOM", "ySupport", "Zootroop"],
+        "excluded_teams": ["MOM"]
+      }
+    },
+    {
+      "type": "ImportHistoricalVote",
+      "params": {
+        "proposal_name": "MOM Budget Request",
+        "passed": true,
+        "participating_teams": [],
+        "non_participating_teams": []
+      }
+    },
+    {
+      "type": "AddProposal",
+      "params": {
+        "title": "ySupport #7",
+        "url": "https://github.com/yearn/budget/issues/212",
+        "budget_request_details": {
+          "team": "ySupport",
+          "request_amounts": {
+            "DAI": 24000
+          },
+          "start_date": "2024-06-01",
+          "end_date": "2024-08-31",
+          "payment_status": null
+        }
+      }
+    },
+    {
+      "type": "ImportPredefinedRaffle",
+      "params": {
+        "proposal_name": "ySupport #7",
+        "counted_teams": ["yLockers", "Dinobots", "yFARM", "SMS", "Corn", "MOM", "Zootroop"],
+        "uncounted_teams": ["yETH/yPools", "ySupport", "V3"],
+        "total_counted_seats": 7,
+        "max_earner_seats": 5
+      }
+    },
+    {
+      "type": "ImportHistoricalVote",
+      "params": {
+        "proposal_name": "ySupport #7",
+        "passed": true,
+        "participating_teams": [],
+        "non_participating_teams": []
+      }
+    },
+    {
+      "type": "AddTeam",
+      "params": {
+        "name": "ySecurity",
+        "representative": "Tapir",
+        "trailing_monthly_revenue": null
+      }
+    },
+    {
+      "type": "ChangeTeamStatus",
+      "params": {
+        "team_name": "ySecurity",
+        "new_status": "Inactive",
+        "trailing_monthly_revenue": null
+      }
+    },
+    {
+      "type": "AddProposal",
+      "params": {
+        "title": "Security Team Budget Request v5 (milo and tapir)",
+        "url": "https://github.com/yearn/budget/issues/207",
+        "budget_request_details": {
+          "team": "ySecurity",
+          "request_amounts": {
+            "DAI": 42000
+          },
+          "start_date": "2024-05-01",
+          "end_date": "2024-07-31",
+          "payment_status": null
+        }
+      }
+    },
+    {
+      "type": "ImportHistoricalRaffle",
+      "params": {
+        "proposal_name": "Security Team Budget Request v5 (milo and tapir)",
+        "initiation_block": 19976004,
+        "randomness_block": 19976014,
+        "team_order": ["V3", "SMS", "yLockers", "Dinobots", "yFARM", "yETH/yPools", "Corn", "MOM", "ySupport", "Zootroop"],
+        "excluded_teams": []
+      }
+    },
+    {
+      "type": "ImportHistoricalVote",
+      "params": {
+        "proposal_name": "Security Team Budget Request v5 (milo and tapir)",
+        "passed": false,
+        "participating_teams": [],
+        "non_participating_teams": []
+      }
+    },
+    {
+      "type": "AddProposal",
+      "params": {
+        "title": "Security Team Budget Request v5 (weasel)",
+        "url": "https://github.com/yearn/budget/issues/211",
+        "budget_request_details": {
+          "team": "ySecurity",
+          "request_amounts": {
+            "DAI": 76500
+          },
+          "start_date": "2024-05-01",
+          "end_date": "2024-07-31",
+          "payment_status": null
+        }
+      }
+    },
+    {
+      "type": "ImportHistoricalRaffle",
+      "params": {
+        "proposal_name": "Security Team Budget Request v5 (weasel)",
+        "initiation_block": 19976037,
+        "randomness_block": 19976047,
+        "team_order": ["V3", "SMS", "yLockers", "Dinobots", "yFARM", "yETH/yPools", "Corn", "MOM", "ySupport", "Zootroop"],
+        "excluded_teams": []
+      }
+    },
+    {
+      "type": "ImportHistoricalVote",
+      "params": {
+        "proposal_name": "Security Team Budget Request v5 (weasel)",
+        "passed": false,
+        "participating_teams": [],
+        "non_participating_teams": []
+      }
+    },
+    {
+      "type": "AddTeam",
+      "params": {
+        "name": "yRoboTreasury",
+        "representative": "Korin",
+        "trailing_monthly_revenue": null
+      }
+    },
+    {
+      "type": "ChangeTeamStatus",
+      "params": {
+        "team_name": "yRoboTreasury",
+        "new_status": "Inactive",
+        "trailing_monthly_revenue": null
+      }
+    },
+    {
+      "type": "AddProposal",
+      "params": {
+        "title": "yRoboTreasury",
+        "url": "https://github.com/yearn/budget/issues/215",
+        "budget_request_details": {
+          "team": "yRoboTreasury",
+          "request_amounts": {
+            "DAI": 30000
+          },
+          "start_date": "2024-05-30",
+          "end_date": "2024-08-29",
+          "payment_status": null
+        }
+      }
+    },
+    {
+      "type": "ImportHistoricalRaffle",
+      "params": {
+        "proposal_name": "yRoboTreasury",
+        "initiation_block": 20012238,
+        "randomness_block": 20012248,
+        "team_order": ["V3", "SMS", "yLockers", "Dinobots", "yFARM", "yETH/yPools", "Corn", "MOM", "ySupport", "Zootroop"],
+        "excluded_teams": ["yETH/yPools"]
+      }
+    },
+    {
+      "type": "ImportHistoricalVote",
+      "params": {
+        "proposal_name": "yRoboTreasury",
+        "passed": true,
+        "participating_teams": [],
+        "non_participating_teams": ["yETH/yPools"]
+      }
+    },
+    {
+      "type": "AddTeam",
+      "params": {
+        "name": "yReporting",
+        "representative": "Bob",
+        "trailing_monthly_revenue": null
+      }
+    },
+    {
+      "type": "ChangeTeamStatus",
+      "params": {
+        "team_name": "yReporting",
+        "new_status": "Inactive",
+        "trailing_monthly_revenue": null
+      }
+    },
+    {
+      "type": "AddProposal",
+      "params": {
+        "title": "yReporting",
+        "url": "https://hackmd.io/pkf1Y_0iRRCPAYVPi5wAtQ?view",
+        "budget_request_details": {
+          "team": "yReporting",
+          "request_amounts": {
+            "DAI": 63000
+          },
+          "start_date": "2024-05-01",
+          "end_date": "2024-07-31",
+          "payment_status": null
+        }
+      }
+    },
+    {
+      "type": "ImportPredefinedRaffle",
+      "params": {
+        "proposal_name": "yReporting",
+        "counted_teams": ["Corn", "Dinobots", "SMS", "V3", "yETH/yPools", "Zootroop", "MOM"],
+        "uncounted_teams": ["yFARM", "ySupport", "yLockers"],
+        "total_counted_seats": 7,
+        "max_earner_seats": 5
+      }
+    },
+    {
+      "type": "ImportHistoricalVote",
+      "params": {
+        "proposal_name": "yReporting",
+        "passed": true,
+        "participating_teams": [],
+        "non_participating_teams": []
+      }
+    },
+    {
+      "type": "ChangeTeamStatus",
+      "params": {
+        "team_name": "yFARM",
+        "new_status": "Inactive",
+        "trailing_monthly_revenue": null
+      }
+    },
+    {
+      "type": "ChangeTeamStatus",
+      "params": {
+        "team_name": "DevDocs",
+        "new_status": "Supporter",
+        "trailing_monthly_revenue": null
+      }
+    },
+    {
+      "type": "ChangeTeamStatus",
+      "params": {
+        "team_name": "Dinobots",
+        "new_status": "Earner",
+        "trailing_monthly_revenue": [45290, 45290, 45290]
+      }
+    },
+    {
+      "type": "ChangeTeamStatus",
+      "params": {
+        "team_name": "yLockers",
+        "new_status": "Earner",
+        "trailing_monthly_revenue": [91210, 91210, 91210]
+      }
+    },
+    {
+      "type": "ChangeTeamStatus",
+      "params": {
+        "team_name": "Corn",
+        "new_status": "Earner",
+        "trailing_monthly_revenue": [22100, 8580, 0]
+      }
+    },
+    {
+      "type": "ChangeTeamStatus",
+      "params": {
+        "team_name": "yETH/yPools",
+        "new_status": "Earner",
+        "trailing_monthly_revenue": [5800, 4900, 5110]
+      }
+    },
+    {
+      "type": "ChangeTeamStatus",
+      "params": {
+        "team_name": "V3",
+        "new_status": "Supporter",
+        "trailing_monthly_revenue": null
+      }
+    },
+    {
+      "type": "ChangeTeamStatus",
+      "params": {
+        "team_name": "SMS",
+        "new_status": "Supporter",
+        "trailing_monthly_revenue": null
+      }
+    },
+    {
+      "type": "AddProposal",
+      "params": {
+        "title": "yLockers budget request May 2024",
+        "url": "https://github.com/yearn/budget/issues/206",
+        "budget_request_details": {
+          "team": "yLockers",
+          "request_amounts": {
+            "DAI": 90840
+          },
+          "start_date": "2024-05-01",
+          "end_date": "2024-08-01",
+          "payment_status": null
+        }
+      }
+    },
+    {
+      "type": "ImportHistoricalRaffle",
+      "params": {
+        "proposal_name": "yLockers budget request May 2024",
+        "initiation_block": 20039569,
+        "randomness_block": 20039579,
+        "team_order": ["Dinobots", "yLockers", "Corn", "yETH/yPools", "MOM", "ySupport", "Zootroop", "V3", "SMS", "DevDocs"],
+        "excluded_teams": ["yLockers"]
+      }
+    },
+    {
+      "type": "ImportHistoricalVote",
+      "params": {
+        "proposal_name": "yLockers budget request May 2024",
+        "passed": true,
+        "participating_teams": [],
+        "non_participating_teams": []
+      }
+    },
+    {
+      "type": "AddProposal",
+      "params": {
+        "title": "Security - Risk Framework + Management Tasks (Weasel)",
+        "url": "https://github.com/yearn/budget/issues/216",
+        "budget_request_details": {
+          "team": "ySecurity",
+          "request_amounts": {
+            "DAI": 30000
+          },
+          "start_date": "2024-05-01",
+          "end_date": "2024-07-31",
+          "payment_status": null
+        }
+      }
+    },
+    {
+      "type": "ImportHistoricalRaffle",
+      "params": {
+        "proposal_name": "Security - Risk Framework + Management Tasks (Weasel)",
+        "initiation_block": 20069515,
+        "randomness_block": 20069525,
+        "team_order": ["Dinobots", "yLockers", "Corn", "yETH/yPools", "MOM", "ySupport", "Zootroop", "V3", "SMS", "DevDocs"],
+        "excluded_teams": ["DevDocs"]
+      }
+    },
+    {
+      "type": "ImportHistoricalVote",
+      "params": {
+        "proposal_name": "Security - Risk Framework + Management Tasks (Weasel)",
+        "passed": false,
+        "participating_teams": [],
+        "non_participating_teams": ["yLockers", "DevDocs"]
+      }
+    },
+    {
+      "type": "AddProposal",
+      "params": {
+        "title": "Tapir budget request May 2024",
+        "url": "https://github.com/yearn/budget/issues/217",
+        "budget_request_details": {
+          "team": "ySecurity",
+          "request_amounts": {
+            "DAI": 36000
+          },
+          "start_date": "2024-05-01",
+          "end_date": "2024-07-31",
+          "payment_status": null
+        }
+      }
+    },
+    {
+      "type": "ImportHistoricalRaffle",
+      "params": {
+        "proposal_name": "Tapir budget request May 2024",
+        "initiation_block": 20069541,
+        "randomness_block": 20069551,
+        "team_order": ["Dinobots", "yLockers", "Corn", "yETH/yPools", "MOM", "ySupport", "Zootroop", "V3", "SMS", "DevDocs"],
+        "excluded_teams": ["DevDocs"]
+      }
+    },
+    {
+      "type": "ImportHistoricalVote",
+      "params": {
+        "proposal_name": "Tapir budget request May 2024",
+        "passed": true,
+        "participating_teams": [],
+        "non_participating_teams": ["DevDocs"]
+      }
+    },
+    {
+      "type": "PrintTeamReport"
+    },
+    {
+      "type": "PrintEpochState"
     }
-]
+  ]
