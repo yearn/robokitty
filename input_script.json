@@ -875,5 +875,65 @@
       "params": {
           "team_name": "SMS"
       }
+    },
+    {
+      "type": "ChangeTeamStatus",
+      "params": {
+        "team_name": "yReporting",
+        "new_status": "Supporter",
+        "trailing_monthly_revenue": null
+      }
+    },
+    {
+      "type": "ChangeTeamStatus",
+      "params": {
+        "team_name": "ySecurity",
+        "new_status": "Supporter",
+        "trailing_monthly_revenue": null
+      }
+    },
+    {
+      "type": "AddProposal",
+      "params": {
+        "title": "Sam - Security and Monitoring",
+        "url": "https://github.com/yearn/budget/issues/218",
+        "budget_request_details": {
+          "team": "ySecurity",
+          "request_amounts": {
+            "DAI": 78000
+          },
+          "start_date": "2024-07-15",
+          "end_date": "2024-10-30",
+          "payment_status": null
+        },
+        "announced_at": "2024-06-26",
+        "published_at": "2024-06-26"
+      }
+    },
+    {
+      "type": "AddProposal",
+      "params": {
+        "title": "Research and build Yearn consumer-faced app",
+        "url": "https://github.com/yearn/budget/issues/219",
+        "budget_request_details": {
+          "team": null,
+          "request_amounts": {
+            "DAI": 15000,
+            "YFI": 3
+          },
+          "start_date": "2024-07-21",
+          "end_date": "2024-10-21",
+          "payment_status": null
+        },
+        "announced_at": "2024-07-02",
+        "published_at": "2024-07-02"
+      }
+    },
+    {
+      "type": "CloseProposal",
+      "params": {
+        "proposal_name": "Research and build Yearn consumer-faced app",
+        "resolution": "Retracted"
+      }
     }
   ]

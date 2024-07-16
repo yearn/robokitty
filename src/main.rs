@@ -1577,7 +1577,7 @@ impl BudgetSystem {
         }
     }
 
-    fn close_with_reason(&mut self, id: Uuid, resolution: Resolution) -> Result<(), &'static str> {
+    fn close_with_reason(&mut self, id: Uuid, resolution: &Resolution) -> Result<(), &'static str> {
         if let Some(proposal) = self.state.proposals.get_mut(&id) {
             if proposal.status == ProposalStatus::Closed {
                 return Err("Proposal is already closed");
@@ -1587,7 +1587,7 @@ impl BudgetSystem {
                     return Err("Cannot close: Proposal is already paid");
                 }
             }
-            proposal.set_resolution(resolution);
+            proposal.set_resolution(resolution.clone());
             proposal.update_status(ProposalStatus::Closed);
             self.save_state();
             Ok(())
@@ -2322,6 +2322,10 @@ enum ScriptCommand {
         team_name: String,
         epoch_name: Option<String> 
     },
+    CloseProposal {
+        proposal_name: String,
+        resolution: String,
+    },
 }
 
 #[derive(Deserialize, Clone)]
@@ -2573,6 +2577,22 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                 Ok(report) => println!("{}", report),
                 Err(e) => println!("Error printing team vote participation: {}", e),
             }
+        },
+        ScriptCommand::CloseProposal { proposal_name, resolution } => {
+            let proposal_id = budget_system.get_proposal_id_by_name(&proposal_name)
+                .ok_or_else(|| format!("Proposal not found: {}", proposal_name))?;
+            
+            let resolution = match resolution.to_lowercase().as_str() {
+                "approved" => Resolution::Approved,
+                "rejected" => Resolution::Rejected,
+                "invalid" => Resolution::Invalid,
+                "duplicate" => Resolution::Duplicate,
+                "retracted" => Resolution::Retracted,
+                _ => return Err(format!("Invalid resolution type: {}", resolution).into()),
+            };
+        
+            budget_system.close_with_reason(proposal_id, &resolution)?;
+            println!("Closed proposal '{}' with resolution: {:?}", proposal_name, resolution);
         },
 
     }
