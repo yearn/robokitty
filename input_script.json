@@ -113,7 +113,8 @@
           "start_date": "2024-05-01",
           "end_date": "2024-07-31",
           "payment_status": null
-        }
+        },
+        "is_historical": true
       }
     },
     {
@@ -129,7 +130,8 @@
           "start_date": "2024-05-01",
           "end_date": "2024-07-15",
           "payment_status": null
-        }
+        },
+        "is_historical": true
       }
     },
     {
@@ -152,6 +154,13 @@
       }
     },
     {
+      "type": "SetProposalDates",
+      "params": {
+        "proposal_name": "yBudget2 YFI allocation for E1",
+        "resolved_at": "2024-05-17"
+      }
+    },
+    {
       "type": "ImportHistoricalRaffle",
       "params": {
         "proposal_name": "yLockers Front End (part 2)",
@@ -168,6 +177,15 @@
         "passed": true,
         "participating_teams": [],
         "non_participating_teams": []
+      }
+    },
+    {
+      "type": "SetProposalDates",
+      "params": {
+        "proposal_name": "yLockers Front End (part 2)",
+        "announced_at": "2024-04-30",
+        "published_at": "2024-04-30",
+        "resolved_at": "2024-05-20"
       }
     },
     {
@@ -200,7 +218,8 @@
           "start_date": "2024-05-01",
           "end_date": "2024-07-31",
           "payment_status": null
-        }
+        },
+        "is_historical": true
       }
     },
     {
@@ -223,6 +242,15 @@
       }
     },
     {
+      "type": "SetProposalDates",
+      "params": {
+        "proposal_name": "DevDocs Budget Request",
+        "announced_at": "2024-04-30",
+        "published_at": "2024-04-30",
+        "resolved_at": "2024-05-22"
+      }
+    },
+    {
       "type": "AddProposal",
       "params": {
         "title": "yFARM 2",
@@ -235,7 +263,8 @@
           "start_date": "2024-05-01",
           "end_date": "2024-08-01",
           "payment_status": null
-        }
+        },
+        "is_historical": true
       }
     },
     {
@@ -258,6 +287,15 @@
       }
     },
     {
+      "type": "SetProposalDates",
+      "params": {
+        "proposal_name": "yFARM 2",
+        "announced_at": "2024-05-09",
+        "published_at": null,
+        "resolved_at": "2024-05-28"
+      }
+    },
+    {
       "type": "AddProposal",
       "params": {
         "title": "yBudget Cat Herder",
@@ -270,7 +308,8 @@
           "start_date": "2024-05-01",
           "end_date": "2024-07-31",
           "payment_status": null
-        }
+        },
+        "is_historical": true
       }
     },
     {
@@ -293,6 +332,15 @@
       }
     },
     {
+      "type": "SetProposalDates",
+      "params": {
+        "proposal_name": "yBudget Cat Herder",
+        "announced_at": "2024-05-09",
+        "published_at": "2024-05-09",
+        "resolved_at": "2024-05-28"
+      }
+    },
+    {
       "type": "AddProposal",
       "params": {
         "title": "MOM Budget Request",
@@ -305,7 +353,8 @@
           "start_date": "2024-05-01",
           "end_date": "2024-07-31",
           "payment_status": null
-        }
+        },
+        "is_historical": true
       }
     },
     {
@@ -328,6 +377,15 @@
       }
     },
     {
+      "type": "SetProposalDates",
+      "params": {
+        "proposal_name": "MOM Budget Request",
+        "announced_at": "2024-05-21",
+        "published_at": "2024-05-21",
+        "resolved_at": "2024-05-29"
+      }
+    },
+    {
       "type": "AddProposal",
       "params": {
         "title": "ySupport #7",
@@ -340,7 +398,8 @@
           "start_date": "2024-06-01",
           "end_date": "2024-08-31",
           "payment_status": null
-        }
+        },
+        "is_historical": true
       }
     },
     {
@@ -360,6 +419,16 @@
         "passed": true,
         "participating_teams": [],
         "non_participating_teams": []
+      },
+      "is_historical": true
+    },
+    {
+      "type": "SetProposalDates",
+      "params": {
+        "proposal_name": "ySupport #7",
+        "announced_at": "2024-05-14",
+        "published_at": "2024-05-14",
+        "resolved_at": "2024-06-01"
       }
     },
     {
@@ -391,7 +460,8 @@
           "start_date": "2024-05-01",
           "end_date": "2024-07-31",
           "payment_status": null
-        }
+        },
+        "is_historical": true
       }
     },
     {
@@ -414,6 +484,15 @@
       }
     },
     {
+      "type": "SetProposalDates",
+      "params": {
+        "proposal_name": "Security Team Budget Request v5 (milo and tapir)",
+        "announced_at": "2024-05-08",
+        "published_at": "2024-05-08",
+        "resolved_at": "2024-05-31"
+      }
+    },
+    {
       "type": "AddProposal",
       "params": {
         "title": "Security Team Budget Request v5 (weasel)",
@@ -426,7 +505,8 @@
           "start_date": "2024-05-01",
           "end_date": "2024-07-31",
           "payment_status": null
-        }
+        },
+        "is_historical": true
       }
     },
     {
@@ -446,6 +526,15 @@
         "passed": false,
         "participating_teams": [],
         "non_participating_teams": []
+      }
+    },
+    {
+      "type": "SetProposalDates",
+      "params": {
+        "proposal_name": "Security Team Budget Request v5 (weasel)",
+        "announced_at": "2024-05-14",
+        "published_at": "2024-05-14",
+        "resolved_at": "2024-05-31"
       }
     },
     {
@@ -477,7 +566,8 @@
           "start_date": "2024-05-30",
           "end_date": "2024-08-29",
           "payment_status": null
-        }
+        },
+        "is_historical": true
       }
     },
     {
@@ -497,6 +587,15 @@
         "passed": true,
         "participating_teams": [],
         "non_participating_teams": ["yETH/yPools"]
+      }
+    },
+    {
+      "type": "SetProposalDates",
+      "params": {
+        "proposal_name": "yRoboTreasury",
+        "announced_at": "2024-05-15",
+        "published_at": "2024-05-29",
+        "resolved_at": "2024-06-06"
       }
     },
     {
@@ -528,7 +627,8 @@
           "start_date": "2024-05-01",
           "end_date": "2024-07-31",
           "payment_status": null
-        }
+        },
+        "is_historical": true
       }
     },
     {
@@ -548,6 +648,15 @@
         "passed": true,
         "participating_teams": [],
         "non_participating_teams": []
+      }
+    },
+    {
+      "type": "SetProposalDates",
+      "params": {
+        "proposal_name": "yReporting",
+        "announced_at": null,
+        "published_at": null,
+        "resolved_at": "2024-06-06"
       }
     },
     {
@@ -627,7 +736,8 @@
           "start_date": "2024-05-01",
           "end_date": "2024-08-01",
           "payment_status": null
-        }
+        },
+        "is_historical": true
       }
     },
     {
@@ -650,6 +760,15 @@
       }
     },
     {
+      "type": "SetProposalDates",
+      "params": {
+        "proposal_name": "yLockers budget request May 2024",
+        "announced_at": "2024-05-01",
+        "published_at": "2024-05-01",
+        "resolved_at": "2024-06-11"
+      }
+    },
+    {
       "type": "AddProposal",
       "params": {
         "title": "Security - Risk Framework + Management Tasks (Weasel)",
@@ -662,7 +781,8 @@
           "start_date": "2024-05-01",
           "end_date": "2024-07-31",
           "payment_status": null
-        }
+        },
+        "is_historical": true
       }
     },
     {
@@ -685,6 +805,15 @@
       }
     },
     {
+      "type": "SetProposalDates",
+      "params": {
+        "proposal_name": "Security - Risk Framework + Management Tasks (Weasel)",
+        "announced_at": "2024-06-04",
+        "published_at": "2024-06-04",
+        "resolved_at": "2024-06-17"
+      }
+    },
+    {
       "type": "AddProposal",
       "params": {
         "title": "Tapir budget request May 2024",
@@ -697,7 +826,8 @@
           "start_date": "2024-05-01",
           "end_date": "2024-07-31",
           "payment_status": null
-        }
+        },
+        "is_historical": true
       }
     },
     {
@@ -717,6 +847,15 @@
         "passed": true,
         "participating_teams": [],
         "non_participating_teams": ["DevDocs"]
+      }
+    },
+    {
+      "type": "SetProposalDates",
+      "params": {
+        "proposal_name": "Tapir budget request May 2024",
+        "announced_at": "2024-06-04",
+        "published_at": "2024-06-04",
+        "resolved_at": "2024-06-17"
       }
     },
     {

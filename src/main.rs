@@ -140,6 +140,10 @@ struct Proposal {
     status: ProposalStatus,
     resolution: Option<Resolution>,
     budget_request_details: Option<BudgetRequestDetails>,
+    announced_at: Option<NaiveDate>,
+    published_at: Option<NaiveDate>,
+    resolved_at: Option<NaiveDate>,
+    is_historical: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -659,7 +663,9 @@ impl RaffleTicket {
 }
 
 impl Proposal {
-    fn new(title: String, url: Option<String>, budget_request_details: Option<BudgetRequestDetails>) -> Self {
+    fn new(title: String, url: Option<String>, budget_request_details: Option<BudgetRequestDetails>, announced_at: Option<NaiveDate>, published_at: Option<NaiveDate>, is_historical: Option<bool>) -> Self {
+        let is_historical = is_historical.unwrap_or(false);
+
         Proposal {
             id: Uuid::new_v4(),
             title,
@@ -667,6 +673,38 @@ impl Proposal {
             status: ProposalStatus::Open,
             resolution: None,
             budget_request_details,
+            announced_at,
+            published_at,
+            resolved_at: None,
+            is_historical,
+        }
+    }
+
+    fn set_announced_at(&mut self, date: NaiveDate) {
+        self.announced_at = Some(date);
+    }
+
+    fn set_published_at(&mut self, date: NaiveDate) {
+        self.published_at = Some(date);
+    }
+
+    fn set_resolved_at(&mut self, date: NaiveDate) {
+        self.resolved_at = Some(date);
+    }
+
+    fn set_historical(&mut self, is_historical: bool) {
+        self.is_historical = is_historical;
+    }
+
+    fn set_dates(&mut self, announced_at: Option<NaiveDate>, published_at: Option<NaiveDate>, resolved_at: Option<NaiveDate>) {
+        if let Some(date) = announced_at {
+            self.set_announced_at(date);
+        }
+        if let Some(date) = published_at {
+            self.set_published_at(date);
+        }
+        if let Some(date) = resolved_at {
+            self.set_resolved_at(date);
         }
     }
 
@@ -1385,7 +1423,7 @@ impl BudgetSystem {
         Ok(())
     }
 
-    fn add_proposal(&mut self, title: String, url: Option<String>, budget_request_details: Option<BudgetRequestDetails>) -> Result<Uuid, &'static str> {
+    fn add_proposal(&mut self, title: String, url: Option<String>, budget_request_details: Option<BudgetRequestDetails>, announced_at: Option<NaiveDate>, published_at: Option<NaiveDate>, is_historical: Option<bool>) -> Result<Uuid, &'static str> {
         let current_epoch_id = self.state.current_epoch.ok_or("No active epoch")?;
 
         // Validate dates if present
@@ -1410,7 +1448,7 @@ impl BudgetSystem {
             }
         }
     
-        let proposal = Proposal::new(title, url, budget_request_details);
+        let proposal = Proposal::new(title, url, budget_request_details, announced_at, published_at, is_historical);
         let proposal_id = proposal.id;
         self.state.proposals.insert(proposal_id, proposal);
 
@@ -1425,6 +1463,16 @@ impl BudgetSystem {
 
     fn get_proposal(&self, id: Uuid) -> Option<&Proposal> {
         self.state.proposals.get(&id)
+    }
+
+    fn set_proposal_dates(&mut self, proposal_name: &str, announced_at: Option<NaiveDate>, published_at: Option<NaiveDate>, resolved_at: Option<NaiveDate>) -> Result<(), &'static str> {
+        let proposal = self.state.proposals.values_mut()
+            .find(|p| p.title == proposal_name)
+            .ok_or("Proposal not found")?;
+
+        proposal.set_dates(announced_at, published_at, resolved_at);
+        self.save_state();
+        Ok(())
     }
 
     fn update_proposal_status(&mut self, id: Uuid, new_status: ProposalStatus) -> Result<(), &'static str> {
@@ -2227,10 +2275,19 @@ enum ScriptCommand {
     ActivateEpoch { name: String },
     SetEpochReward { token: String, amount: f64 },
     AddTeam { name: String, representative: String, trailing_monthly_revenue: Option<Vec<u64>> },
-    AddProposal { 
-        title: String, 
-        url: Option<String>, 
-        budget_request_details: Option<BudgetRequestDetailsScript> 
+    AddProposal {
+        title: String,
+        url: Option<String>,
+        budget_request_details: Option<BudgetRequestDetailsScript>,
+        announced_at: Option<NaiveDate>,
+        published_at: Option<NaiveDate>,
+        is_historical: Option<bool>,
+    },
+    SetProposalDates {
+        proposal_name: String,
+        announced_at: Option<NaiveDate>,
+        published_at: Option<NaiveDate>,
+        resolved_at: Option<NaiveDate>,
     },
     ImportPredefinedRaffle {
         proposal_name: String,
@@ -2296,7 +2353,7 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
             let team_id = budget_system.add_team(name.clone(), representative, trailing_monthly_revenue)?;
             println!("Added team: {} ({})", name, team_id);
         },
-        ScriptCommand::AddProposal { title, url, budget_request_details } => {
+        ScriptCommand::AddProposal { title, url, budget_request_details, announced_at, published_at, is_historical} => {
             let budget_request_details = budget_request_details.map(|details| {
                 BudgetRequestDetails {
                     team: details.team.as_ref().and_then(|name| budget_system.get_team_id_by_name(name)),
@@ -2306,8 +2363,12 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                     payment_status: details.payment_status,
                 }
             });
-            let proposal_id = budget_system.add_proposal(title.clone(), url, budget_request_details)?;
+            let proposal_id = budget_system.add_proposal(title.clone(), url, budget_request_details, announced_at, published_at, is_historical)?;
             println!("Added proposal: {} ({})", title, proposal_id);
+        },
+        ScriptCommand::SetProposalDates { proposal_name, announced_at, published_at, resolved_at } => {
+            budget_system.set_proposal_dates(&proposal_name, announced_at, published_at, resolved_at)?;
+            println!("Updated dates for proposal: {}", proposal_name);
         },
         ScriptCommand::ImportPredefinedRaffle { 
             proposal_name, 
