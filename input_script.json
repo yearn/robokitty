@@ -996,5 +996,8 @@
     },
     {
       "type": "PrintEpochState"
+    },
+    {
+      "type": "PrintTeamReport"
     } 
   ]
