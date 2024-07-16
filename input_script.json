@@ -859,24 +859,6 @@
       }
     },
     {
-      "type": "PrintTeamReport"
-    },
-    {
-      "type": "PrintEpochState"
-    }, 
-    {
-      "type": "PrintTeamVoteParticipation",
-      "params": {
-          "team_name": "V3"
-      }
-    },
-    {
-      "type": "PrintTeamVoteParticipation",
-      "params": {
-          "team_name": "SMS"
-      }
-    },
-    {
       "type": "ChangeTeamStatus",
       "params": {
         "team_name": "yReporting",
@@ -935,5 +917,84 @@
         "proposal_name": "Research and build Yearn consumer-faced app",
         "resolution": "Retracted"
       }
-    }
+    },
+    {
+      "type": "SetProposalDates",
+      "params": {
+        "proposal_name": "Research and build Yearn consumer-faced app",
+        "resolved_at": "2024-07-15"
+      }
+    },
+    {
+      "type": "AddTeam",
+      "params": {
+        "name": "veYFI",
+        "representative": "Korin",
+        "trailing_monthly_revenue": null
+      }
+    },
+    {
+      "type": "ChangeTeamStatus",
+      "params": {
+        "team_name": "veYFI",
+        "new_status": "Inactive",
+        "trailing_monthly_revenue": null
+      }
+    },
+    {
+      "type": "AddProposal",
+      "params": {
+        "title": "Budget Request: veYFI III",
+        "url": "https://github.com/yearn/budget/issues/220",
+        "budget_request_details": {
+          "team": "veYFI",
+          "request_amounts": {
+            "DAI": 60000
+          },
+          "start_date": "2024-07-24",
+          "end_date": "2024-10-24",
+          "payment_status": null
+        },
+        "announced_at": "2024-07-04",
+        "published_at": "2024-07-04"
+      }
+    },
+    {
+      "type": "AddProposal",
+      "params": {
+        "title": "Dinos budget request #7",
+        "url": "https://hackmd.io/@poolpitako/SyOeaoSDR",
+        "budget_request_details": {
+          "team": "Dinobots",
+          "request_amounts": {
+            "DAI": 135000
+          },
+          "start_date": "2024-08-01",
+          "end_date": "2024-10-31",
+          "payment_status": null
+        },
+        "announced_at": "2024-07-15"
+      }
+    },
+    {
+      "type": "AddProposal",
+      "params": {
+        "title": "Corn - Budget Request from 8/2024 through 10/2024",
+        "url": "https://github.com/yearn/budget/issues/221",
+        "budget_request_details": {
+          "team": "Corn",
+          "request_amounts": {
+            "DAI": 60000
+          },
+          "start_date": "2024-08-01",
+          "end_date": "2024-10-31",
+          "payment_status": null
+        },
+        "announced_at": "2024-07-16",
+        "published_at": "2024-07-16"
+      }
+    },
+    {
+      "type": "PrintEpochState"
+    } 
   ]
