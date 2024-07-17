@@ -1008,5 +1008,13 @@
         "randomness_block": 20326724,
         "excluded_teams": ["DevDocs", "yLockers"]
       }
+    },
+    {
+      "type": "CreateRaffle",
+      "params": {
+        "proposal_name": "Budget Request: veYFI III",
+        "block_offset": 2,
+        "excluded_teams": ["DevDocs", "yLockers"]
+      }
     }
   ]
