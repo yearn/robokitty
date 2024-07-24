@@ -3,8 +3,8 @@
 # Uncomment and modify these lines to override default values
 # ipc_path = "/tmp/reth.ipc"
 # future_block_offset = 10
-# state_file = "budget_system_state.json"
-script_file = "~/ybudget-data/input_script.json"
+state_file = "~/ybudget-data/budget_system_state.json"
+# script_file = "input_script.json"
 # default_total_counted_seats = 7
 # default_max_earner_seats = 5
 # default_qualified_majority_threshold = 0.7
