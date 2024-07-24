@@ -17,9 +17,8 @@ use tokio::{
 };
 use uuid::Uuid;
 
-
-
-// Constants and configuration
+mod app_config;
+use app_config::AppConfig;
 
 // Error types
 
@@ -382,13 +381,8 @@ impl RaffleService {
     }
 }
 
-impl RaffleConfig {
-    const DEFAULT_TOTAL_COUNTED_SEATS: usize = 7;
-    const DEFAULT_MAX_EARNER_SEATS: usize = 5;
-}
-
 impl RaffleBuilder {
-    fn new(proposal_id: Uuid, epoch_id: Uuid) -> Self {
+    fn new(proposal_id: Uuid, epoch_id: Uuid, app_config: &AppConfig) -> Self {
         RaffleBuilder {
             config: RaffleConfig {
                 proposal_id,
@@ -396,8 +390,8 @@ impl RaffleBuilder {
                 initiation_block: 0,
                 randomness_block: 0,
                 block_randomness: String::new(),
-                total_counted_seats: RaffleConfig::DEFAULT_TOTAL_COUNTED_SEATS,
-                max_earner_seats: RaffleConfig::DEFAULT_MAX_EARNER_SEATS,
+                total_counted_seats: app_config.default_total_counted_seats,
+                max_earner_seats: app_config.default_max_earner_seats,
                 excluded_teams: Vec::new(),
                 custom_allocation: None,
                 custom_team_order: None,
@@ -759,11 +753,15 @@ impl Proposal {
 }
 
 impl Vote {
-    const DEFAULT_QUALIFIED_MAJORITY_THRESHOLD:f64 = 0.7;
-    const COUNTED_VOTE_POINTS: u32 = 5;
-    const UNCOUNTED_VOTE_POINTS: u32 = 2;
 
-    fn new_formal(proposal_id: Uuid, epoch_id: Uuid, raffle_id: Uuid, total_eligible_seats: u32, threshold: Option<f64>) -> Self {
+    fn new_formal(
+        proposal_id: Uuid, 
+        epoch_id: Uuid,
+        raffle_id: Uuid,
+        total_eligible_seats: u32,
+        threshold: Option<f64>,
+        config: &AppConfig
+    ) -> Self {
         Vote {
             id: Uuid::new_v4(),
             proposal_id,
@@ -771,7 +769,7 @@ impl Vote {
             vote_type: VoteType::Formal {
                 raffle_id,
                 total_eligible_seats,
-                threshold: threshold.unwrap_or(Self::DEFAULT_QUALIFIED_MAJORITY_THRESHOLD),
+                threshold: threshold.unwrap_or(config.default_qualified_majority_threshold),
             },
             status: VoteStatus::Open,
             participation: VoteParticipation::Formal {
@@ -898,7 +896,7 @@ impl Vote {
         (counted, uncounted)
     }
 
-    fn close(&mut self) -> Result<Option<HashMap<Uuid, u32>>, &'static str> {
+    fn close(&mut self, config: &AppConfig) -> Result<Option<HashMap<Uuid, u32>>, &'static str> {
         if self.status == VoteStatus::Closed {
             return Err("Vote is already closed");
         }
@@ -917,7 +915,7 @@ impl Vote {
                     passed,
                 });
 
-                let team_points = self.calculate_formal_vote_points();
+                let team_points = self.calculate_formal_vote_points(config);
                 self.votes.clear();
                 Ok(Some(team_points))
             },
@@ -930,14 +928,14 @@ impl Vote {
         }
     }
 
-    fn add_points_for_vote(&self, team_id: &Uuid) -> u32 {
+    fn add_points_for_vote(&self, team_id: &Uuid, config: &AppConfig) -> u32 {
         match &self.vote_type {
             VoteType::Formal { .. } => {
                 if let VoteParticipation:: Formal { counted, uncounted } = &self.participation {
                     if counted.contains(team_id) {
-                        Self::COUNTED_VOTE_POINTS
+                        config.counted_vote_points
                     } else if uncounted.contains(team_id) {
-                        Self::UNCOUNTED_VOTE_POINTS
+                        config.uncounted_vote_points
                     } else { 0 }
                 } else { 0 }
             },
@@ -945,18 +943,18 @@ impl Vote {
         }
     }
 
-    fn calculate_formal_vote_points(&self) -> HashMap<Uuid, u32> {
+    fn calculate_formal_vote_points(&self, config: &AppConfig) -> HashMap<Uuid, u32> {
         let mut team_points = HashMap::new();
 
         if let VoteParticipation::Formal { counted, uncounted } = &self.participation {
             for &team_id in counted {
                 if self.votes.contains_key(&team_id) {
-                    team_points.insert(team_id, Self::COUNTED_VOTE_POINTS);
+                    team_points.insert(team_id, config.counted_vote_points);
                 }
             }
             for &team_id in uncounted {
                 if self.votes.contains_key(&team_id) {
-                    team_points.insert(team_id, Self::UNCOUNTED_VOTE_POINTS);
+                    team_points.insert(team_id, config.uncounted_vote_points);
                 }
             }
         }
@@ -981,19 +979,6 @@ impl Vote {
         }
 
         Ok(())
-    }
-
-    fn calculate_points(&self) -> HashMap<Uuid, u32> {
-        let mut points = HashMap::new();
-        if let VoteParticipation::Formal { counted, uncounted } = &self.participation {
-            for &team_id in counted {
-                points.insert(team_id, Self::COUNTED_VOTE_POINTS);
-            }
-            for &team_id in uncounted {
-                points.insert(team_id, Self::UNCOUNTED_VOTE_POINTS);
-            }
-        }
-        points
     }
 
     fn get_result(&self) -> Option<bool> {
@@ -1224,11 +1209,12 @@ struct BudgetSystemState {
 struct BudgetSystem {
     state: BudgetSystemState,
     ethereum_service: Arc<EthereumService>,
+    config: AppConfig,
 }
 
 impl BudgetSystem {
-    async fn new(ipc_path: &str, future_block_offset: u64) -> Result<Self, Box<dyn std::error::Error>> {
-        let ethereum_service = Arc::new(EthereumService::new(ipc_path, future_block_offset).await?);
+    async fn new(config: AppConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        let ethereum_service = Arc::new(EthereumService::new(&config.ipc_path, config.future_block_offset).await?);
         
         Ok(Self {
             state: BudgetSystemState {
@@ -1244,6 +1230,7 @@ impl BudgetSystem {
                 current_epoch: None,
             },
             ethereum_service,
+            config
         })
     }
 
@@ -1331,13 +1318,14 @@ impl BudgetSystem {
         Ok(state)
     }
 
-    async fn load_from_file(path: &str, ipc_path: &str, future_block_offset: u64) -> Result<Self, Box<dyn std::error::Error>> {
+    async fn load_from_file(path: &str, config: AppConfig) -> Result<Self, Box<dyn std::error::Error>> {
         let state = Self::load_state(path)?;
-        let ethereum_service = Arc::new(EthereumService::new(ipc_path, future_block_offset).await?);
+        let ethereum_service = Arc::new(EthereumService::new(&config.ipc_path, config.future_block_offset).await?);
         
         Ok(Self {
             state,
             ethereum_service,
+            config,
         })
     }
 
@@ -1572,7 +1560,8 @@ impl BudgetSystem {
             current_epoch_id,
             raffle_id, 
             raffle.config.total_counted_seats as u32,
-            threshold
+            threshold,
+            &self.config
         );
         let vote_id = vote.id;
         self.state.votes.insert(vote_id, vote);
@@ -1651,7 +1640,7 @@ impl BudgetSystem {
             return Err("Vote is already closed");
         }
 
-        let team_points_option = vote.close()?;
+        let team_points_option = vote.close(&self.config)?;
 
         // If it's a formal vote, add points to team
         if let Some(team_points) = team_points_option {
@@ -1982,7 +1971,7 @@ impl BudgetSystem {
             vote_type: VoteType::Formal {
                 raffle_id,
                 total_eligible_seats: raffle.config.total_counted_seats as u32,
-                threshold: Vote::DEFAULT_QUALIFIED_MAJORITY_THRESHOLD
+                threshold: self.config.default_qualified_majority_threshold
             },
             status: VoteStatus::Closed,
             participation,
@@ -2003,12 +1992,12 @@ impl BudgetSystem {
         if let VoteParticipation::Formal { counted, uncounted } = &vote.participation {
             for &team_id in counted {
                 if let Some(team) = self.state.current_state.teams.get_mut(&team_id) {
-                    team.add_points(Vote::COUNTED_VOTE_POINTS);
+                    team.add_points(self.config.counted_vote_points);
                 }
             }
             for &team_id in uncounted {
                 if let Some(team) = self.state.current_state.teams.get_mut(&team_id) {
-                    team.add_points(Vote::UNCOUNTED_VOTE_POINTS);
+                    team.add_points(self.config.uncounted_vote_points);
                 }
             }
         }
@@ -2234,7 +2223,7 @@ impl BudgetSystem {
                     None => "Pending",
                 };
 
-                let points = vote.add_points_for_vote(&team_id);
+                let points = vote.add_points_for_vote(&team_id, &self.config);
 
                 vote_reports.push((
                     vote.opened_at,
@@ -2272,7 +2261,7 @@ impl BudgetSystem {
         Utc::now().date_naive().signed_duration_since(announced_date).num_days()
     }
 
-    fn prepare_raffle(&mut self, proposal_name: &str, excluded_teams: Option<Vec<String>>) -> Result<(Uuid, Vec<RaffleTicket>), Box<dyn Error>> {
+    fn prepare_raffle(&mut self, proposal_name: &str, excluded_teams: Option<Vec<String>>, app_config: &AppConfig) -> Result<(Uuid, Vec<RaffleTicket>), Box<dyn Error>> {
         let proposal_id = self.get_proposal_id_by_name(proposal_name)
             .ok_or_else(|| format!("Proposal not found: {}", proposal_name))?;
         let epoch_id = self.state.current_epoch
@@ -2290,8 +2279,8 @@ impl BudgetSystem {
             initiation_block: 0,
             randomness_block: 0,
             block_randomness: String::new(),
-            total_counted_seats: RaffleConfig::DEFAULT_TOTAL_COUNTED_SEATS,
-            max_earner_seats: RaffleConfig::DEFAULT_MAX_EARNER_SEATS,
+            total_counted_seats: app_config.default_total_counted_seats,
+            max_earner_seats: app_config.default_max_earner_seats,
             excluded_teams: excluded_team_ids,
             custom_allocation: None,
             custom_team_order: None,
@@ -2320,48 +2309,56 @@ impl BudgetSystem {
     ) -> Result<(Uuid, Raffle), Box<dyn Error>> {
         let proposal_id = self.get_proposal_id_by_name(proposal_name)
             .ok_or_else(|| format!("Proposal not found: {}", proposal_name))?;
-
+    
         let epoch_id = self.state.current_epoch
             .ok_or("No active epoch")?;
-
+    
         let randomness = self.ethereum_service.get_randomness(randomness_block).await?;
-
+    
         let custom_team_order = team_order.map(|order| {
             order.into_iter()
                 .filter_map(|name| self.get_team_id_by_name(&name))
                 .collect::<Vec<Uuid>>()
         });
-
+    
         let excluded_team_ids = excluded_teams.map(|names| {
             names.into_iter()
                 .filter_map(|name| self.get_team_id_by_name(&name))
                 .collect::<Vec<Uuid>>()
         }).unwrap_or_else(Vec::new);
-
+    
+        let total_counted_seats = total_counted_seats.unwrap_or(self.config.default_total_counted_seats);
+        let max_earner_seats = max_earner_seats.unwrap_or(self.config.default_max_earner_seats);
+    
+        if max_earner_seats > total_counted_seats {
+            return Err("max_earner_seats cannot be greater than total_counted_seats".into());
+        }
+    
         let raffle_config = RaffleConfig {
             proposal_id,
             epoch_id,
             initiation_block,
             randomness_block,
             block_randomness: randomness.clone(),
-            total_counted_seats: total_counted_seats.unwrap_or(RaffleConfig::DEFAULT_TOTAL_COUNTED_SEATS),
-            max_earner_seats: max_earner_seats.unwrap_or(RaffleConfig::DEFAULT_MAX_EARNER_SEATS),
+            total_counted_seats,
+            max_earner_seats,
             excluded_teams: excluded_team_ids,
             custom_allocation: None,
             custom_team_order,
             is_historical: true,
         };
-
+    
         let mut raffle = Raffle::new(raffle_config, &self.state.current_state.teams)?;
         raffle.generate_scores()?;
         raffle.select_teams();
-
+    
         let raffle_id = raffle.id;
         self.state.raffles.insert(raffle_id, raffle.clone());
         self.save_state()?;
-
+    
         Ok((raffle_id, raffle))
     }
+
     async fn finalize_raffle(&mut self, raffle_id: Uuid, block_number: u64, randomness: String) -> Result<Raffle, Box<dyn Error>> {
         let raffle = self.state.raffles.get_mut(&raffle_id)
             .ok_or_else(|| format!("Raffle not found: {}", raffle_id))?;
@@ -2486,7 +2483,7 @@ struct BudgetRequestDetailsScript {
     payment_status: Option<PaymentStatus>,
 }
 
-async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptCommand) -> Result<(), Box<dyn Error>> {
+async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptCommand, config: &AppConfig) -> Result<(), Box<dyn Error>> {
     match command {
         ScriptCommand::CreateEpoch { name, start_date, end_date } => {
             let epoch_id = budget_system.create_epoch(&name, start_date, end_date)?;
@@ -2591,14 +2588,14 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                         println!("\nCounted seats:");
                         for &team_id in counted {
                             if let Some(team) = raffle.team_snapshots.iter().find(|s| s.id == team_id) {
-                                println!("  {} (+{} points)", team.name, Vote::COUNTED_VOTE_POINTS);
+                                println!("  {} (+{} points)", team.name, config.counted_vote_points);
                             }
                         }
 
                         println!("\nUncounted seats:");
                         for &team_id in uncounted {
                             if let Some(team) = raffle.team_snapshots.iter().find(|s| s.id == team_id) {
-                                println!("  {} (+{} points)", team.name, Vote::UNCOUNTED_VOTE_POINTS);
+                                println!("  {} (+{} points)", team.name, config.uncounted_vote_points);
                             }
                         }
                     }
@@ -2626,8 +2623,8 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                 randomness_block,
                 team_order.clone(),
                 excluded_teams.clone(),
-                total_counted_seats,
-                max_earner_seats
+                total_counted_seats.or(Some(budget_system.config.default_total_counted_seats)),
+                max_earner_seats.or(Some(budget_system.config.default_max_earner_seats)),
             ).await?;
 
             println!("Imported historical raffle for proposal '{}' (Raffle ID: {})", proposal_name, raffle_id);
@@ -2771,7 +2768,7 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
             println!("Preparing raffle for proposal: {}", proposal_name);
 
             // PREPARATION PHASE
-            let (raffle_id, tickets) = budget_system.prepare_raffle(&proposal_name, excluded_teams.clone())?;
+            let (raffle_id, tickets) = budget_system.prepare_raffle(&proposal_name, excluded_teams.clone(), &config)?;
 
             println!("Generated RaffleTickets:");
             for (team_name, start, end) in budget_system.group_tickets_by_team(&tickets) {
@@ -2882,41 +2879,37 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Configuration
-    const IPC_PATH: &str = "/tmp/reth.ipc";
-    const FUTURE_BLOCK_OFFSET: u64 = 10;
-    const STATE_FILE: &str = "budget_system_state.json";
-    const SCRIPT_FILE: &str = "input_script.json";
+    let config = AppConfig::new()?;
 
     // Initialize or load the BudgetSystem
-    let mut budget_system = match BudgetSystem::load_from_file(STATE_FILE, IPC_PATH, FUTURE_BLOCK_OFFSET).await {
-        Ok(system) => {
-            println!("Loaded existing state from {}", STATE_FILE);
-            system
-        },
-        Err(_) => {
-            println!("No existing state found. Creating a new BudgetSystem.");
-            BudgetSystem::new(IPC_PATH, FUTURE_BLOCK_OFFSET).await?
-        },
-    };
+let mut budget_system = match BudgetSystem::load_from_file(&config.state_file, config.clone()).await {
+    Ok(system) => {
+        println!("Loaded existing state from {}", &config.state_file);
+        system
+    },
+    Err(_) => {
+        println!("No existing state found. Creating a new BudgetSystem.");
+        BudgetSystem::new(config.clone()).await?
+    },
+};
 
     // Read and execute the script
-    if Path::new(SCRIPT_FILE).exists() {
-        let script_content = fs::read_to_string(SCRIPT_FILE)?;
+    if Path::new(&config.script_file).exists() {
+        let script_content = fs::read_to_string(&config.script_file)?;
         let script: Vec<ScriptCommand> = serde_json::from_str(&script_content)?;
         
         for command in script {
-            execute_command(&mut budget_system, command).await?;
+            execute_command(&mut budget_system, command, &config).await?;
         }
 
         println!("Script execution completed.");
     } else {
-        println!("No script file found at {}. Skipping script execution.", SCRIPT_FILE);
+        println!("No script file found at {}. Skipping script execution.", &config.script_file);
     }
 
     // Save the current state
     budget_system.save_state()?;
-    println!("Saved current state to {}", STATE_FILE);
+    println!("Saved current state to {}", &config.state_file);
 
     Ok(())
 }
