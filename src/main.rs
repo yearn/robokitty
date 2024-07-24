@@ -756,6 +756,80 @@ impl Proposal {
         self.resolution = Some(Resolution::Rejected);
         Ok(())
     }
+
+    fn update(&mut self, updates: UpdateProposalDetails, team_id: Option<Uuid>) -> Result<(), &'static str> {
+        if let Some(title) = updates.title {
+            self.title = title;
+        }
+        if let Some(url) = updates.url {
+            self.url = Some(url);
+        }
+        if let Some(announced_at) = updates.announced_at {
+            self.announced_at = Some(announced_at);
+        }
+        if let Some(published_at) = updates.published_at {
+            self.published_at = Some(published_at);
+        }
+        if let Some(resolved_at) = updates.resolved_at {
+            self.resolved_at = Some(resolved_at);
+        }
+        if let Some(budget_details) = updates.budget_request_details {
+            self.update_budget_request_details(&budget_details, team_id)?;
+        }
+
+        // Validate dates
+        if let (Some(start), Some(end)) = (self.budget_request_details.as_ref().and_then(|d| d.start_date), self.budget_request_details.as_ref().and_then(|d| d.end_date)) {
+            if start > end {
+                return Err("Start date cannot be after end date");
+            }
+        }
+
+        Ok(())
+    }
+
+    fn update_budget_request_details(&mut self, updates: &BudgetRequestDetailsScript, team_id: Option<Uuid>) -> Result<(), &'static str> {
+        let details = self.budget_request_details.get_or_insert(BudgetRequestDetails {
+            team: None,
+            request_amounts: HashMap::new(),
+            start_date: None,
+            end_date: None,
+            payment_status: None,
+        });
+
+        // Update team ID if provided
+        if updates.team.is_some() {
+            details.team = team_id;
+            if details.team.is_none() {
+                return Err("Specified team not found");
+            }
+        }
+        
+        if let Some(new_request_amounts) = &updates.request_amounts {
+            println!("Significant change: Replacing entire request_amounts for proposal {}", self.title);
+            println!("Old request_amounts: {:?}", details.request_amounts);
+            println!("New request_amounts: {:?}", new_request_amounts);
+            details.request_amounts = new_request_amounts.clone();
+        }
+        
+        if let Some(start_date) = updates.start_date {
+            details.start_date = Some(start_date);
+        }
+        if let Some(end_date) = updates.end_date {
+            details.end_date = Some(end_date);
+        }
+        if let Some(payment_status) = &updates.payment_status {
+            details.payment_status = Some(payment_status.clone());
+        }
+        
+        // Validate budget amounts
+        for &amount in details.request_amounts.values() {
+            if amount < 0.0 {
+                return Err("Budget amounts must be non-negative");
+            }
+        }
+
+        Ok(())
+    }
     
 }
 
@@ -2632,6 +2706,29 @@ impl BudgetSystem {
         Ok(())
     }
 
+    fn update_proposal(&mut self, proposal_name: &str, updates: UpdateProposalDetails) -> Result<(), &'static str> {
+        // Perform team ID lookup if necessary
+        let team_id = if let Some(ref budget_details) = updates.budget_request_details {
+            if let Some(ref team_name) = budget_details.team {
+                self.get_team_id_by_name(team_name)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Find and update the proposal
+        let proposal = self.state.proposals.values_mut()
+            .find(|p| p.title == proposal_name)
+            .ok_or("Proposal not found")?;
+
+        proposal.update(updates, team_id)?;
+
+        self.save_state();
+        Ok(())
+    }
+
 }
 
 // Script commands
@@ -2651,11 +2748,9 @@ enum ScriptCommand {
         published_at: Option<NaiveDate>,
         is_historical: Option<bool>,
     },
-    SetProposalDates {
+    UpdateProposal {
         proposal_name: String,
-        announced_at: Option<NaiveDate>,
-        published_at: Option<NaiveDate>,
-        resolved_at: Option<NaiveDate>,
+        updates: UpdateProposalDetails,
     },
     ImportPredefinedRaffle {
         proposal_name: String,
@@ -2709,9 +2804,19 @@ enum ScriptCommand {
 }
 
 #[derive(Deserialize, Clone)]
+struct UpdateProposalDetails {
+    title: Option<String>,
+    url: Option<String>,
+    budget_request_details: Option<BudgetRequestDetailsScript>,
+    announced_at: Option<NaiveDate>,
+    published_at: Option<NaiveDate>,
+    resolved_at: Option<NaiveDate>,
+}
+
+#[derive(Deserialize, Clone)]
 struct BudgetRequestDetailsScript {
     team: Option<String>,
-    request_amounts: HashMap<String, f64>,
+    request_amounts: Option<HashMap<String, f64>>,
     start_date: Option<NaiveDate>,
     end_date: Option<NaiveDate>,
     payment_status: Option<PaymentStatus>,
@@ -2737,22 +2842,23 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
             let team_id = budget_system.add_team(name.clone(), representative, trailing_monthly_revenue)?;
             println!("Added team: {} ({})", name, team_id);
         },
-        ScriptCommand::AddProposal { title, url, budget_request_details, announced_at, published_at, is_historical} => {
+        ScriptCommand::AddProposal { title, url, budget_request_details, announced_at, published_at, is_historical } => {
             let budget_request_details = budget_request_details.map(|details| {
                 BudgetRequestDetails {
                     team: details.team.as_ref().and_then(|name| budget_system.get_team_id_by_name(name)),
-                    request_amounts: details.request_amounts,
+                    request_amounts: details.request_amounts.unwrap_or_default(),
                     start_date: details.start_date,
                     end_date: details.end_date,
                     payment_status: details.payment_status,
                 }
             });
+            
             let proposal_id = budget_system.add_proposal(title.clone(), url, budget_request_details, announced_at, published_at, is_historical)?;
             println!("Added proposal: {} ({})", title, proposal_id);
         },
-        ScriptCommand::SetProposalDates { proposal_name, announced_at, published_at, resolved_at } => {
-            budget_system.set_proposal_dates(&proposal_name, announced_at, published_at, resolved_at)?;
-            println!("Updated dates for proposal: {}", proposal_name);
+        ScriptCommand::UpdateProposal { proposal_name, updates } => {
+            budget_system.update_proposal(&proposal_name, updates)?;
+            println!("Updated proposal: {}", proposal_name);
         },
         ScriptCommand::ImportPredefinedRaffle { 
             proposal_name, 
