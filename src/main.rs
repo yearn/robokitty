@@ -1,5 +1,6 @@
 use chrono::{DateTime, NaiveDate, Utc, TimeZone};
 use ethers::prelude::*;
+use log::{info, error};
 use prettytable::{Table, Row, Cell};
 use serde::{Serialize, Deserialize};
 use sha2::{Sha256, Digest};
@@ -1313,8 +1314,36 @@ impl BudgetSystem {
     }
 
     fn save_state(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let state_file = &self.config.state_file;
+        info!("Attempting to save state to file: {}", state_file);
+
         let json = serde_json::to_string_pretty(&self.state)?;
-        fs::write("budget_system_state.json", json)?;
+        
+        // Write to a temporary file first
+        let temp_file = format!("{}.temp", state_file);
+        fs::write(&temp_file, &json).map_err(|e| {
+            error!("Failed to write to temporary file {}: {}", temp_file, e);
+            e
+        })?;
+
+        // Rename the temporary file to the actual state file
+        fs::rename(&temp_file, state_file).map_err(|e| {
+            error!("Failed to rename temporary file to {}: {}", state_file, e);
+            e
+        })?;
+
+        // Verify that the file was actually written
+        let written_contents = fs::read_to_string(state_file).map_err(|e| {
+            error!("Failed to read back the state file {}: {}", state_file, e);
+            e
+        })?;
+
+        if written_contents != json {
+            error!("State file contents do not match what was supposed to be written!");
+            return Err("State file verification failed".into());
+        }
+
+        info!("Successfully saved and verified state to file: {}", state_file);
         Ok(())
     }
 
@@ -3142,9 +3171,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let script: Vec<ScriptCommand> = serde_json::from_str(&script_content)?;
         
         for command in script {
-            execute_command(&mut budget_system, command, &config).await?;
+            if let Err(e) = execute_command(&mut budget_system, command, &config).await {
+                error!("Error executing command: {}", e);
+            }
         }
-
         println!("Script execution completed.");
     } else {
         println!("No script file found at {}. Skipping script execution.", &config.script_file);
@@ -3152,8 +3182,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Save the current state
     match budget_system.save_state() {
-        Ok(_) => println!("Saved current state to {}", &config.state_file),
-        Err(e) => println!("Failed to save state to {}: {}", &config.state_file, e),
+        Ok(_) => info!("Saved current state to {}", &config.state_file),
+        Err(e) => error!("Failed to save state to {}: {}", &config.state_file, e),
     }
 
     Ok(())
