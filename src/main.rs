@@ -2881,17 +2881,23 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
 async fn main() -> Result<(), Box<dyn Error>> {
     let config = AppConfig::new()?;
 
+    // Ensure the directory exists
+    if let Some(parent) = Path::new(&config.state_file).parent() {
+        fs::create_dir_all(parent)?;
+    }
+
     // Initialize or load the BudgetSystem
-let mut budget_system = match BudgetSystem::load_from_file(&config.state_file, config.clone()).await {
-    Ok(system) => {
-        println!("Loaded existing state from {}", &config.state_file);
-        system
-    },
-    Err(_) => {
-        println!("No existing state found. Creating a new BudgetSystem.");
-        BudgetSystem::new(config.clone()).await?
-    },
-};
+    let mut budget_system = match BudgetSystem::load_from_file(&config.state_file, config.clone()).await {
+        Ok(system) => {
+            println!("Loaded existing state from {}", &config.state_file);
+            system
+        },
+        Err(e) => {
+            println!("Failed to load existing state from {}: {}", &config.state_file, e);
+            println!("Creating a new BudgetSystem.");
+            BudgetSystem::new(config.clone()).await?
+        },
+    };
 
     // Read and execute the script
     if Path::new(&config.script_file).exists() {
@@ -2908,8 +2914,10 @@ let mut budget_system = match BudgetSystem::load_from_file(&config.state_file, c
     }
 
     // Save the current state
-    budget_system.save_state()?;
-    println!("Saved current state to {}", &config.state_file);
+    match budget_system.save_state() {
+        Ok(_) => println!("Saved current state to {}", &config.state_file),
+        Err(e) => println!("Failed to save state to {}: {}", &config.state_file, e),
+    }
 
     Ok(())
 }

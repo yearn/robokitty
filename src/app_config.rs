@@ -2,6 +2,7 @@ use serde::Deserialize;
 use std::env;
 use config::{Config, ConfigError, File};
 use std::convert::TryFrom;
+use std::path::PathBuf;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct AppConfig {
@@ -38,9 +39,15 @@ impl AppConfig {
         // Add in settings from environment variables (with a prefix of APP)
         settings.merge(config::Environment::with_prefix("APP"))?;
 
-        // You can add more sources here if needed, like command-line arguments
+        let mut config: Self = settings.try_into()?;
+        
+        // Expand the tilde in the state_file path
+        if config.state_file.starts_with('~') {
+            let home = dirs::home_dir().ok_or(ConfigError::Message("Unable to determine home directory".to_string()))?;
+            config.state_file = home.join(config.state_file.strip_prefix("~/").unwrap_or(&config.state_file)).to_string_lossy().into_owned();
+        }
 
-        settings.try_into()
+        Ok(config)
     }
 }
 
