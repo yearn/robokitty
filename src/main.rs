@@ -3149,8 +3149,8 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
 
             // Print raffle results
             if let Some(result) = &raffle.result {
-                println!("Counted seats:");
-                println!("Earner seats:");
+                println!("**Counted voters:**");
+                println!("Earner teams:");
                 let mut earner_count = 0;
                 for &team_id in &result.counted {
                     if let Some(snapshot) = raffle.team_snapshots.iter().find(|s| s.id == team_id) {
@@ -3165,7 +3165,7 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                         }
                     }
                 }
-                println!("Supporter seats:");
+                println!("Supporter teams:");
                 for &team_id in &result.counted {
                     if let Some(snapshot) = raffle.team_snapshots.iter().find(|s| s.id == team_id) {
                         if let TeamStatus::Supporter = snapshot.status {
@@ -3178,11 +3178,11 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                         }
                     }
                 }
-                println!("Total counted seats: {} (Earners: {}, Supporters: {})", 
+                println!("Total counted voters: {} (Earners: {}, Supporters: {})", 
                          result.counted.len(), earner_count, result.counted.len() - earner_count);
 
-                println!("Uncounted seats:");
-                println!("Earner seats:");
+                println!("**Uncounted voters:**");
+                println!("Earner teams:");
                 for &team_id in &result.uncounted {
                     if let Some(snapshot) = raffle.team_snapshots.iter().find(|s| s.id == team_id) {
                         if let TeamStatus::Earner { .. } = snapshot.status {
@@ -3195,7 +3195,7 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                         }
                     }
                 }
-                println!("Supporter seats:");
+                println!("Supporter teams:");
                 for &team_id in &result.uncounted {
                     if let Some(snapshot) = raffle.team_snapshots.iter().find(|s| s.id == team_id) {
                         if let TeamStatus::Supporter = snapshot.status {
