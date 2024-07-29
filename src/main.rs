@@ -2523,20 +2523,23 @@ impl BudgetSystem {
         vote_closed: Option<NaiveDate>,
     ) -> Result<String, Box<dyn Error>> {
         // Find proposal and raffle
-        let (proposal_id, raffle_id) = self.find_proposal_and_raffle(proposal_name)?;
+        let (proposal_id, raffle_id) = self.find_proposal_and_raffle(proposal_name)
+            .map_err(|e| format!("Failed to find proposal or raffle: {}", e))?;
         
         // Check if the proposal already has a resolution
         let proposal = self.state.proposals.get(&proposal_id)
-            .ok_or_else(|| format!("Proposal not found: {}", proposal_id))?;
+            .ok_or_else(|| "Proposal not found after ID lookup".to_string())?;
         if proposal.resolution.is_some() {
             return Err("Cannot create vote: Proposal already has a resolution".into());
         }
 
         // Validate votes
-        self.validate_votes(raffle_id, &counted_votes, &uncounted_votes)?;
+        self.validate_votes(raffle_id, &counted_votes, &uncounted_votes)
+            .map_err(|e| format!("Vote validation failed: {}", e))?;
     
         // Create vote
-        let vote_id = self.create_formal_vote(proposal_id, raffle_id, None)?;
+        let vote_id = self.create_formal_vote(proposal_id, raffle_id, None)
+            .map_err(|e| format!("Failed to create formal vote: {}", e))?;
     
         // Cast votes
         let all_votes: Vec<(Uuid, VoteChoice)> = counted_votes.into_iter()
@@ -2545,13 +2548,16 @@ impl BudgetSystem {
                 self.get_team_id_by_name(&team_name).map(|id| (id, choice))
             })
             .collect();
-        self.cast_votes(vote_id, all_votes)?;
+        self.cast_votes(vote_id, all_votes)
+            .map_err(|e| format!("Failed to cast votes: {}", e))?;
     
         // Update vote dates
-        self.update_vote_dates(vote_id, vote_opened, vote_closed)?;
+        self.update_vote_dates(vote_id, vote_opened, vote_closed)
+            .map_err(|e| format!("Failed to update vote dates: {}", e))?;
     
         // Close vote and update proposal
-        let passed = self.close_vote_and_update_proposal(vote_id, proposal_id, vote_closed)?;
+        let passed = self.close_vote_and_update_proposal(vote_id, proposal_id, vote_closed)
+            .map_err(|e| format!("Failed to close vote or update proposal: {}", e))?;
 
         // Generate report
         self.generate_vote_report(vote_id)
@@ -3213,34 +3219,44 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
             }
         },
         ScriptCommand::CreateAndProcessVote { proposal_name, counted_votes, uncounted_votes, vote_opened, vote_closed } => {
-            let report = budget_system.create_and_process_vote(
+            println!("Executing CreateAndProcessVote command for proposal: {}", proposal_name);
+            match budget_system.create_and_process_vote(
                 &proposal_name,
                 counted_votes,
                 uncounted_votes,
                 vote_opened,
                 vote_closed
-            )?;
-            println!("Vote processed for proposal: {}", proposal_name);
-            println!("Vote report:\n{}", report);
-        
-            // Print point credits
-            let vote_id = budget_system.state.votes.values()
-                .find(|v| v.proposal_id == budget_system.get_proposal_id_by_name(&proposal_name).unwrap())
-                .map(|v| v.id)
-                .ok_or("Vote not found")?;
-            let vote = budget_system.state.votes.get(&vote_id).unwrap();
-            
-            println!("\nPoints credited:");
-            if let VoteParticipation::Formal { counted, uncounted } = &vote.participation {
-                for &team_id in counted {
-                    if let Some(team) = budget_system.state.current_state.teams.get(&team_id) {
-                        println!("  {} (+{} points)", team.name, config.counted_vote_points);
+            ) {
+                Ok(report) => {
+                    println!("Vote processed successfully for proposal: {}", proposal_name);
+                    println!("Vote report:\n{}", report);
+                
+                    // Print point credits
+                    if let Some(vote_id) = budget_system.state.votes.values()
+                        .find(|v| v.proposal_id == budget_system.get_proposal_id_by_name(&proposal_name).unwrap())
+                        .map(|v| v.id)
+                    {
+                        let vote = budget_system.state.votes.get(&vote_id).unwrap();
+                        
+                        println!("\nPoints credited:");
+                        if let VoteParticipation::Formal { counted, uncounted } = &vote.participation {
+                            for &team_id in counted {
+                                if let Some(team) = budget_system.state.current_state.teams.get(&team_id) {
+                                    println!("  {} (+{} points)", team.name, config.counted_vote_points);
+                                }
+                            }
+                            for &team_id in uncounted {
+                                if let Some(team) = budget_system.state.current_state.teams.get(&team_id) {
+                                    println!("  {} (+{} points)", team.name, config.uncounted_vote_points);
+                                }
+                            }
+                        }
+                    } else {
+                        println!("Warning: Vote not found after processing");
                     }
-                }
-                for &team_id in uncounted {
-                    if let Some(team) = budget_system.state.current_state.teams.get(&team_id) {
-                        println!("  {} (+{} points)", team.name, config.uncounted_vote_points);
-                    }
+                },
+                Err(e) => {
+                    println!("Error: Failed to process vote for proposal '{}'. Reason: {}", proposal_name, e);
                 }
             }
         },
