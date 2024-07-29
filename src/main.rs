@@ -2663,9 +2663,41 @@ impl BudgetSystem {
         let total_uncounted_seats = raffle.result.as_ref()
             .map(|result| result.uncounted.len())
             .unwrap_or(0) as u32;
+
+        let (counted_votes_info, uncounted_votes_info) = if let VoteParticipation::Formal { counted, uncounted } = &vote.participation {
+            let absent_counted: Vec<String> = raffle.result.as_ref().unwrap().counted.iter()
+                .filter(|&team_id| !counted.contains(team_id))
+                .filter_map(|&team_id| self.state.current_state.teams.get(&team_id).map(|team| team.name.clone()))
+                .collect();
+
+            let absent_uncounted: Vec<String> = raffle.result.as_ref().unwrap().uncounted.iter()
+                .filter(|&team_id| !uncounted.contains(team_id))
+                .filter_map(|&team_id| self.state.current_state.teams.get(&team_id).map(|team| team.name.clone()))
+                .collect();
+
+            let counted_info = if absent_counted.is_empty() {
+                format!("Counted votes cast: {}/{}", total_counted_votes, total_eligible_seats)
+            } else {
+                format!("Counted votes cast: {}/{} ({} absent)", total_counted_votes, total_eligible_seats, absent_counted.join(", "))
+            };
+
+            let uncounted_info = if absent_uncounted.is_empty() {
+                format!("Uncounted votes cast: {}/{}", total_uncounted_votes, total_uncounted_seats)
+            } else {
+                format!("Uncounted votes cast: {}/{} ({} absent)", total_uncounted_votes, total_uncounted_seats, absent_uncounted.join(", "))
+            };
+
+            (counted_info, uncounted_info)
+        } else {
+            (
+                format!("Counted votes cast: {}/{}", total_counted_votes, total_eligible_seats),
+                format!("Uncounted votes cast: {}/{}", total_uncounted_votes, total_uncounted_seats)
+            )
+        };
+    
     
         let report = format!(
-            "**{}**\n{}\n\n**Status: {}**\n__{} in favor, {} against, {} absent__\n\n**Deciding teams**\n`{:?}`\n\nCounted votes cast: {}/{}\nUncounted votes cast: {}/{}",
+            "**{}**\n{}\n\n**Status: {}**\n__{} in favor, {} against, {} absent__\n\n**Deciding teams**\n`{:?}`\n\n{}\n{}",
             proposal.title,
             proposal.url.as_deref().unwrap_or(""),
             status,
@@ -2673,10 +2705,8 @@ impl BudgetSystem {
             counted_no,
             absent,
             deciding_teams,
-            total_counted_votes,
-            total_eligible_seats,
-            total_uncounted_votes,
-            total_uncounted_seats
+            counted_votes_info,
+            uncounted_votes_info
         );
     
         Ok(report)
