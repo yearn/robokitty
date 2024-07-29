@@ -1,4 +1,5 @@
 use chrono::{DateTime, NaiveDate, Utc, TimeZone};
+use dotenvy::dotenv;
 use ethers::prelude::*;
 use log::{info, error};
 use prettytable::{Table, Row, Cell};
@@ -12,6 +13,7 @@ use std::{
     str,
     sync::Arc,
 };
+use teloxide::prelude::*;
 use tokio::{
     self,
     time::{sleep, Duration},
@@ -3297,7 +3299,14 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    // Load .env file
+    dotenv().expect(".env file not found");
     let config = AppConfig::new()?;
+
+    println!("Starting bot...");
+    let bot = Bot::new(&config.telegram.token);
+    let msg = "Hello world!";
+    bot.send_message(config.telegram.chat_id.clone(), msg).await?;
 
     // Ensure the directory exists
     if let Some(parent) = Path::new(&config.state_file).parent() {

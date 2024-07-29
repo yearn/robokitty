@@ -2,7 +2,7 @@
 
 # Uncomment and modify these lines to override default values
 # ipc_path = "/tmp/reth.ipc"
-# future_block_offset = 10
+future_block_offset = 2
 # state_file = "budget_system_state.json"
 # script_file = "input_script.json"
 # default_total_counted_seats = 7
@@ -10,3 +10,5 @@
 # default_qualified_majority_threshold = 0.7
 # counted_vote_points = 5
 # uncounted_vote_points = 2
+[telegram]
+chat_id = "your_chat_id_here"

@@ -15,6 +15,14 @@ pub struct AppConfig {
     pub default_qualified_majority_threshold: f64,
     pub counted_vote_points: u32,
     pub uncounted_vote_points: u32,
+    pub telegram: TelegramConfig,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct TelegramConfig {
+    pub chat_id: String,
+    #[serde(skip)]
+    pub token: String,
 }
 
 impl AppConfig {
@@ -31,6 +39,7 @@ impl AppConfig {
         settings.set_default("default_qualified_majority_threshold", 0.7)?;
         settings.set_default("counted_vote_points", 5)?;
         settings.set_default("uncounted_vote_points", 2)?;
+        settings.set_default("telegram.chat_id", "")?;
 
         // Add in the current environment file
         // Default to 'development' env if unspecified
@@ -46,6 +55,11 @@ impl AppConfig {
             let home = dirs::home_dir().ok_or(ConfigError::Message("Unable to determine home directory".to_string()))?;
             config.state_file = home.join(config.state_file.strip_prefix("~/").unwrap_or(&config.state_file)).to_string_lossy().into_owned();
         }
+
+        // Load the Telegram token from an environment variable
+        config.telegram.token = env::var("TELEGRAM_BOT_TOKEN")
+            .expect("TELEGRAM_BOT_TOKEN must be set");
+
 
         Ok(config)
     }
@@ -65,6 +79,10 @@ impl TryFrom<Config> for AppConfig {
             default_qualified_majority_threshold: config.get_float("default_qualified_majority_threshold")?,
             counted_vote_points: config.get_int("counted_vote_points")? as u32,
             uncounted_vote_points: config.get_int("uncounted_vote_points")? as u32,
+            telegram: TelegramConfig {
+                chat_id: config.get_string("telegram.chat_id")?,
+                token: String::new(),
+            }
         })
     }
 }
@@ -81,6 +99,10 @@ impl Default for AppConfig {
             default_qualified_majority_threshold: 0.7,
             counted_vote_points: 5,
             uncounted_vote_points: 2,
+            telegram: TelegramConfig {
+                chat_id: String::new(),
+                token: String::new(),
+            }
         }
     }
 }
