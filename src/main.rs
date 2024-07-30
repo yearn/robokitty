@@ -2,7 +2,6 @@ use chrono::{DateTime, NaiveDate, Utc, TimeZone};
 use dotenvy::dotenv;
 use ethers::prelude::*;
 use log::{info, error};
-use prettytable::{Table, Row, Cell};
 use serde::{Serialize, Deserialize};
 use sha2::{Sha256, Digest};
 use std::{
@@ -2199,26 +2198,40 @@ impl BudgetSystem {
         }
     }
 
-    fn print_epoch_state(&self) -> Result<String, &'static str> {
+    fn print_epoch_state(&self) -> Result<String, Box<dyn Error>> {
         let epoch = self.get_current_epoch().ok_or("No active epoch")?;
         let proposals = self.get_proposals_for_epoch(epoch.id());
 
-        let total_proposals = proposals.len();
+        let mut report = String::new();
+
+        // Epoch overview
+        report.push_str(&format!("**State of Epoch {}**\n\n", epoch.name()));
+        report.push_str("🌍 Overview\n");
+        report.push_str(&format!("ID: {}\n", epoch.id()));
+        report.push_str(&format!("Start Date: {}\n", epoch.start_date().format("%Y-%m-%d %H:%M:%S UTC")));
+        report.push_str(&format!("End Date: {}\n", epoch.end_date().format("%Y-%m-%d %H:%M:%S UTC")));
+        report.push_str(&format!("Status: {:?}\n", epoch.status()));
+
+        if let Some(reward) = &epoch.reward {
+            report.push_str(&format!("Epoch Reward: {} {}\n", reward.amount, reward.token));
+        } else {
+            report.push_str("Epoch Reward: Not set\n");
+        }
+
+        report.push_str("\n");
+
+        // Proposal counts
         let mut open_proposals = Vec::new();
         let mut approved_count = 0;
         let mut rejected_count = 0;
-        let mut invalid_count = 0;
-        let mut duplicate_count = 0;
         let mut retracted_count = 0;
 
         for proposal in &proposals {
             match &proposal.resolution {
                 Some(Resolution::Approved) => approved_count += 1,
                 Some(Resolution::Rejected) => rejected_count += 1,
-                Some(Resolution::Invalid) => invalid_count += 1,
-                Some(Resolution::Duplicate) => duplicate_count += 1,
                 Some(Resolution::Retracted) => retracted_count += 1,
-                None => {
+                _ => {
                     if proposal.is_actionable() {
                         open_proposals.push(proposal);
                     }
@@ -2226,56 +2239,38 @@ impl BudgetSystem {
             }
         }
 
-        let open_count = open_proposals.len();
+        report.push_str("📊 Proposals\n");
+        report.push_str(&format!("Total: {}\n", proposals.len()));
+        report.push_str(&format!("Open: {}\n", open_proposals.len()));
+        report.push_str(&format!("Approved: {}\n", approved_count));
+        report.push_str(&format!("Rejected: {}\n", rejected_count));
+        report.push_str(&format!("Retracted: {}\n", retracted_count));
 
-        let mut report = String::from("Current Epoch State:\n\n");
-        report.push_str(&format!("Name: {}\n", epoch.name()));
-        report.push_str(&format!("ID: {}\n", epoch.id()));
-        report.push_str(&format!("Start Date: {}\n", epoch.start_date()));
-        report.push_str(&format!("End Date: {}\n", epoch.end_date()));
-        report.push_str(&format!("Status: {:?}\n\n", epoch.status()));
-        report.push_str("Proposal Counts:\n");
-        report.push_str(&format!("Total Proposals: {}\n", total_proposals));
-        
-        Self::add_count_if_positive(&mut report, "Open Proposals", open_count);
-        Self::add_count_if_positive(&mut report, "Approved Proposals", approved_count);
-        Self::add_count_if_positive(&mut report, "Rejected Proposals", rejected_count);
-        Self::add_count_if_positive(&mut report, "Invalid Proposals", invalid_count);
-        Self::add_count_if_positive(&mut report, "Duplicate Proposals", duplicate_count);
-        Self::add_count_if_positive(&mut report, "Retracted Proposals", retracted_count);
+        report.push_str("\n");
 
-        if let Some(reward) = &epoch.reward {
-            report.push_str(&format!("\nEpoch Reward: {} {}\n", reward.amount, reward.token));
-        } else {
-            report.push_str("\nEpoch Reward: Not set\n");
-        }
-
+        // Open proposals
         if !open_proposals.is_empty() {
-            report.push_str("\nOpen Proposals:\n");
-            let mut table = Table::new();
-            table.add_row(Row::new(vec![
-                Cell::new("Title"),
-                Cell::new("Days Open"),
-                Cell::new("Status"),
-                Cell::new("URL"),
-            ]));
+            report.push_str("📬 Open proposals\n\n");
 
             for proposal in open_proposals {
+                report.push_str(&format!("**{}**\n", proposal.title));
+                if let Some(url) = &proposal.url {
+                    report.push_str(&format!("🔗 {}\n", url));
+                }
+                if let Some(details) = &proposal.budget_request_details {
+                    if let (Some(start), Some(end)) = (details.start_date, details.end_date) {
+                        report.push_str(&format!("📆 {} - {}\n", start.format("%b %d"), end.format("%b %d")));
+                    }
+                    if !details.request_amounts.is_empty() {
+                        let amounts: Vec<String> = details.request_amounts.iter()
+                            .map(|(token, amount)| format!("{} {}", amount, token))
+                            .collect();
+                        report.push_str(&format!("💰 {}\n", amounts.join(", ")));
+                    }
+                }
                 let days_open = self.days_open(proposal);
-                let status = match proposal.status {
-                    ProposalStatus::Open => "Open",
-                    ProposalStatus::Closed => "Closed",
-                    ProposalStatus::Reopened => "Reopened",
-                };
-                table.add_row(Row::new(vec![
-                    Cell::new(&proposal.title),
-                    Cell::new(&days_open.to_string()),
-                    Cell::new(status),
-                    Cell::new(proposal.url.as_deref().unwrap_or("N/A")),
-                ]));
+                report.push_str(&format!("⏳ __{} days open__\n\n", days_open));
             }
-
-            report.push_str(&table.to_string());
         }
 
         Ok(report)

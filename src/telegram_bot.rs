@@ -2,6 +2,8 @@
 
 use crate::BudgetSystem;
 use teloxide::prelude::*;
+use teloxide::types::ParseMode::MarkdownV2;
+use teloxide::utils::markdown::escape;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use std::error::Error;
@@ -35,7 +37,11 @@ impl TelegramBot {
                         
                         match response_receiver.await {
                             Ok(response) => {
-                                bot.send_message(msg.chat.id, response).await?;
+                                let escaped_response = escape(&response);
+                                bot.send_message(msg.chat.id, escaped_response)
+                                .parse_mode(MarkdownV2)
+                                .disable_web_page_preview(true)
+                                .await?;
                             }
                             Err(e) => {
                                 bot.send_message(msg.chat.id, format!("Error receiving response: {}", e)).await?;
