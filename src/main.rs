@@ -3297,16 +3297,25 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
     Ok(())
 }
 
+async fn handle_message(bot: Bot, msg: Message) -> ResponseResult<()> {
+    if let Some(text) = msg.text() {
+        match text {
+            "/ping" => {
+                bot.send_message(msg.chat.id, "pong").await?;
+            }
+            _ => {
+                println!("Received message: {}", text);
+            }
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // Load .env file
     dotenv().expect(".env file not found");
     let config = AppConfig::new()?;
-
-    println!("Starting bot...");
-    let bot = Bot::new(&config.telegram.token);
-    let msg = "Hello world!";
-    bot.send_message(config.telegram.chat_id.clone(), msg).await?;
 
     // Ensure the directory exists
     if let Some(parent) = Path::new(&config.state_file).parent() {
@@ -3347,5 +3356,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Err(e) => error!("Failed to save state to {}: {}", &config.state_file, e),
     }
 
+    println!("Starting bot...");
+    let bot = Bot::new(&config.telegram.token);
+    let msg = "Hello world!";
+    bot.send_message(config.telegram.chat_id.clone(), msg).await?;
+
+    println!("Bot is running...");
+    teloxide::repl(bot, handle_message).await;
+
     Ok(())
+    
 }
