@@ -16,12 +16,16 @@ use std::{
 use teloxide::prelude::*;
 use tokio::{
     self,
+    sync::mpsc,
     time::{sleep, Duration},
 };
 use uuid::Uuid;
 
 mod app_config;
 use app_config::AppConfig;
+
+mod telegram_bot;
+use telegram_bot::{TelegramBot, spawn_command_executor};
 
 // Error types
 
@@ -3297,20 +3301,6 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
     Ok(())
 }
 
-async fn handle_message(bot: Bot, msg: Message) -> ResponseResult<()> {
-    if let Some(text) = msg.text() {
-        match text {
-            "/ping" => {
-                bot.send_message(msg.chat.id, "pong").await?;
-            }
-            _ => {
-                println!("Received message: {}", text);
-            }
-        }
-    }
-    Ok(())
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // Load .env file
@@ -3356,13 +3346,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Err(e) => error!("Failed to save state to {}: {}", &config.state_file, e),
     }
 
-    println!("Starting bot...");
-    let bot = Bot::new(&config.telegram.token);
-    let msg = "Hello world!";
-    bot.send_message(config.telegram.chat_id.clone(), msg).await?;
+    let (command_sender, command_receiver) = mpsc::channel(100);
+    
+    spawn_command_executor(budget_system, command_receiver);
 
+    let bot = Bot::new(&config.telegram.token);
+    let telegram_bot = TelegramBot::new(bot, command_sender);
+    
     println!("Bot is running...");
-    teloxide::repl(bot, handle_message).await;
+    telegram_bot.run().await;
 
     Ok(())
     
