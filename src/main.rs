@@ -2205,17 +2205,17 @@ impl BudgetSystem {
         let mut report = String::new();
 
         // Epoch overview
-        report.push_str(&format!("**State of Epoch {}**\n\n", epoch.name()));
-        report.push_str("🌍 Overview\n");
-        report.push_str(&format!("ID: {}\n", epoch.id()));
-        report.push_str(&format!("Start Date: {}\n", epoch.start_date().format("%Y-%m-%d %H:%M:%S UTC")));
-        report.push_str(&format!("End Date: {}\n", epoch.end_date().format("%Y-%m-%d %H:%M:%S UTC")));
-        report.push_str(&format!("Status: {:?}\n", epoch.status()));
+        report.push_str(&format!("*State of Epoch {}*\n\n", escape_markdown(&epoch.name())));
+        report.push_str("🌍 *Overview*\n");
+        report.push_str(&format!("ID: `{}`\n", epoch.id()));
+        report.push_str(&format!("Start Date: `{}`\n", epoch.start_date().format("%Y-%m-%d %H:%M:%S UTC")));
+        report.push_str(&format!("End Date: `{}`\n", epoch.end_date().format("%Y-%m-%d %H:%M:%S UTC")));
+        report.push_str(&format!("Status: `{:?}`\n", epoch.status()));
 
         if let Some(reward) = &epoch.reward {
-            report.push_str(&format!("Epoch Reward: {} {}\n", reward.amount, reward.token));
+            report.push_str(&format!("Epoch Reward: `{} {}`\n", reward.amount, escape_markdown(&reward.token)));
         } else {
-            report.push_str("Epoch Reward: Not set\n");
+            report.push_str("Epoch Reward: `Not set`\n");
         }
 
         report.push_str("\n");
@@ -2239,37 +2239,43 @@ impl BudgetSystem {
             }
         }
 
-        report.push_str("📊 Proposals\n");
-        report.push_str(&format!("Total: {}\n", proposals.len()));
-        report.push_str(&format!("Open: {}\n", open_proposals.len()));
-        report.push_str(&format!("Approved: {}\n", approved_count));
-        report.push_str(&format!("Rejected: {}\n", rejected_count));
-        report.push_str(&format!("Retracted: {}\n", retracted_count));
+        report.push_str("📊 *Proposals*\n");
+        report.push_str(&format!("Total: `{}`\n", proposals.len()));
+        report.push_str(&format!("Open: `{}`\n", open_proposals.len()));
+        report.push_str(&format!("Approved: `{}`\n", approved_count));
+        report.push_str(&format!("Rejected: `{}`\n", rejected_count));
+        report.push_str(&format!("Retracted: `{}`\n", retracted_count));
 
         report.push_str("\n");
 
         // Open proposals
         if !open_proposals.is_empty() {
-            report.push_str("📬 Open proposals\n\n");
-
+            report.push_str("📬 *Open proposals*\n\n");
+        
             for proposal in open_proposals {
-                report.push_str(&format!("**{}**\n", proposal.title));
+                report.push_str(&format!("*{}*\n", escape_markdown(&proposal.title)));
                 if let Some(url) = &proposal.url {
-                    report.push_str(&format!("🔗 {}\n", url));
+                    report.push_str(&format!("🔗 [Link]({})\n", escape_markdown(url)));
                 }
                 if let Some(details) = &proposal.budget_request_details {
                     if let (Some(start), Some(end)) = (details.start_date, details.end_date) {
-                        report.push_str(&format!("📆 {} - {}\n", start.format("%b %d"), end.format("%b %d")));
+                        report.push_str(&format!("📆 {} \\- {}\n", 
+                            escape_markdown(&start.format("%b %d").to_string()),
+                            escape_markdown(&end.format("%b %d").to_string())
+                        ));
                     }
                     if !details.request_amounts.is_empty() {
                         let amounts: Vec<String> = details.request_amounts.iter()
-                            .map(|(token, amount)| format!("{} {}", amount, token))
+                            .map(|(token, amount)| format!("{} {}", 
+                                escape_markdown(&amount.to_string()), 
+                                escape_markdown(token)
+                            ))
                             .collect();
                         report.push_str(&format!("💰 {}\n", amounts.join(", ")));
                     }
                 }
                 let days_open = self.days_open(proposal);
-                report.push_str(&format!("⏳ __{} days open__\n\n", days_open));
+                report.push_str(&format!("⏳ _{} days open_\n\n", escape_markdown(&days_open.to_string())));
             }
         }
 
@@ -2766,6 +2772,23 @@ impl BudgetSystem {
         Ok(())
     }
 
+    fn generate_markdown_test(&self) -> String {
+        let test_message = r#"
+*Bold text*
+_Italic text_
+__Underline__
+~Strikethrough~
+*Bold _italic bold ~italic bold strikethrough~ __underline italic bold___ bold*
+[inline URL](http://www.example.com/)
+[inline mention of a user](tg://user?id=123456789)
+`inline fixed-width code`
+```python
+def hello_world():
+    print("Hello, World!")
+```
+"#;
+        test_message.to_string()
+    }
 }
 
 // Script commands
@@ -3294,6 +3317,20 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
 
     }
     Ok(())
+}
+
+
+// Helper function to escape special characters for MarkdownV2
+fn escape_markdown(text: &str) -> String {
+    let special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!'];
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
+        if special_chars.contains(&c) {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    escaped
 }
 
 #[tokio::main]

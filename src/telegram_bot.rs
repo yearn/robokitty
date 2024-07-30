@@ -2,14 +2,16 @@
 
 use crate::BudgetSystem;
 use teloxide::prelude::*;
-use teloxide::types::ParseMode::MarkdownV2;
+use teloxide::types::ParseMode;
 use teloxide::utils::markdown::escape;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use std::error::Error;
 
+#[derive(Clone)]
 pub enum TelegramCommand {
     PrintEpochState,
+    MarkdownTest,
     // Add other commands here as needed
 }
 pub struct TelegramBot {
@@ -30,6 +32,13 @@ impl TelegramBot {
                 if let Some(text) = msg.text() {
                     if let Some(command) = parse_command(text) {
                         let (response_sender, response_receiver) = oneshot::channel();
+                        
+                        // Clone the command for determining parse mode
+                        let parse_mode = match command.clone() {
+                            TelegramCommand::MarkdownTest | TelegramCommand::PrintEpochState => Some(ParseMode::MarkdownV2),
+                            _ => None,
+                        };
+                        
                         if let Err(e) = command_sender.send((command, response_sender)).await {
                             bot.send_message(msg.chat.id, format!("Error sending command: {}", e)).await?;
                             return Ok(());
@@ -37,11 +46,11 @@ impl TelegramBot {
                         
                         match response_receiver.await {
                             Ok(response) => {
-                                let escaped_response = escape(&response);
-                                bot.send_message(msg.chat.id, escaped_response)
-                                .parse_mode(MarkdownV2)
-                                .disable_web_page_preview(true)
-                                .await?;
+                                let mut message = bot.send_message(msg.chat.id, response);
+                                if let Some(mode) = parse_mode {
+                                    message = message.parse_mode(mode);
+                                }
+                                message.disable_web_page_preview(true).await?;
                             }
                             Err(e) => {
                                 bot.send_message(msg.chat.id, format!("Error receiving response: {}", e)).await?;
@@ -61,6 +70,7 @@ impl TelegramBot {
 fn parse_command(text: &str) -> Option<TelegramCommand> {
     match text {
         "/print_epoch_state" => Some(TelegramCommand::PrintEpochState),
+        "/markdown_test" => Some(TelegramCommand::MarkdownTest),
         // Add other command mappings here
         _ => None,
     }
@@ -74,6 +84,7 @@ pub fn spawn_command_executor(
         while let Some((command, response_sender)) = command_receiver.blocking_recv() {
             let result = match command {
                 TelegramCommand::PrintEpochState => budget_system.print_epoch_state(),
+                TelegramCommand::MarkdownTest => Ok(budget_system.generate_markdown_test()),
                 // Add other command executions here
             };
 
