@@ -141,6 +141,7 @@ struct BudgetRequestDetails {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Proposal {
     id: Uuid,
+    epoch_id: Uuid,
     title: String,
     url: Option<String>,
     status: ProposalStatus,
@@ -670,11 +671,12 @@ impl RaffleTicket {
 }
 
 impl Proposal {
-    fn new(title: String, url: Option<String>, budget_request_details: Option<BudgetRequestDetails>, announced_at: Option<NaiveDate>, published_at: Option<NaiveDate>, is_historical: Option<bool>) -> Self {
+    fn new(epoch_id: Uuid, title: String, url: Option<String>, budget_request_details: Option<BudgetRequestDetails>, announced_at: Option<NaiveDate>, published_at: Option<NaiveDate>, is_historical: Option<bool>) -> Self {
         let is_historical = is_historical.unwrap_or(false);
 
         Proposal {
             id: Uuid::new_v4(),
+            epoch_id,
             title,
             url,
             status: ProposalStatus::Open,
@@ -1446,9 +1448,13 @@ impl BudgetSystem {
     }
 
     async fn load_from_file(path: &str, config: AppConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        // Load the state
         let state = Self::load_state(path)?;
+        
+        // Create the EthereumService
         let ethereum_service = Arc::new(EthereumService::new(&config.ipc_path, config.future_block_offset).await?);
         
+        // Create and return the BudgetSystem instance
         Ok(Self {
             state,
             ethereum_service,
@@ -1482,7 +1488,7 @@ impl BudgetSystem {
 
     fn add_proposal(&mut self, title: String, url: Option<String>, budget_request_details: Option<BudgetRequestDetails>, announced_at: Option<NaiveDate>, published_at: Option<NaiveDate>, is_historical: Option<bool>) -> Result<Uuid, &'static str> {
         let current_epoch_id = self.state.current_epoch.ok_or("No active epoch")?;
-
+    
         // Validate dates if present
         if let Some(details) = &budget_request_details {
             if let (Some(start), Some(end)) = (details.start_date, details.end_date) {
@@ -1505,7 +1511,7 @@ impl BudgetSystem {
             }
         }
     
-        let proposal = Proposal::new(title, url, budget_request_details, announced_at, published_at, is_historical);
+        let proposal = Proposal::new(current_epoch_id, title, url, budget_request_details, announced_at, published_at, is_historical);
         let proposal_id = proposal.id;
         self.state.proposals.insert(proposal_id, proposal);
 
