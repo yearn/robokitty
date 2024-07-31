@@ -1,14 +1,14 @@
 use chrono::{DateTime, NaiveDate, Utc, TimeZone};
 use dotenvy::dotenv;
 use ethers::prelude::*;
-use log::{info, error};
+use log::{info, debug, error};
 use serde::{Serialize, Deserialize};
 use sha2::{Sha256, Digest};
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     str,
     sync::Arc,
 };
@@ -629,6 +629,10 @@ impl Raffle {
             .map(|result| result.counted.clone())
             .unwrap_or_default()
     }
+
+    fn get_etherscan_url(&self) -> String {
+        format!("https://etherscan.io/block/{}#consensusinfo", self.config.randomness_block)
+    }
 }
 
 impl TeamSnapshot {
@@ -1099,6 +1103,15 @@ impl VoteParticipation {
         match self {
             VoteParticipation::Formal { uncounted, .. } => uncounted.len() as u32,
             _ => 0,
+        }
+    }
+}
+
+impl VoteType {
+    fn total_eligible_seats(&self) -> Option<u32> {
+        match self {
+            VoteType::Formal { total_eligible_seats, .. } => Some(*total_eligible_seats),
+            VoteType::Informal => None,
         }
     }
 }
@@ -2789,6 +2802,342 @@ def hello_world():
 "#;
         test_message.to_string()
     }
+
+    fn generate_proposal_report(&self, proposal_id: Uuid) -> Result<String, Box<dyn Error>> {
+        debug!("Generating proposal report for ID: {:?}", proposal_id);
+    
+        let proposal = self.state.proposals.get(&proposal_id)
+            .ok_or_else(|| format!("Proposal not found: {:?}", proposal_id))?;
+    
+        debug!("Found proposal: {:?}", proposal.title);
+    
+        let mut report = String::new();
+    
+        // Main title (moved outside of Summary)
+        report.push_str(&format!("# Proposal Report: {}\n\n", proposal.title));
+    
+        // Summary
+        report.push_str("## Summary\n\n");
+        if let (Some(announced), Some(resolved)) = (proposal.announced_at, proposal.resolved_at) {
+            let resolution_days = self.calculate_days_between(announced, resolved);
+            report.push_str(&format!("This proposal was resolved in {} days from its announcement date. ", resolution_days));
+        }
+    
+        if let Some(vote) = self.state.votes.values().find(|v| v.proposal_id == proposal_id) {
+            if let Some(result) = vote.get_result() {
+                let (yes_votes, no_votes) = vote.get_vote_counts()
+                    .map(|(counted, _)| (counted.yes, counted.no))
+                    .unwrap_or((0, 0));
+                report.push_str(&format!("The proposal was {} with {} votes in favor and {} votes against. ", 
+                    if result { "approved" } else { "not approved" }, yes_votes, no_votes));
+            }
+        } else {
+            report.push_str("No voting information is available for this proposal. ");
+        }
+    
+        if let Some(budget_details) = &proposal.budget_request_details {
+            report.push_str(&format!("The budget request was for {} {} for the period from {} to {}. ",
+                budget_details.request_amounts.values().sum::<f64>(),
+                budget_details.request_amounts.keys().next().unwrap_or(&String::new()),
+                budget_details.start_date.map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string()),
+                budget_details.end_date.map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())
+            ));
+        }
+    
+        report.push_str("\n\n");
+    
+        // Proposal Details
+        report.push_str("## Proposal Details\n\n");
+        report.push_str(&format!("- **ID**: {}\n", proposal.id));
+        report.push_str(&format!("- **Title**: {}\n", proposal.title));
+        report.push_str(&format!("- **URL**: {}\n", proposal.url.as_deref().unwrap_or("N/A")));
+        report.push_str(&format!("- **Status**: {:?}\n", proposal.status));
+        report.push_str(&format!("- **Resolution**: {}\n", proposal.resolution.as_ref().map_or("N/A".to_string(), |r| format!("{:?}", r))));
+        report.push_str(&format!("- **Announced**: {}\n", proposal.announced_at.map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())));
+        report.push_str(&format!("- **Published**: {}\n", proposal.published_at.map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())));
+        report.push_str(&format!("- **Resolved**: {}\n", proposal.resolved_at.map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())));
+        report.push_str(&format!("- **Is Historical**: {}\n\n", proposal.is_historical));
+    
+        // Budget Request Details
+        if let Some(budget_details) = &proposal.budget_request_details {
+            report.push_str("## Budget Request Details\n\n");
+            report.push_str(&format!("- **Requesting Team**: {}\n", 
+                budget_details.team
+                    .and_then(|id| self.state.current_state.teams.get(&id))
+                    .map_or("N/A".to_string(), |team| team.name.clone())));
+            report.push_str("- **Requested Amount(s)**:\n");
+            for (token, amount) in &budget_details.request_amounts {
+                report.push_str(&format!("  - {}: {}\n", token, amount));
+            }
+            report.push_str(&format!("- **Start Date**: {}\n", budget_details.start_date.map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())));
+            report.push_str(&format!("- **End Date**: {}\n", budget_details.end_date.map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())));
+            report.push_str(&format!("- **Payment Status**: {:?}\n\n", budget_details.payment_status));
+        }
+    
+        // Raffle Information
+        if let Some(raffle) = self.state.raffles.values().find(|r| r.config.proposal_id == proposal_id) {
+            report.push_str("## Raffle Information\n\n");
+            report.push_str(&format!("- **Raffle ID**: {}\n", raffle.id));
+            report.push_str(&format!("- **Initiation Block**: {}\n", raffle.config.initiation_block));
+            report.push_str(&format!("- **Randomness Block**: [{}]({})\n", 
+                raffle.config.randomness_block, raffle.get_etherscan_url()));
+            report.push_str(&format!("- **Block Randomness**: {}\n", raffle.config.block_randomness));
+            report.push_str(&format!("- **Total Counted Seats**: {}\n", raffle.config.total_counted_seats));
+            report.push_str(&format!("- **Max Earner Seats**: {}\n", raffle.config.max_earner_seats));
+            report.push_str(&format!("- **Is Historical**: {}\n\n", raffle.config.is_historical));
+
+            // Team Snapshots
+            report.push_str(&self.generate_team_snapshots_table(raffle));
+
+            // Raffle Outcome
+            if let Some(result) = &raffle.result {
+                report.push_str("### Raffle Outcome\n\n");
+                self.generate_raffle_outcome(&mut report, raffle, result);
+            }
+        } else {
+            report.push_str("## Raffle Information\n\nNo raffle was conducted for this proposal.\n\n");
+        }
+
+        // Voting Information
+        if let Some(vote) = self.state.votes.values().find(|v| v.proposal_id == proposal_id) {
+            report.push_str("## Voting Information\n\n");
+            report.push_str("### Vote Details\n\n");
+            report.push_str(&format!("- **Vote ID**: {}\n", vote.id));
+            report.push_str(&format!("- **Type**: {:?}\n", vote.vote_type));
+            report.push_str(&format!("- **Status**: {:?}\n", vote.status));
+            report.push_str(&format!("- **Opened**: {}\n", vote.opened_at.format("%Y-%m-%d %H:%M:%S")));
+            if let Some(closed_at) = vote.closed_at {
+                report.push_str(&format!("- **Closed**: {}\n", closed_at.format("%Y-%m-%d %H:%M:%S")));
+            }
+            if let Some(result) = vote.get_result() {
+                report.push_str(&format!("- **Result**: {}\n\n", if result { "Passed" } else { "Not Passed" }));
+            }
+
+            // Participation
+            report.push_str("### Participation\n\n");
+            report.push_str(&self.generate_vote_participation_tables(vote));
+
+            // Vote Counts
+            if vote.is_vote_count_available() {
+                report.push_str("### Vote Counts\n");
+                match vote.vote_type {
+                    VoteType::Formal { total_eligible_seats, .. } => {
+                        if let Some((counted, uncounted)) = vote.get_vote_counts() {
+                            let absent = total_eligible_seats as i32 - (counted.yes + counted.no) as i32;
+                            
+                            report.push_str("#### Counted Votes\n");
+                            report.push_str(&format!("- **Yes**: {}\n", counted.yes));
+                            report.push_str(&format!("- **No**: {}\n", counted.no));
+                            if absent > 0 {
+                                report.push_str(&format!("- **Absent**: {}\n", absent));
+                            }
+
+                            report.push_str("\n#### Uncounted Votes\n");
+                            report.push_str(&format!("- **Yes**: {}\n", uncounted.yes));
+                            report.push_str(&format!("- **No**: {}\n", uncounted.no));
+                        }
+                    },
+                    VoteType::Informal => {
+                        if let Some((counted, uncounted)) = vote.get_vote_counts() {
+                            let total_yes = counted.yes + uncounted.yes;
+                            let total_no = counted.no + uncounted.no;
+                            report.push_str(&format!("- **Yes**: {}\n", total_yes));
+                            report.push_str(&format!("- **No**: {}\n", total_no));
+                        }
+                    }
+                }
+            } else {
+                report.push_str("Vote counts not available for historical votes.\n");
+            }
+        } else {
+            report.push_str("## Voting Information\n\nNo vote was conducted for this proposal.\n\n");
+        }
+
+        Ok(report)
+    }
+
+    fn generate_team_snapshots_table(&self, raffle: &Raffle) -> String {
+        let mut table = String::from("### Team Snapshots\n\n");
+        table.push_str("| Team Name | Status | Revenue | Ballot Range | Ticket Count |\n");
+        table.push_str("|-----------|--------|---------|--------------|--------------|\n");
+
+        for snapshot in &raffle.team_snapshots {
+            let team_name = &snapshot.name;
+            let status = format!("{:?}", snapshot.status);
+            let revenue = match &snapshot.status {
+                TeamStatus::Earner { trailing_monthly_revenue } => format!("{:?}", trailing_monthly_revenue),
+                _ => "N/A".to_string(),
+            };
+            let tickets: Vec<_> = raffle.tickets.iter()
+                .filter(|t| t.team_id == snapshot.id)
+                .collect();
+            let ballot_range = if !tickets.is_empty() {
+                format!("{} - {}", tickets.first().unwrap().index, tickets.last().unwrap().index)
+            } else {
+                "N/A".to_string()
+            };
+            let ticket_count = tickets.len();
+
+            table.push_str(&format!("| {} | {} | {} | {} | {} |\n", 
+                team_name, status, revenue, ballot_range, ticket_count));
+        }
+
+        table.push_str("\n");
+        table
+    }
+
+    fn generate_raffle_outcome(&self, report: &mut String, raffle: &Raffle, result: &RaffleResult) {
+        let counted_earners: Vec<_> = result.counted.iter()
+            .filter(|&team_id| raffle.team_snapshots.iter().any(|s| s.id == *team_id && matches!(s.status, TeamStatus::Earner { .. })))
+            .collect();
+        let counted_supporters: Vec<_> = result.counted.iter()
+            .filter(|&team_id| raffle.team_snapshots.iter().any(|s| s.id == *team_id && matches!(s.status, TeamStatus::Supporter)))
+            .collect();
+    
+        report.push_str(&format!("#### Counted Seats (Total: {})\n\n", result.counted.len()));
+        
+        report.push_str(&format!("##### Earner Seats ({})\n", counted_earners.len()));
+        for team_id in counted_earners {
+            if let Some(snapshot) = raffle.team_snapshots.iter().find(|s| s.id == *team_id) {
+                let best_score = raffle.tickets.iter()
+                    .filter(|t| t.team_id == *team_id)
+                    .map(|t| t.score)
+                    .max_by(|a, b| a.partial_cmp(b).unwrap())
+                    .unwrap_or(0.0);
+                report.push_str(&format!("- {} (Best Score: {:.4})\n", snapshot.name, best_score));
+            }
+        }
+    
+        report.push_str(&format!("\n##### Supporter Seats ({})\n", counted_supporters.len()));
+        for team_id in counted_supporters {
+            if let Some(snapshot) = raffle.team_snapshots.iter().find(|s| s.id == *team_id) {
+                let best_score = raffle.tickets.iter()
+                    .filter(|t| t.team_id == *team_id)
+                    .map(|t| t.score)
+                    .max_by(|a, b| a.partial_cmp(b).unwrap())
+                    .unwrap_or(0.0);
+                report.push_str(&format!("- {} (Best Score: {:.4})\n", snapshot.name, best_score));
+            }
+        }
+    
+        report.push_str("\n#### Uncounted Seats\n");
+        for team_id in &result.uncounted {
+            if let Some(snapshot) = raffle.team_snapshots.iter().find(|s| s.id == *team_id) {
+                let best_score = raffle.tickets.iter()
+                    .filter(|t| t.team_id == *team_id)
+                    .map(|t| t.score)
+                    .max_by(|a, b| a.partial_cmp(b).unwrap())
+                    .unwrap_or(0.0);
+                report.push_str(&format!("- {} (Best Score: {:.4})\n", snapshot.name, best_score));
+            }
+        }
+    }
+
+    fn generate_vote_participation_tables(&self, vote: &Vote) -> String {
+        let mut tables = String::new();
+
+        match &vote.participation {
+            VoteParticipation::Formal { counted, uncounted } => {
+                tables.push_str("#### Counted Votes\n");
+                tables.push_str("| Team | Points Credited |\n");
+                tables.push_str("|------|------------------|\n");
+                for &team_id in counted {
+                    if let Some(team) = self.state.current_state.teams.get(&team_id) {
+                        tables.push_str(&format!("| {} | {} |\n", team.name, self.config.counted_vote_points));
+                    }
+                }
+
+                tables.push_str("\n#### Uncounted Votes\n");
+                tables.push_str("| Team | Points Credited |\n");
+                tables.push_str("|------|------------------|\n");
+                for &team_id in uncounted {
+                    if let Some(team) = self.state.current_state.teams.get(&team_id) {
+                        tables.push_str(&format!("| {} | {} |\n", team.name, self.config.uncounted_vote_points));
+                    }
+                }
+            },
+            VoteParticipation::Informal(participants) => {
+                tables.push_str("#### Participants\n");
+                tables.push_str("| Team | Points Credited |\n");
+                tables.push_str("|------|------------------|\n");
+                for &team_id in participants {
+                    if let Some(team) = self.state.current_state.teams.get(&team_id) {
+                        tables.push_str(&format!("| {} | 0 |\n", team.name));
+                    }
+                }
+            },
+        }
+
+        tables
+    }
+
+    fn calculate_days_between(&self, start: NaiveDate, end: NaiveDate) -> i64 {
+        (end - start).num_days()
+    }
+
+    fn generate_report_file_path(&self, proposal: &Proposal, epoch_name: &str) -> PathBuf {
+        debug!("Generating report file path for proposal: {:?}", proposal.id);
+    
+        let state_file_path = PathBuf::from(&self.config.state_file);
+        let state_file_dir = state_file_path.parent().unwrap_or_else(|| {
+            debug!("Failed to get parent directory of state file, using current directory");
+            Path::new(".")
+        });
+        let reports_dir = state_file_dir.join("reports").join(epoch_name);
+    
+        let date = proposal.published_at
+            .or(proposal.announced_at)
+            .map(|date| date.format("%Y%m%d").to_string())
+            .unwrap_or_else(|| {
+                debug!("No published_at or announced_at date for proposal: {:?}", proposal.id);
+                "00000000".to_string()
+            });
+    
+        let team_part = proposal.budget_request_details
+            .as_ref()
+            .and_then(|details| details.team)
+            .and_then(|team_id| self.state.current_state.teams.get(&team_id))
+            .map(|team| format!("-{}", clean_file_name(&team.name)))
+            .unwrap_or_default();
+    
+        let truncated_title = clean_file_name(&proposal.title)
+            .chars()
+            .take(30)
+            .collect::<String>()
+            .replace(" ", "_");
+    
+        let file_name = format!("{}{}-{}.md", date, team_part, truncated_title);
+        debug!("Generated file name: {}", file_name);
+    
+        reports_dir.join(file_name)
+    }
+
+    fn save_report_to_file(&self, content: &str, file_path: &Path) -> Result<(), Box<dyn Error>> {
+        if let Some(parent) = file_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(file_path, content)?;
+        Ok(())
+    }
+
+    fn generate_and_save_proposal_report(&self, proposal_id: Uuid, epoch_name: &str) -> Result<PathBuf, Box<dyn Error>> {
+        debug!("Generating report for proposal: {:?}", proposal_id);
+    
+        let proposal = self.state.proposals.get(&proposal_id)
+            .ok_or_else(|| {
+                let err = format!("Proposal not found: {:?}", proposal_id);
+                error!("{}", err);
+                err
+            })?;
+    
+        let report_content = self.generate_proposal_report(proposal_id)?;
+        let file_path = self.generate_report_file_path(proposal, epoch_name);
+    
+        debug!("Saving report to file: {:?}", file_path);
+        self.save_report_to_file(&report_content, &file_path)?;
+    
+        Ok(file_path)
+    }
 }
 
 // Script commands
@@ -2861,6 +3210,8 @@ enum ScriptCommand {
         vote_opened: Option<NaiveDate>,
         vote_closed: Option<NaiveDate>,
     },
+    GenerateReportsForClosedProposals { epoch_name: String },
+    GenerateReportForProposal { proposal_name: String },
 }
 
 #[derive(Deserialize, Clone)]
@@ -3314,6 +3665,36 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                 }
             }
         },
+        ScriptCommand::GenerateReportsForClosedProposals { epoch_name } => {
+            let epoch_id = budget_system.get_epoch_id_by_name(&epoch_name)
+                .ok_or_else(|| format!("Epoch not found: {}", epoch_name))?;
+            
+            let closed_proposals: Vec<_> = budget_system.get_proposals_for_epoch(epoch_id)
+                .into_iter()
+                .filter(|p| p.status == ProposalStatus::Closed)
+                .collect();
+
+            for proposal in closed_proposals {
+                match budget_system.generate_and_save_proposal_report(proposal.id, &epoch_name) {
+                    Ok(file_path) => println!("Report generated for proposal '{}' at {:?}", proposal.title, file_path),
+                    Err(e) => println!("Failed to generate report for proposal '{}': {}", proposal.title, e),
+                }
+            }
+        },
+        ScriptCommand::GenerateReportForProposal { proposal_name } => {
+            let current_epoch = budget_system.get_current_epoch()
+                .ok_or("No active epoch")?;
+            
+            let proposal = budget_system.get_proposals_for_epoch(current_epoch.id())
+                .into_iter()
+                .find(|p| p.title == proposal_name)
+                .ok_or_else(|| format!("Proposal not found in current epoch: {}", proposal_name))?;
+
+            match budget_system.generate_and_save_proposal_report(proposal.id, &current_epoch.name()) {
+                Ok(file_path) => println!("Report generated for proposal '{}' at {:?}", proposal.title, file_path),
+                Err(e) => println!("Failed to generate report for proposal '{}': {}", proposal.title, e),
+            }
+        },
 
     }
     Ok(())
@@ -3333,8 +3714,18 @@ fn escape_markdown(text: &str) -> String {
     escaped
 }
 
+fn clean_file_name(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            _ => c
+        })
+        .collect()
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    pretty_env_logger::init();
     // Load .env file
     dotenv().expect(".env file not found");
     let config = AppConfig::new()?;
