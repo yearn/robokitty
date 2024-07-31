@@ -1467,8 +1467,19 @@ impl BudgetSystem {
     }
 
     async fn create_raffle(&mut self, mut builder: RaffleBuilder) -> Result<Uuid, Box<dyn std::error::Error>> {
+        let proposal_id = builder.config.proposal_id;
+        let proposal = self.state.proposals.get(&proposal_id)
+            .ok_or("Proposal not found")?;
+
+        if !proposal.is_actionable() {
+            return Err("Proposal is not in a state that allows raffle creation".into());
+        }
+
+        let epoch_id = proposal.epoch_id;
+
         let (initiation_block, randomness_block, randomness) = self.ethereum_service.get_raffle_randomness().await?;
         
+        builder.config.epoch_id = epoch_id;
         let raffle = builder
             .with_randomness(initiation_block, randomness_block, randomness)
             .build(&self.state.current_state.teams)?;
@@ -1672,14 +1683,14 @@ impl BudgetSystem {
     }
 
     fn create_formal_vote(&mut self, proposal_id: Uuid, raffle_id: Uuid, threshold: Option<f64>) -> Result<Uuid, &'static str> {
-        let current_epoch_id = self.state.current_epoch.ok_or("No active epoch")?;
-        
         let proposal = self.state.proposals.get(&proposal_id)
             .ok_or("Proposal not found")?;
 
         if !proposal.is_actionable() {
             return Err("Proposal is not in a votable state");
         }
+
+        let epoch_id = proposal.epoch_id;
 
         let raffle = &self.state.raffles.get(&raffle_id)
             .ok_or("Raffle not found")?;
@@ -1690,7 +1701,7 @@ impl BudgetSystem {
 
         let vote = Vote::new_formal(
             proposal_id,
-            current_epoch_id,
+            epoch_id,
             raffle_id, 
             raffle.config.total_counted_seats as u32,
             threshold,
@@ -1703,8 +1714,6 @@ impl BudgetSystem {
     }
 
     fn create_informal_vote(&mut self, proposal_id: Uuid) -> Result<Uuid, &'static str> {
-        let current_epoch_id = self.state.current_epoch.ok_or("No active epoch")?;
-        
         let proposal = self.state.proposals.get(&proposal_id)
             .ok_or("Proposal not found")?;
 
@@ -1712,7 +1721,9 @@ impl BudgetSystem {
             return Err("Proposal is not in a votable state");
         }
 
-        let vote = Vote::new_informal(proposal_id, current_epoch_id);
+        let epoch_id = proposal.epoch_id;
+
+        let vote = Vote::new_informal(proposal_id, epoch_id);
         let vote_id = vote.id;
         self.state.votes.insert(vote_id, vote);
         self.save_state();
