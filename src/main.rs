@@ -2488,20 +2488,20 @@ impl BudgetSystem {
         Ok((raffle_id, raffle))
     }
 
-    async fn finalize_raffle(&mut self, raffle_id: Uuid, block_number: u64, randomness: String) -> Result<Raffle, Box<dyn Error>> {
+    async fn finalize_raffle(&mut self, raffle_id: Uuid, initiation_block: u64, randomness_block: u64, randomness: String) -> Result<Raffle, Box<dyn Error>> {
         let raffle = self.state.raffles.get_mut(&raffle_id)
             .ok_or_else(|| format!("Raffle not found: {}", raffle_id))?;
-
-        raffle.config.initiation_block = block_number;
-        raffle.config.randomness_block = block_number;
+    
+        raffle.config.initiation_block = initiation_block;
+        raffle.config.randomness_block = randomness_block;
         raffle.config.block_randomness = randomness;
-
+    
         raffle.generate_scores()?;
         raffle.select_teams();
-
+    
         let raffle_clone = raffle.clone();
         self.save_state()?;
-
+    
         Ok(raffle_clone)
     }
 
@@ -3533,6 +3533,8 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
             let current_block = budget_system.ethereum_service.get_current_block().await?;
             println!("Current block number: {}", current_block);
 
+            let initiation_block = current_block;
+
             let target_block = current_block + block_offset.unwrap_or(budget_system.ethereum_service.future_block_offset);
             println!("Target block for randomness: {}", target_block);
 
@@ -3553,7 +3555,7 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
             println!("Block randomness: {}", randomness);
             println!("Etherscan URL: https://etherscan.io/block/{}#consensusinfo", target_block);
 
-            let raffle = budget_system.finalize_raffle(raffle_id, target_block, randomness).await?;
+            let raffle = budget_system.finalize_raffle(raffle_id, initiation_block, target_block, randomness).await?;
 
             // Print results (similar to ImportHistoricalRaffle)
             println!("Raffle results for proposal '{}' (Raffle ID: {})", proposal_name, raffle_id);
