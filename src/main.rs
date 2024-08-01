@@ -2285,7 +2285,7 @@ impl BudgetSystem {
             for proposal in open_proposals {
                 report.push_str(&format!("*{}*\n", escape_markdown(&proposal.title)));
                 if let Some(url) = &proposal.url {
-                    report.push_str(&format!("🔗 [Link]({})\n", escape_markdown(url)));
+                    report.push_str(&format!("🔗 {}\n", escape_markdown(url)));
                 }
                 if let Some(details) = &proposal.budget_request_details {
                     if let (Some(start), Some(end)) = (details.start_date, details.end_date) {
