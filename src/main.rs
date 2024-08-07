@@ -1,3 +1,5 @@
+//src/main.rs
+
 use chrono::{DateTime, NaiveDate, Utc, TimeZone};
 use dotenvy::dotenv;
 use ethers::prelude::*;
@@ -26,6 +28,14 @@ use app_config::AppConfig;
 mod telegram_bot;
 use telegram_bot::{TelegramBot, spawn_command_executor};
 
+use async_trait::async_trait;
+
+#[async_trait]
+pub trait EthereumServiceTrait: Send + Sync {
+    async fn get_current_block(&self) -> Result<u64, Box<dyn std::error::Error>>;
+    async fn get_randomness(&self, block_number: u64) -> Result<String, Box<dyn std::error::Error>>;
+    async fn get_raffle_randomness(&self) -> Result<(u64, u64, String), Box<dyn std::error::Error>>;
+}
 // Error types
 
 // Structs and enums
@@ -1288,6 +1298,34 @@ impl EthereumService {
     }
 }
 
+#[async_trait]
+impl EthereumServiceTrait for EthereumService {
+    async fn get_current_block(&self) -> Result<u64, Box<dyn std::error::Error>> {
+        Ok(self.client.get_block_number().await?.as_u64())
+    }
+
+    async fn get_randomness(&self, block_number: u64) -> Result<String, Box<dyn std::error::Error>> {
+        let block = self.client.get_block(block_number).await?
+            .ok_or("Block not found")?;
+        block.mix_hash
+            .ok_or_else(|| "Randomness not found".into())
+            .map(|hash| format!("0x{:x}", hash))
+    }
+
+    async fn get_raffle_randomness(&self) -> Result<(u64, u64, String), Box<dyn std::error::Error>> {
+        let initiation_block = self.get_current_block().await?;
+        let randomness_block = initiation_block + self.future_block_offset;
+
+        while self.get_current_block().await? < randomness_block {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+
+        let randomness = self.get_randomness(randomness_block).await?;
+
+        Ok((initiation_block, randomness_block, randomness))
+    }
+}
+
 // Main BudgetSystem struct and its methods
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1309,13 +1347,15 @@ struct BudgetSystemState {
 
 struct BudgetSystem {
     state: BudgetSystemState,
-    ethereum_service: Arc<EthereumService>,
+    ethereum_service: Arc<dyn EthereumServiceTrait>,
     config: AppConfig,
 }
 
 impl BudgetSystem {
-    async fn new(config: AppConfig) -> Result<Self, Box<dyn std::error::Error>> {
-        let ethereum_service = Arc::new(EthereumService::new(&config.ipc_path, config.future_block_offset).await?);
+    async fn new(config: AppConfig, ethereum_service: Arc<dyn EthereumServiceTrait>) -> Result<Self, Box<dyn std::error::Error>> {
+        if let Some(parent) = Path::new(&config.state_file).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         
         Ok(Self {
             state: BudgetSystemState {
@@ -1411,6 +1451,11 @@ impl BudgetSystem {
         let state_file = &self.config.state_file;
         info!("Attempting to save state to file: {}", state_file);
 
+        // Ensure the directory for the state file exists
+        if let Some(parent) = Path::new(state_file).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
         let json = serde_json::to_string_pretty(&self.state)?;
         
         // Write to a temporary file first
@@ -1447,14 +1492,33 @@ impl BudgetSystem {
         Ok(state)
     }
 
-    async fn load_from_file(path: &str, config: AppConfig) -> Result<Self, Box<dyn std::error::Error>> {
-        // Load the state
-        let state = Self::load_state(path)?;
+    pub async fn load_from_file(
+        path: &str,
+        config: AppConfig,
+        ethereum_service: Arc<dyn EthereumServiceTrait>
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        // Ensure the directory for the state file exists
+        if let Some(parent) = Path::new(path).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let state = if Path::new(path).exists() {
+            Self::load_state(path)?
+        } else {
+            BudgetSystemState {
+                current_state: SystemState {
+                    teams: HashMap::new(),
+                    timestamp: Utc::now(),
+                },
+                history: Vec::new(),
+                proposals: HashMap::new(),
+                raffles: HashMap::new(),
+                votes: HashMap::new(),
+                epochs: HashMap::new(),
+                current_epoch: None,
+            }
+        };
         
-        // Create the EthereumService
-        let ethereum_service = Arc::new(EthereumService::new(&config.ipc_path, config.future_block_offset).await?);
-        
-        // Create and return the BudgetSystem instance
         Ok(Self {
             state,
             ethereum_service,
@@ -3552,7 +3616,7 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
 
             let initiation_block = current_block;
 
-            let target_block = current_block + block_offset.unwrap_or(budget_system.ethereum_service.future_block_offset);
+            let target_block = current_block + block_offset.unwrap_or(config.future_block_offset);
             println!("Target block for randomness: {}", target_block);
 
             // Wait for target block
@@ -3754,8 +3818,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         fs::create_dir_all(parent)?;
     }
 
+    // Create the EthereumService
+    let ethereum_service = Arc::new(EthereumService::new(&config.ipc_path, config.future_block_offset).await?);
+
     // Initialize or load the BudgetSystem
-    let mut budget_system = match BudgetSystem::load_from_file(&config.state_file, config.clone()).await {
+    let mut budget_system = match BudgetSystem::load_from_file(&config.state_file, config.clone(), ethereum_service.clone()).await {
         Ok(system) => {
             println!("Loaded existing state from {}", &config.state_file);
             system
@@ -3763,7 +3830,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Err(e) => {
             println!("Failed to load existing state from {}: {}", &config.state_file, e);
             println!("Creating a new BudgetSystem.");
-            BudgetSystem::new(config.clone()).await?
+            BudgetSystem::new(config.clone(), ethereum_service.clone()).await?
         },
     };
 
@@ -3800,4 +3867,240 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     Ok(())
     
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tokio::runtime::Runtime;
+    use tempfile::TempDir;
+    use crate::app_config::{AppConfig, TelegramConfig};
+
+    struct MockEthereumService;
+
+    #[async_trait::async_trait]
+    impl EthereumServiceTrait for MockEthereumService {
+        async fn get_current_block(&self) -> Result<u64, Box<dyn std::error::Error>> {
+            Ok(12345)
+        }
+
+        async fn get_randomness(&self, block_number: u64) -> Result<String, Box<dyn std::error::Error>> {
+            Ok(format!("mock_randomness_for_block_{}", block_number))
+        }
+
+        async fn get_raffle_randomness(&self) -> Result<(u64, u64, String), Box<dyn std::error::Error>> {
+            Ok((12345, 12355, "mock_randomness".to_string()))
+        }
+    }
+
+    // Helper function to create a test BudgetSystem
+    async fn create_test_budget_system() -> BudgetSystem {
+        let temp_dir = TempDir::new().unwrap();
+        let config = AppConfig {
+            state_file: temp_dir.path().join("test_state.json").to_str().unwrap().to_string(),
+            ipc_path: temp_dir.path().join("test_reth.ipc").to_str().unwrap().to_string(),
+            future_block_offset: 10,
+            script_file: temp_dir.path().join("test_script.json").to_str().unwrap().to_string(),
+            default_total_counted_seats: 7,
+            default_max_earner_seats: 5,
+            default_qualified_majority_threshold: 0.7,
+            counted_vote_points: 5,
+            uncounted_vote_points: 2,
+            telegram: TelegramConfig {
+                chat_id: "test_chat_id".to_string(),
+                token: "test_token".to_string(),
+            },
+        };
+        let ethereum_service = Arc::new(MockEthereumService);
+        BudgetSystem::new(config, ethereum_service).await.unwrap()
+    }
+
+    // Helper function to create and activate an epoch
+    async fn create_active_epoch(budget_system: &mut BudgetSystem, name: &str, duration_days: i64) -> Uuid {
+        let start_date = Utc::now();
+        let end_date = start_date + chrono::Duration::days(duration_days);
+        let epoch_id = budget_system.create_epoch(name, start_date, end_date).unwrap();
+        budget_system.activate_epoch(epoch_id).unwrap();
+        epoch_id
+    }
+
+    // Helper function to add a team
+    async fn add_team(budget_system: &mut BudgetSystem, name: &str, representative: &str, revenue: Option<Vec<u64>>) -> Uuid {
+        budget_system.add_team(name.to_string(), representative.to_string(), revenue).unwrap()
+    }
+
+    // Helper function to create a proposal
+    async fn create_proposal(budget_system: &mut BudgetSystem, title: &str, url: Option<&str>) -> Uuid {
+        budget_system.add_proposal(
+            title.to_string(),
+            url.map(|u| u.to_string()),
+            None,
+            Some(Utc::now().date_naive()),
+            None,
+            None
+        ).unwrap()
+    }
+
+    // Helper function to set up a complete test scenario
+    async fn setup_test_scenario(budget_system: &mut BudgetSystem) -> (Uuid, Uuid, Uuid, Uuid, Uuid) {
+        let epoch_id = create_active_epoch(budget_system, "Test Epoch", 30).await;
+        let team1_id = add_team(budget_system, "Team 1", "Rep 1", Some(vec![1000, 2000, 3000])).await;
+        let team2_id = add_team(budget_system, "Team 2", "Rep 2", Some(vec![4000, 5000, 6000])).await;
+        let proposal_id = create_proposal(budget_system, "Test Proposal", Some("https://example.com")).await;
+        
+        let raffle_builder = RaffleBuilder::new(proposal_id, epoch_id, &budget_system.config);
+        let raffle_id = budget_system.create_raffle(raffle_builder).await.unwrap();
+
+        (epoch_id, team1_id, team2_id, proposal_id, raffle_id)
+    }
+
+    #[tokio::test]
+    async fn test_save_and_load_state() {
+        // Create a temporary directory for this test
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json");
+
+        // Get a default test budget system
+        let mut budget_system = create_test_budget_system().await;
+
+        // Modify the state_file in the config
+        budget_system.config.state_file = state_file.to_str().unwrap().to_string();
+
+        // Create an epoch and add a team
+        let start_date = Utc::now();
+        let end_date = start_date + chrono::Duration::days(30);
+        budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
+        budget_system.add_team("Test Team".to_string(), "Representative".to_string(), Some(vec![1000, 2000, 3000])).unwrap();
+
+        // Save the state
+        budget_system.save_state().unwrap();
+
+        // Load the state into a new BudgetSystem
+        let ethereum_service = Arc::new(MockEthereumService);
+        let loaded_system = BudgetSystem::load_from_file(
+            &budget_system.config.state_file,
+            budget_system.config.clone(),
+            ethereum_service
+        ).await.unwrap();
+
+        // Verify the loaded state
+        assert_eq!(loaded_system.state.epochs.len(), 1);
+        assert_eq!(loaded_system.state.current_state.teams.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_create_epoch() {
+        let mut budget_system = create_test_budget_system().await;
+        let epoch_id = create_active_epoch(&mut budget_system, "Test Epoch", 30).await;
+        
+        let epoch = budget_system.get_current_epoch().unwrap();
+        assert_eq!(epoch.name(), "Test Epoch");
+        assert_eq!(epoch.status(), &EpochStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn test_add_team() {
+        let mut budget_system = create_test_budget_system().await;
+        let team_id = add_team(&mut budget_system, "Test Team", "Representative", Some(vec![1000, 2000, 3000])).await;
+        
+        let team = budget_system.state.current_state.teams.get(&team_id).unwrap();
+        assert_eq!(team.name, "Test Team");
+        assert_eq!(team.representative, "Representative");
+        assert_eq!(team.get_revenue_data(), Some(&vec![1000, 2000, 3000]));
+    }
+
+    #[tokio::test]
+    async fn test_add_proposal() {
+        let mut budget_system = create_test_budget_system().await;
+        create_active_epoch(&mut budget_system, "Test Epoch", 30).await;
+        let proposal_id = create_proposal(&mut budget_system, "Test Proposal", Some("https://example.com")).await;
+
+        let proposal = budget_system.get_proposal(proposal_id).unwrap();
+        assert_eq!(proposal.title, "Test Proposal");
+        assert_eq!(proposal.url, Some("https://example.com".to_string()));
+        assert_eq!(proposal.status, ProposalStatus::Open);
+    }
+
+    #[tokio::test]
+    async fn test_create_and_conduct_raffle() {
+        let mut budget_system = create_test_budget_system().await;
+        let (_, _, _, proposal_id, raffle_id) = setup_test_scenario(&mut budget_system).await;
+
+        budget_system.conduct_raffle(raffle_id).unwrap();
+
+        let raffle = budget_system.state.raffles.get(&raffle_id).unwrap();
+        assert!(raffle.result.is_some());
+        let result = raffle.result.as_ref().unwrap();
+        assert_eq!(result.counted.len() + result.uncounted.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_create_and_process_vote() {
+        let mut budget_system = create_test_budget_system().await;
+        let (_, team1_id, team2_id, proposal_id, raffle_id) = setup_test_scenario(&mut budget_system).await;
+
+        // Conduct the raffle before creating the vote
+        budget_system.conduct_raffle(raffle_id).unwrap();
+
+        // Now create the formal vote
+        let vote_id = budget_system.create_formal_vote(proposal_id, raffle_id, None).unwrap();
+
+        // Cast votes
+        let votes = vec![(team1_id, VoteChoice::Yes), (team2_id, VoteChoice::No)];
+        budget_system.cast_votes(vote_id, votes).unwrap();
+
+        // Close the vote
+        let vote_result = budget_system.close_vote(vote_id).unwrap();
+
+        // Check vote results
+        let vote = budget_system.state.votes.get(&vote_id).unwrap();
+        assert_eq!(vote.status, VoteStatus::Closed);
+        assert!(vote.result.is_some());
+
+        // Additional assertions to verify the vote outcome
+        if let Some(VoteResult::Formal { counted, uncounted, passed }) = &vote.result {
+            assert_eq!(counted.yes + counted.no, 2); // Assuming both teams are counted
+            assert_eq!(uncounted.yes + uncounted.no, 0); // Assuming no uncounted votes
+            // The passed value will depend on your voting rules
+        } else {
+            panic!("Expected a formal vote result");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_team_status() {
+        let mut budget_system = create_test_budget_system().await;
+        let team_id = add_team(&mut budget_system, "Test Team", "Representative", Some(vec![1000, 2000, 3000])).await;
+
+        budget_system.update_team_status(team_id, &TeamStatus::Supporter).unwrap();
+        let team = budget_system.state.current_state.teams.get(&team_id).unwrap();
+        assert_eq!(team.status, TeamStatus::Supporter);
+
+        budget_system.update_team_status(team_id, &TeamStatus::Earner { trailing_monthly_revenue: vec![4000, 5000, 6000] }).unwrap();
+        let team = budget_system.state.current_state.teams.get(&team_id).unwrap();
+        assert!(matches!(team.status, TeamStatus::Earner { .. }));
+        if let TeamStatus::Earner { trailing_monthly_revenue } = &team.status {
+            assert_eq!(trailing_monthly_revenue, &vec![4000, 5000, 6000]);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_set_and_calculate_epoch_rewards() {
+        let mut budget_system = create_test_budget_system().await;
+        let (epoch_id, team1_id, team2_id, _, _) = setup_test_scenario(&mut budget_system).await;
+
+        budget_system.set_epoch_reward("ETH", 10.0).unwrap();
+
+        budget_system.state.current_state.teams.get_mut(&team1_id).unwrap().add_points(5);
+        budget_system.state.current_state.teams.get_mut(&team2_id).unwrap().add_points(10);
+
+        let rewards = budget_system.calculate_epoch_rewards().unwrap();
+
+        assert_eq!(rewards.len(), 2);
+        assert!(rewards.contains_key(&team1_id));
+        assert!(rewards.contains_key(&team2_id));
+        let total_reward: f64 = rewards.values().map(|r| r.amount).sum();
+        assert!((total_reward - 10.0).abs() < f64::EPSILON);
+    }
 }

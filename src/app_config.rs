@@ -1,3 +1,5 @@
+//src/app_config.rs
+
 use serde::Deserialize;
 use std::env;
 use config::{Config, ConfigError, File};
@@ -104,5 +106,45 @@ impl Default for AppConfig {
                 token: String::new(),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+
+    #[test]
+    fn test_app_config_defaults() {
+        let config = AppConfig::default();
+        assert_eq!(config.ipc_path, "/tmp/reth.ipc");
+        assert_eq!(config.future_block_offset, 10);
+        assert_eq!(config.state_file, "budget_system_state.json");
+        assert_eq!(config.script_file, "input_script.json");
+        assert_eq!(config.default_total_counted_seats, 7);
+        assert_eq!(config.default_max_earner_seats, 5);
+        assert_eq!(config.default_qualified_majority_threshold, 0.7);
+        assert_eq!(config.counted_vote_points, 5);
+        assert_eq!(config.uncounted_vote_points, 2);
+    }
+
+    #[test]
+    fn test_app_config_from_env() {
+        env::set_var("APP_IPC_PATH", "/custom/path.ipc");
+        env::set_var("APP_FUTURE_BLOCK_OFFSET", "20");
+        env::set_var("APP_STATE_FILE", "custom_state.json");
+        env::set_var("TELEGRAM_BOT_TOKEN", "test_token");
+
+        let config = AppConfig::new().unwrap();
+        assert_eq!(config.ipc_path, "/custom/path.ipc");
+        assert_eq!(config.future_block_offset, 20);
+        assert_eq!(config.state_file, "custom_state.json");
+        assert_eq!(config.telegram.token, "test_token");
+
+        // Clean up environment variables
+        env::remove_var("APP_IPC_PATH");
+        env::remove_var("APP_FUTURE_BLOCK_OFFSET");
+        env::remove_var("APP_STATE_FILE");
+        env::remove_var("TELEGRAM_BOT_TOKEN");
     }
 }

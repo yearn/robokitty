@@ -20,3 +20,8 @@ uuid = { version = "1.9.1", features = ["v4", "fast-rng", "serde"] }
 mockall = "0.12"
 config = "0.14"
 dirs = "4.0"
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+tempfile = "3.2"
