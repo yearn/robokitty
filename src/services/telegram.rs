@@ -1,12 +1,8 @@
-// src/telegram_bot.rs
-
 use crate::BudgetSystem;
 use teloxide::prelude::*;
 use teloxide::types::ParseMode;
-use teloxide::utils::markdown::escape;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use std::error::Error;
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum TelegramCommand {
@@ -14,6 +10,7 @@ pub enum TelegramCommand {
     MarkdownTest,
     // Add other commands here as needed
 }
+
 pub struct TelegramBot {
     bot: Bot,
     command_sender: mpsc::Sender<(TelegramCommand, oneshot::Sender<String>)>,

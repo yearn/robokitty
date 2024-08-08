@@ -2,6 +2,7 @@
 
 mod services;
 use services::ethereum::{EthereumService, EthereumServiceTrait};
+use services::telegram::{TelegramBot, spawn_command_executor};
 
 use chrono::{DateTime, NaiveDate, Utc, TimeZone};
 use dotenvy::dotenv;
@@ -26,9 +27,6 @@ use uuid::Uuid;
 
 mod app_config;
 use app_config::AppConfig;
-
-mod telegram_bot;
-use telegram_bot::{TelegramBot, spawn_command_executor};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum TeamStatus {
