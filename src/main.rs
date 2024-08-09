@@ -743,24 +743,25 @@ impl Proposal {
     }
 
     fn approve(&mut self) -> Result<(), &'static str> {
+        println!("Attempting to approve proposal. Current status: {:?}", self.status);
         if self.status != ProposalStatus::Open && self.status != ProposalStatus::Reopened {
             return Err("Proposal is not in a state that can be approved");
         }
-
         self.status = ProposalStatus::Closed;
         self.resolution = Some(Resolution::Approved);
         Ok(())
     }
     
     fn reject(&mut self) -> Result<(), &'static str> {
+        println!("Attempting to reject proposal. Current status: {:?}", self.status);
         if self.status != ProposalStatus::Open && self.status != ProposalStatus::Reopened {
             return Err("Proposal is not in a state that can be rejected");
         }
-
         self.status = ProposalStatus::Closed;
         self.resolution = Some(Resolution::Rejected);
         Ok(())
     }
+
 
     fn update(&mut self, updates: UpdateProposalDetails, team_id: Option<Uuid>) -> Result<(), &'static str> {
         if let Some(title) = updates.title {
@@ -1784,13 +1785,6 @@ impl BudgetSystem {
             None => return Err("Vote result not available"),
         };
 
-        // If it's a formal vote and it passed, approve the proposal
-        if result {
-            let proposal = self.state.proposals.get_mut(&vote.proposal_id)
-                .ok_or("Associated proposal not found")?;
-            proposal.approve()?;
-        }
-
         self.save_state();
         Ok(result)
     }
@@ -2637,13 +2631,35 @@ impl BudgetSystem {
         vote_closed: Option<NaiveDate>,
     ) -> Result<bool, Box<dyn Error>> {
         let passed = self.close_vote(vote_id)?;
+        
+        let proposal = self.state.proposals.get_mut(&proposal_id)
+            .ok_or_else(|| format!("Proposal not found: {}", proposal_id))?;
+        
+        println!("Proposal status before update: {:?}", proposal.status);
+        println!("Proposal resolution before update: {:?}", proposal.resolution);
+        
+        let result = if passed {
+            proposal.approve()
+        } else {
+            proposal.reject()
+        };
     
-        if let Some(closed) = vote_closed {
-            let proposal = self.state.proposals.get_mut(&proposal_id).unwrap();
-            proposal.set_resolved_at(closed);
+        match result {
+            Ok(()) => {
+                if let Some(closed) = vote_closed {
+                    proposal.set_resolved_at(closed);
+                }
+                println!("Proposal status after update: {:?}", proposal.status);
+                println!("Proposal resolution after update: {:?}", proposal.resolution);
+                self.save_state()?;
+                Ok(passed)
+            },
+            Err(e) => {
+                println!("Error updating proposal: {}", e);
+                println!("Current proposal state: {:?}", proposal);
+                Err(format!("Failed to update proposal: {}", e).into())
+            }
         }
-    
-        Ok(passed)
     }
 
     fn generate_vote_report(&self, vote_id: Uuid) -> Result<String, Box<dyn Error>> {
