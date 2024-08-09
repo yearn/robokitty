@@ -2931,6 +2931,7 @@ dependencies = [
 name = "robokitty"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "config",
  "dirs 4.0.0",
@@ -2943,6 +2944,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "teloxide",
+ "tempfile",
  "tokio",
  "uuid 1.9.1",
 ]

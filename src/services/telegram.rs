@@ -1,19 +1,16 @@
-// src/telegram_bot.rs
-
 use crate::BudgetSystem;
 use teloxide::prelude::*;
 use teloxide::types::ParseMode;
-use teloxide::utils::markdown::escape;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use std::error::Error;
 
-#[derive(Clone)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum TelegramCommand {
     PrintEpochState,
     MarkdownTest,
     // Add other commands here as needed
 }
+
 pub struct TelegramBot {
     bot: Bot,
     command_sender: mpsc::Sender<(TelegramCommand, oneshot::Sender<String>)>,
@@ -98,4 +95,22 @@ pub fn spawn_command_executor(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn test_telegram_command_parsing() {
+        let (tx, _rx) = mpsc::channel(100);
+        let bot = TelegramBot::new(Bot::new("dummy_token"), tx);
+
+        assert_eq!(parse_command("/print_epoch_state"), Some(TelegramCommand::PrintEpochState));
+        assert_eq!(parse_command("/markdown_test"), Some(TelegramCommand::MarkdownTest));
+        assert_eq!(parse_command("/unknown_command"), None);
+    }
+
+    // Add more tests for TelegramBot functionality as needed
 }
