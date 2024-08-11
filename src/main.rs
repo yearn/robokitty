@@ -2591,6 +2591,98 @@ def hello_world():
 
         Ok(total_points)
     }
+
+    fn close_epoch(&mut self, epoch_name: Option<&str>) -> Result<(), Box<dyn Error>> {
+        let epoch_id = match epoch_name {
+            Some(name) => self.get_epoch_id_by_name(name)
+                .ok_or_else(|| format!("Epoch not found: {}", name))?,
+            None => self.state.current_epoch
+                .ok_or("No active epoch")?
+        };
+
+        // Collect necessary data
+        let actionable_proposals = self.get_proposals_for_epoch(epoch_id)
+            .iter()
+            .filter(|p| p.is_actionable())
+            .count();
+
+        if actionable_proposals > 0 {
+            return Err(format!("Cannot close epoch: {} actionable proposals remaining", actionable_proposals).into());
+        }
+
+        let total_points = self.get_total_points_for_epoch(epoch_id);
+        let mut team_rewards = HashMap::new();
+
+        // Calculate rewards
+        if let Some(epoch) = self.state.epochs.get(&epoch_id) {
+            if epoch.status == EpochStatus::Closed {
+                return Err("Epoch is already closed".into());
+            }
+
+            if let Some(reward) = &epoch.reward {
+                if total_points == 0 {
+                    return Err("No points earned in this epoch".into());
+                }
+
+                for (team_id, _) in &self.state.current_state.teams {
+                    let team_points = self.calculate_team_points_for_epoch(*team_id, epoch_id);
+                    let percentage = team_points as f64 / total_points as f64;
+                    let amount = reward.amount * percentage;
+
+                    team_rewards.insert(*team_id, TeamReward {
+                        percentage,
+                        amount,
+                    });
+                }
+            }
+        } else {
+            return Err("Epoch not found".into());
+        }
+
+        // Update epoch
+        if let Some(epoch) = self.state.epochs.get_mut(&epoch_id) {
+            epoch.status = EpochStatus::Closed;
+            epoch.team_rewards = team_rewards;
+        }
+
+        // Clear current_epoch if this was the active epoch
+        if self.state.current_epoch == Some(epoch_id) {
+            self.state.current_epoch = None;
+        }
+
+        self.save_state()?;
+
+        Ok(())
+    }
+
+    fn get_total_points_for_epoch(&self, epoch_id: Uuid) -> u32 {
+        self.state.current_state.teams.keys()
+            .map(|team_id| self.calculate_team_points_for_epoch(*team_id, epoch_id))
+            .sum()
+    }
+
+    fn calculate_team_points_for_epoch(&self, team_id: Uuid, epoch_id: Uuid) -> u32 {
+        let epoch = match self.state.epochs.get(&epoch_id) {
+            Some(e) => e,
+            None => return 0,
+        };
+
+        epoch.associated_proposals.iter()
+            .filter_map(|proposal_id| self.state.votes.values().find(|v| v.proposal_id == *proposal_id))
+            .map(|vote| match (&vote.vote_type, &vote.participation) {
+                (VoteType::Formal { counted_points, uncounted_points, .. }, VoteParticipation::Formal { counted, uncounted }) => {
+                    if counted.contains(&team_id) {
+                        *counted_points
+                    } else if uncounted.contains(&team_id) {
+                        *uncounted_points
+                    } else {
+                        0
+                    }
+                },
+                _ => 0,
+            })
+            .sum()
+    }
 }
 
 // Script commands
@@ -2668,6 +2760,7 @@ enum ScriptCommand {
     GenerateReportsForClosedProposals { epoch_name: String },
     GenerateReportForProposal { proposal_name: String },
     PrintPointReport { epoch_name: Option<String> },
+    CloseEpoch { epoch_name: Option<String> },
 }
 
 #[derive(Deserialize, Clone)]
@@ -3164,6 +3257,28 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                     println!("{}", report);
                 },
                 Err(e) => println!("Error generating point report: {}", e),
+            }
+        },
+        ScriptCommand::CloseEpoch { epoch_name } => {
+            let epoch_name_clone = epoch_name.clone(); // Clone here
+            match budget_system.close_epoch(epoch_name.as_deref()) {
+                Ok(_) => {
+                    let epoch_info = epoch_name_clone.clone().unwrap_or("Active epoch".to_string());
+                    println!("Successfully closed epoch: {}", epoch_info);
+                    if let Some(epoch) = budget_system.state.epochs.values().find(|e| e.name() == epoch_name_clone.as_deref().unwrap_or("")) {
+                        if let Some(reward) = &epoch.reward {
+                            println!("Rewards allocated:");
+                            for (team_id, team_reward) in &epoch.team_rewards {
+                                if let Some(team) = budget_system.state.current_state.teams.get(team_id) {
+                                    println!("  {}: {} {} ({:.2}%)", team.name, team_reward.amount, reward.token, team_reward.percentage * 100.0);
+                                }
+                            }
+                        } else {
+                            println!("No rewards were set for this epoch.");
+                        }
+                    }
+                },
+                Err(e) => println!("Failed to close epoch: {}", e),
             }
         },
 
