@@ -41,7 +41,6 @@ struct Team {
     name: String,
     representative: String,
     status: TeamStatus,
-    points: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -50,7 +49,6 @@ struct TeamSnapshot {
     name: String,
     representative: String,
     status: TeamStatus,
-    points: u32,
     snapshot_time: DateTime<Utc>,
     raffle_status: RaffleParticipationStatus,
 }
@@ -155,6 +153,8 @@ enum VoteType {
         raffle_id: Uuid,
         total_eligible_seats: u32,
         threshold: f64,
+        counted_points: u32,
+        uncounted_points: u32,
     },
     Informal,
 }
@@ -267,7 +267,6 @@ impl Team {
             name,
             representative,
             status,
-            points: 0,
         })
     }
 
@@ -280,14 +279,6 @@ impl Team {
         }
         self.status = new_status;
         Ok(())
-    }
-
-    fn add_points(&mut self, points: u32) {
-        self.points += points;
-    }
-
-    fn reset_points(&mut self) {
-        self.points = 0;
     }
 
 }
@@ -381,7 +372,6 @@ impl Raffle {
                 name: team.name.clone(),
                 representative: team.representative.clone(),
                 status: team.status.clone(),
-                points: team.points,
                 snapshot_time: Utc::now(),
                 raffle_status: if config.excluded_teams.contains(&team.id) {
                     RaffleParticipationStatus::Excluded
@@ -693,6 +683,8 @@ impl Vote {
                 raffle_id,
                 total_eligible_seats,
                 threshold: threshold.unwrap_or(config.default_qualified_majority_threshold),
+                counted_points: config.counted_vote_points,
+                uncounted_points: config.uncounted_vote_points,
             },
             status: VoteStatus::Open,
             participation: VoteParticipation::Formal {
@@ -819,7 +811,7 @@ impl Vote {
         (counted, uncounted)
     }
 
-    fn close(&mut self, config: &AppConfig) -> Result<Option<HashMap<Uuid, u32>>, &'static str> {
+    fn close(&mut self, config: &AppConfig) -> Result<(), &'static str> {
         if self.status == VoteStatus::Closed {
             return Err("Vote is already closed");
         }
@@ -837,51 +829,15 @@ impl Vote {
                     uncounted: uncounted_result,
                     passed,
                 });
-
-                let team_points = self.calculate_formal_vote_points(config);
                 self.votes.clear();
-                Ok(Some(team_points))
             },
             VoteType::Informal => {
                 let count = self.count_informal_votes();
                 self.result = Some(VoteResult::Informal { count });
                 self.votes.clear();
-                Ok(None)
             },
         }
-    }
-
-    fn add_points_for_vote(&self, team_id: &Uuid, config: &AppConfig) -> u32 {
-        match &self.vote_type {
-            VoteType::Formal { .. } => {
-                if let VoteParticipation:: Formal { counted, uncounted } = &self.participation {
-                    if counted.contains(team_id) {
-                        config.counted_vote_points
-                    } else if uncounted.contains(team_id) {
-                        config.uncounted_vote_points
-                    } else { 0 }
-                } else { 0 }
-            },
-            VoteType::Informal => 0
-        }
-    }
-
-    fn calculate_formal_vote_points(&self, config: &AppConfig) -> HashMap<Uuid, u32> {
-        let mut team_points = HashMap::new();
-
-        if let VoteParticipation::Formal { counted, uncounted } = &self.participation {
-            for &team_id in counted {
-                if self.votes.contains_key(&team_id) {
-                    team_points.insert(team_id, config.counted_vote_points);
-                }
-            }
-            for &team_id in uncounted {
-                if self.votes.contains_key(&team_id) {
-                    team_points.insert(team_id, config.uncounted_vote_points);
-                }
-            }
-        }
-        team_points
+        Ok(())
     }
 
     fn get_result(&self) -> Option<bool> {
@@ -1255,16 +1211,7 @@ impl BudgetSystem {
             return Err("Vote is already closed");
         }
 
-        let team_points_option = vote.close(&self.config)?;
-
-        // If it's a formal vote, add points to team
-        if let Some(team_points) = team_points_option {
-            for (team_id, points) in team_points {
-                if let Some(team) = self.state.current_state.teams.get_mut(&team_id) {
-                    team.add_points(points);
-                }
-            }
-        }
+        vote.close(&self.config)?;
 
         let result = match &vote.result {
             Some(VoteResult::Formal { passed, .. }) => *passed,
@@ -1307,10 +1254,6 @@ impl BudgetSystem {
         epoch.status = EpochStatus::Active;
         self.state.current_epoch = Some(epoch_id);
 
-        // Reset points for all teams
-        for team in self.state.current_state.teams.values_mut() {
-            team.reset_points();
-        }
         self.save_state();
         Ok(())
     }
@@ -1452,7 +1395,9 @@ impl BudgetSystem {
         proposal_name: &str,
         passed: bool,
         participating_teams: Vec<String>,
-        non_participating_teams: Vec<String>
+        non_participating_teams: Vec<String>,
+        counted_points: Option<u32>,
+        uncounted_points: Option<u32>
     ) -> Result<Uuid, Box<dyn Error>> {
         let proposal_id = self.get_proposal_id_by_name(proposal_name)
             .ok_or_else(|| format!("Proposal not found: {}", proposal_name))?;
@@ -1491,7 +1436,9 @@ impl BudgetSystem {
             vote_type: VoteType::Formal {
                 raffle_id,
                 total_eligible_seats: raffle.config.total_counted_seats as u32,
-                threshold: self.config.default_qualified_majority_threshold
+                threshold: self.config.default_qualified_majority_threshold,
+                counted_points: counted_points.unwrap_or(self.config.counted_vote_points),
+                uncounted_points: uncounted_points.unwrap_or(self.config.uncounted_vote_points)
             },
             status: VoteStatus::Closed,
             participation,
@@ -1507,20 +1454,6 @@ impl BudgetSystem {
         };
 
         let vote_id = vote.id;
-
-        // Calculate and award points
-        if let VoteParticipation::Formal { counted, uncounted } = &vote.participation {
-            for &team_id in counted {
-                if let Some(team) = self.state.current_state.teams.get_mut(&team_id) {
-                    team.add_points(self.config.counted_vote_points);
-                }
-            }
-            for &team_id in uncounted {
-                if let Some(team) = self.state.current_state.teams.get_mut(&team_id) {
-                    team.add_points(self.config.uncounted_vote_points);
-                }
-            }
-        }
 
         self.state.votes.insert(vote_id, vote);
 
@@ -1586,10 +1519,16 @@ impl BudgetSystem {
             report.push_str(&format!("ID: {}\n", team.id));
             report.push_str(&format!("Representative: {}\n", team.representative));
             report.push_str(&format!("Status: {:?}\n", team.status));
-            report.push_str(&format!("Points: {}\n", team.points));
 
             if let TeamStatus::Earner { trailing_monthly_revenue } = &team.status {
                 report.push_str(&format!("Trailing Monthly Revenue: {:?}\n", trailing_monthly_revenue));
+            }
+
+            // Add a breakdown of points per epoch
+            report.push_str("Points per Epoch:\n");
+            for epoch in self.state.epochs.values() {
+                let epoch_points = self.get_team_points_for_epoch(team.id, epoch.id).unwrap_or(0);
+                report.push_str(&format!("  {}: {} points\n", epoch.name(), epoch_points));
             }
 
             report.push_str("\n");
@@ -1698,6 +1637,7 @@ impl BudgetSystem {
         let mut report = format!("Vote Participation Report for Team: {}\n", team_name);
         report.push_str(&format!("Epoch: {} ({})\n\n", epoch.name(), epoch.id()));
         let mut vote_reports = Vec::new();
+        let mut total_points = 0;
 
         for vote_id in epoch.associated_proposals.iter()
             .filter_map(|proposal_id| self.state.votes.values()
@@ -1705,23 +1645,24 @@ impl BudgetSystem {
                 .map(|v| v.id)) 
         {
             let vote = &self.state.votes[&vote_id];
-            let participation_status = match &vote.participation {
-                VoteParticipation::Formal { counted, uncounted } => {
+            let (participation_status, points) = match (&vote.vote_type, &vote.participation) {
+                (VoteType::Formal { counted_points, uncounted_points, .. }, VoteParticipation::Formal { counted, uncounted }) => {
                     if counted.contains(&team_id) {
-                        Some("Counted")
+                        (Some("Counted"), *counted_points)
                     } else if uncounted.contains(&team_id) {
-                        Some("Uncounted")
+                        (Some("Uncounted"), *uncounted_points)
                     } else {
-                        None
+                        (None, 0)
                     }
                 },
-                VoteParticipation::Informal(participants) => {
+                (VoteType::Informal, VoteParticipation::Informal(participants)) => {
                     if participants.contains(&team_id) {
-                        Some("N/A (Informal)")
+                        (Some("N/A (Informal)"), 0)
                     } else {
-                        None
+                        (None, 0)
                     }
                 },
+                _ => (None, 0),
             };
 
             if let Some(status) = participation_status {
@@ -1739,7 +1680,7 @@ impl BudgetSystem {
                     None => "Pending",
                 };
 
-                let points = vote.add_points_for_vote(&team_id, &self.config);
+                total_points += points;
 
                 vote_reports.push((
                     vote.opened_at,
@@ -1759,7 +1700,10 @@ impl BudgetSystem {
         // Sort vote reports by date, most recent first
         vote_reports.sort_by(|a, b| b.0.cmp(&a.0));
 
-        // Use a reference to iterate over vote_reports
+        // Add total points to the report
+        report.push_str(&format!("Total Points Earned: {}\n\n", total_points));
+
+        // Add individual vote reports
         for (_, vote_report) in &vote_reports {
             report.push_str(vote_report);
         }
@@ -2581,23 +2525,24 @@ def hello_world():
             for &proposal_id in &epoch.associated_proposals {
                 if let Some(proposal) = self.state.proposals.get(&proposal_id) {
                     if let Some(vote) = self.state.votes.values().find(|v| v.proposal_id == proposal_id) {
-                        let (participation_type, points) = match &vote.participation {
-                            VoteParticipation::Formal { counted, uncounted } => {
+                        let (participation_type, points) = match (&vote.vote_type, &vote.participation) {
+                            (VoteType::Formal { counted_points, uncounted_points, .. }, VoteParticipation::Formal { counted, uncounted }) => {
                                 if counted.contains(team_id) {
-                                    ("Counted", self.config.counted_vote_points)
+                                    ("Counted", *counted_points)
                                 } else if uncounted.contains(team_id) {
-                                    ("Uncounted", self.config.uncounted_vote_points)
+                                    ("Uncounted", *uncounted_points)
                                 } else {
                                     continue;
                                 }
                             },
-                            VoteParticipation::Informal(participants) => {
+                            (VoteType::Informal, VoteParticipation::Informal(participants)) => {
                                 if participants.contains(team_id) {
                                     ("Informal", 0)
                                 } else {
                                     continue;
                                 }
                             },
+                            _ => continue,
                         };
 
                         total_points += points;
@@ -2619,28 +2564,6 @@ def hello_world():
         Ok(report)
     }
 
-    fn get_team_points_for_epoch(&self, team_id: Uuid, epoch_id: Uuid) -> Result<u32, &'static str> {
-        let epoch = self.state.epochs.get(&epoch_id).ok_or("Epoch not found")?;
-        let mut total_points = 0;
-
-        for &proposal_id in &epoch.associated_proposals {
-            if let Some(vote) = self.state.votes.values().find(|v| v.proposal_id == proposal_id) {
-                match &vote.participation {
-                    VoteParticipation::Formal { counted, uncounted } => {
-                        if counted.contains(&team_id) {
-                            total_points += self.config.counted_vote_points;
-                        } else if uncounted.contains(&team_id) {
-                            total_points += self.config.uncounted_vote_points;
-                        }
-                    },
-                    VoteParticipation::Informal(_) => {}, // No points for informal votes
-                }
-            }
-        }
-
-        Ok(total_points)
-    }
-
     fn get_team_points_history(&self, team_id: Uuid) -> Result<Vec<(Uuid, u32)>, &'static str> {
         self.state.epochs.iter()
             .map(|(&epoch_id, _)| {
@@ -2648,6 +2571,25 @@ def hello_world():
                     .map(|points| (epoch_id, points))
             })
             .collect()
+    }
+
+    fn get_team_points_for_epoch(&self, team_id: Uuid, epoch_id: Uuid) -> Result<u32, &'static str> {
+        let epoch = self.state.epochs.get(&epoch_id).ok_or("Epoch not found")?;
+        let mut total_points = 0;
+
+        for &proposal_id in &epoch.associated_proposals {
+            if let Some(vote) = self.state.votes.values().find(|v| v.proposal_id == proposal_id) {
+                if let (VoteType::Formal { counted_points, uncounted_points, .. }, VoteParticipation::Formal { counted, uncounted }) = (&vote.vote_type, &vote.participation) {
+                    if counted.contains(&team_id) {
+                        total_points += counted_points;
+                    } else if uncounted.contains(&team_id) {
+                        total_points += uncounted_points;
+                    }
+                }
+            }
+        }
+
+        Ok(total_points)
     }
 }
 
@@ -2684,6 +2626,8 @@ enum ScriptCommand {
         passed: bool,
         participating_teams: Vec<String>,
         non_participating_teams: Vec<String>,
+        counted_points: Option<u32>,
+        uncounted_points: Option<u32>,
     },
     ImportHistoricalRaffle {
         proposal_name: String,
@@ -2825,13 +2769,17 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
             proposal_name, 
             passed, 
             participating_teams,
-            non_participating_teams 
+            non_participating_teams,
+            counted_points,
+            uncounted_points,
         } => {
             let vote_id = budget_system.import_historical_vote(
                 &proposal_name,
                 passed,
                 participating_teams.clone(),
-                non_participating_teams.clone()
+                non_participating_teams.clone(),
+                counted_points,
+                uncounted_points
             )?;
 
             let vote = budget_system.state.votes.get(&vote_id).unwrap();
