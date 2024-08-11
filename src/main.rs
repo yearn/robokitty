@@ -2547,6 +2547,108 @@ def hello_world():
     
         Ok(file_path)
     }
+
+    fn get_current_or_specified_epoch(&self, epoch_name: Option<&str>) -> Result<(&Epoch, Uuid), &'static str> {
+        match epoch_name {
+            Some(name) => {
+                let (id, epoch) = self.state.epochs.iter()
+                    .find(|(_, e)| e.name() == name)
+                    .ok_or("Specified epoch not found")?;
+                Ok((epoch, *id))
+            },
+            None => {
+                let current_epoch_id = self.state.current_epoch.ok_or("No active epoch")?;
+                let epoch = self.state.epochs.get(&current_epoch_id).ok_or("Current epoch not found")?;
+                Ok((epoch, current_epoch_id))
+            }
+        }
+    }
+
+    fn generate_point_report(&self, epoch_name: Option<&str>) -> Result<String, &'static str> {
+        let (epoch, epoch_id) = self.get_current_or_specified_epoch(epoch_name)?;
+        self.generate_point_report_for_epoch(epoch_id)
+    }
+
+    fn generate_point_report_for_epoch(&self, epoch_id: Uuid) -> Result<String, &'static str> {
+        let epoch = self.state.epochs.get(&epoch_id).ok_or("Epoch not found")?;
+        let mut report = String::new();
+
+        for (team_id, team) in &self.state.current_state.teams {
+            let mut team_report = format!("{}, ", team.name);
+            let mut total_points = 0;
+            let mut allocations = Vec::new();
+
+            for &proposal_id in &epoch.associated_proposals {
+                if let Some(proposal) = self.state.proposals.get(&proposal_id) {
+                    if let Some(vote) = self.state.votes.values().find(|v| v.proposal_id == proposal_id) {
+                        let (participation_type, points) = match &vote.participation {
+                            VoteParticipation::Formal { counted, uncounted } => {
+                                if counted.contains(team_id) {
+                                    ("Counted", self.config.counted_vote_points)
+                                } else if uncounted.contains(team_id) {
+                                    ("Uncounted", self.config.uncounted_vote_points)
+                                } else {
+                                    continue;
+                                }
+                            },
+                            VoteParticipation::Informal(participants) => {
+                                if participants.contains(team_id) {
+                                    ("Informal", 0)
+                                } else {
+                                    continue;
+                                }
+                            },
+                        };
+
+                        total_points += points;
+                        allocations.push(format!("{}: {} voter, {} points", 
+                            proposal.title, participation_type, points));
+                    }
+                }
+            }
+
+            team_report.push_str(&format!("{} points\n", total_points));
+            for allocation in allocations {
+                team_report.push_str(&format!("{}\n", allocation));
+            }
+            team_report.push('\n');
+
+            report.push_str(&team_report);
+        }
+
+        Ok(report)
+    }
+
+    fn get_team_points_for_epoch(&self, team_id: Uuid, epoch_id: Uuid) -> Result<u32, &'static str> {
+        let epoch = self.state.epochs.get(&epoch_id).ok_or("Epoch not found")?;
+        let mut total_points = 0;
+
+        for &proposal_id in &epoch.associated_proposals {
+            if let Some(vote) = self.state.votes.values().find(|v| v.proposal_id == proposal_id) {
+                match &vote.participation {
+                    VoteParticipation::Formal { counted, uncounted } => {
+                        if counted.contains(&team_id) {
+                            total_points += self.config.counted_vote_points;
+                        } else if uncounted.contains(&team_id) {
+                            total_points += self.config.uncounted_vote_points;
+                        }
+                    },
+                    VoteParticipation::Informal(_) => {}, // No points for informal votes
+                }
+            }
+        }
+
+        Ok(total_points)
+    }
+
+    fn get_team_points_history(&self, team_id: Uuid) -> Result<Vec<(Uuid, u32)>, &'static str> {
+        self.state.epochs.iter()
+            .map(|(&epoch_id, _)| {
+                self.get_team_points_for_epoch(team_id, epoch_id)
+                    .map(|points| (epoch_id, points))
+            })
+            .collect()
+    }
 }
 
 // Script commands
@@ -2621,6 +2723,7 @@ enum ScriptCommand {
     },
     GenerateReportsForClosedProposals { epoch_name: String },
     GenerateReportForProposal { proposal_name: String },
+    PrintPointReport { epoch_name: Option<String> },
 }
 
 #[derive(Deserialize, Clone)]
@@ -3104,6 +3207,15 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
             match budget_system.generate_and_save_proposal_report(proposal.id, &current_epoch.name()) {
                 Ok(file_path) => println!("Report generated for proposal '{}' at {:?}", proposal.title, file_path),
                 Err(e) => println!("Failed to generate report for proposal '{}': {}", proposal.title, e),
+            }
+        },
+        ScriptCommand::PrintPointReport { epoch_name } => {
+            match budget_system.generate_point_report(epoch_name.as_deref()) {
+                Ok(report) => {
+                    println!("Point Report:");
+                    println!("{}", report);
+                },
+                Err(e) => println!("Error generating point report: {}", e),
             }
         },
 
