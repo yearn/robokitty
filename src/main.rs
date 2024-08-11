@@ -2683,6 +2683,191 @@ def hello_world():
             })
             .sum()
     }
+
+    fn generate_end_of_epoch_report(&self, epoch_name: &str) -> Result<(), Box<dyn Error>> {
+        let epoch = self.state.epochs.values()
+            .find(|e| e.name() == epoch_name)
+            .ok_or_else(|| format!("Epoch not found: {}", epoch_name))?;
+
+        if epoch.status != EpochStatus::Closed {
+            return Err("Cannot generate report: Epoch is not closed".into());
+        }
+
+        let mut report = String::new();
+
+        // Generate epoch summary
+        report.push_str(&self.generate_epoch_summary(epoch)?);
+
+        // Generate proposal tables and individual reports
+        report.push_str(&self.generate_proposal_tables(epoch)?);
+
+        // Generate team summary
+        report.push_str(&self.generate_team_summary(epoch)?);
+
+        // Save the report
+        let file_name = format!("{}-epoch_report.md", Utc::now().format("%Y%m%d"));
+        let sanitized_epoch_name = sanitize_filename(epoch_name);
+        let report_path = PathBuf::from(&self.config.state_file)
+            .parent()
+            .unwrap()
+            .join("reports")
+            .join(sanitized_epoch_name)
+            .join(file_name);
+
+        fs::create_dir_all(report_path.parent().unwrap())?;
+        fs::write(&report_path, report)?;
+
+        println!("End of Epoch Report generated: {:?}", report_path);
+
+        Ok(())
+    }
+
+    fn generate_epoch_summary(&self, epoch: &Epoch) -> Result<String, Box<dyn Error>> {
+        let proposals = self.get_proposals_for_epoch(epoch.id());
+        let approved = proposals.iter().filter(|p| matches!(p.resolution, Some(Resolution::Approved))).count();
+        let rejected = proposals.iter().filter(|p| matches!(p.resolution, Some(Resolution::Rejected))).count();
+        let retracted = proposals.iter().filter(|p| matches!(p.resolution, Some(Resolution::Retracted))).count();
+
+        let summary = format!(
+            "# End of Epoch Report: {}\n\n\
+            ## Epoch Summary\n\
+            - **Period**: {} to {}\n\
+            - **Total Proposals**: {}\n\
+            - **Approved Proposals**: {}\n\
+            - **Rejected Proposals**: {}\n\
+            - **Retracted Proposals**: {}\n\
+            - **Total Reward**: {}\n\n",
+            epoch.name(),
+            epoch.start_date().format("%Y-%m-%d"),
+            epoch.end_date().format("%Y-%m-%d"),
+            proposals.len(),
+            approved,
+            rejected,
+            retracted,
+            epoch.reward.as_ref().map_or("N/A".to_string(), |r| format!("{} {}", r.amount, r.token)),
+        );
+
+        Ok(summary)
+    }
+
+    fn generate_proposal_tables(&self, epoch: &Epoch) -> Result<String, Box<dyn Error>> {
+        let mut tables = String::new();
+        let proposals = self.get_proposals_for_epoch(epoch.id());
+    
+        let statuses = vec![
+            ("Approved", Resolution::Approved),
+            ("Rejected", Resolution::Rejected),
+            ("Retracted", Resolution::Retracted),
+        ];
+    
+        for (status, resolution) in statuses {
+            let filtered_proposals: Vec<&Proposal> = proposals.iter()
+                .filter(|p| matches!(&p.resolution, Some(r) if *r == resolution))
+                .map(|p| *p)  // Dereference once to go from &&Proposal to &Proposal
+                .collect();
+    
+            if !filtered_proposals.is_empty() {
+                tables.push_str(&format!("### {} Proposals\n", status));
+                tables.push_str("| Name | URL | Team | Amounts | Start Date | End Date | Announced | Resolved | Report |\n");
+                tables.push_str("|------|-----|------|---------|------------|----------|-----------|----------|---------|\n");
+    
+                for proposal in &filtered_proposals {
+                    // Generate individual proposal report
+                    let report_path = self.generate_and_save_proposal_report(proposal.id, epoch.name())?;
+                    let report_link = report_path.file_name().unwrap().to_str().unwrap();
+    
+                    let team_name = proposal.budget_request_details.as_ref()
+                        .and_then(|d| d.team)
+                        .and_then(|id| self.state.current_state.teams.get(&id))
+                        .map_or("N/A".to_string(), |t| t.name.clone());
+    
+                    let amounts = proposal.budget_request_details.as_ref()
+                        .map(|d| d.request_amounts.iter()
+                            .map(|(token, amount)| format!("{} {}", amount, token))
+                            .collect::<Vec<_>>()
+                            .join(", "))
+                        .unwrap_or_else(|| "N/A".to_string());
+    
+                    tables.push_str(&format!(
+                        "| {} | {} | {} | {} | {} | {} | {} | {} | [Report]({}) |\n",
+                        proposal.title,
+                        proposal.url.as_deref().unwrap_or("N/A"),
+                        team_name,
+                        amounts,
+                        proposal.budget_request_details.as_ref().and_then(|d| d.start_date).map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string()),
+                        proposal.budget_request_details.as_ref().and_then(|d| d.end_date).map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string()),
+                        proposal.announced_at.map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string()),
+                        proposal.resolved_at.map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string()),
+                        report_link
+                    ));
+                }
+                tables.push_str("\n");
+            }
+        }
+    
+        Ok(tables)
+    }
+    
+
+    fn generate_team_summary(&self, epoch: &Epoch) -> Result<String, Box<dyn Error>> {
+        let mut summary = String::from("## Team Summary\n");
+        summary.push_str("| Team Name | Status | Counted Votes | Uncounted Votes | Total Points | % of Total Points | Reward Amount |\n");
+        summary.push_str("|-----------|--------|---------------|-----------------|--------------|-------------------|---------------|\n");
+
+        let total_points: u32 = self.state.current_state.teams.keys()
+            .map(|team_id| self.get_team_points_for_epoch(*team_id, epoch.id()).unwrap_or(0))
+            .sum();
+
+        for (team_id, team) in &self.state.current_state.teams {
+            let team_points = self.get_team_points_for_epoch(*team_id, epoch.id()).unwrap_or(0);
+            let percentage = if total_points > 0 {
+                (team_points as f64 / total_points as f64) * 100.0
+            } else {
+                0.0
+            };
+
+            let (counted_votes, uncounted_votes) = self.get_team_vote_counts(*team_id, epoch.id());
+
+            let reward_amount = epoch.team_rewards.get(team_id)
+                .map(|reward| format!("{} {}", reward.amount, epoch.reward.as_ref().map_or("".to_string(), |r| r.token.clone())))
+                .unwrap_or_else(|| "N/A".to_string());
+
+            summary.push_str(&format!(
+                "| {} | {:?} | {} | {} | {} | {:.2}% | {} |\n",
+                team.name,
+                team.status,
+                counted_votes,
+                uncounted_votes,
+                team_points,
+                percentage,
+                reward_amount
+            ));
+        }
+
+        Ok(summary)
+    }
+
+    fn get_team_vote_counts(&self, team_id: Uuid, epoch_id: Uuid) -> (u32, u32) {
+        let mut counted = 0;
+        let mut uncounted = 0;
+
+        for vote in self.state.votes.values() {
+            if vote.epoch_id == epoch_id {
+                match &vote.participation {
+                    VoteParticipation::Formal { counted: c, uncounted: u } => {
+                        if c.contains(&team_id) {
+                            counted += 1;
+                        } else if u.contains(&team_id) {
+                            uncounted += 1;
+                        }
+                    },
+                    VoteParticipation::Informal(_) => {}  // Informal votes are not counted here
+                }
+            }
+        }
+
+        (counted, uncounted)
+    }
 }
 
 // Script commands
@@ -2761,6 +2946,7 @@ enum ScriptCommand {
     GenerateReportForProposal { proposal_name: String },
     PrintPointReport { epoch_name: Option<String> },
     CloseEpoch { epoch_name: Option<String> },
+    GenerateEndOfEpochReport { epoch_name: String },
 }
 
 #[derive(Deserialize, Clone)]
@@ -3281,6 +3467,10 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                 Err(e) => println!("Failed to close epoch: {}", e),
             }
         },
+        ScriptCommand::GenerateEndOfEpochReport { epoch_name } => {
+            budget_system.generate_end_of_epoch_report(&epoch_name)?;
+            println!("Generated End of Epoch Report for epoch: {}", epoch_name);
+        },
 
     }
     Ok(())
@@ -3305,6 +3495,15 @@ fn clean_file_name(name: &str) -> String {
         .map(|c| match c {
             '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
             _ => c
+        })
+        .collect()
+}
+
+fn sanitize_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' => c,
+            _ => '_'
         })
         .collect()
 }
