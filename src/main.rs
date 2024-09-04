@@ -33,6 +33,7 @@ pub mod core {
 }
 
 use crate::core::models::{Team, TeamStatus};
+use crate::core::models::epoch::{Epoch, EpochStatus, EpochReward, TeamReward};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct TeamSnapshot {
@@ -202,38 +203,6 @@ struct Vote {
     closed_at: Option<DateTime<Utc>>,
     is_historical: bool,
     votes: HashMap<Uuid, VoteChoice> // leave private, temporarily stored
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
-enum EpochStatus {
-    Planned,
-    Active,
-    Closed,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-struct EpochReward {
-    token: String,
-    amount: f64,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-struct TeamReward {
-    percentage: f64,
-    amount: f64,
-}
-
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct Epoch {
-    id: Uuid,
-    name: String,
-    start_date: DateTime<Utc>,
-    end_date: DateTime<Utc>,
-    status: EpochStatus,
-    associated_proposals: Vec<Uuid>,
-    reward: Option<EpochReward>,
-    team_rewards: HashMap<Uuid, TeamReward>,
 }
 
 // Implementations
@@ -813,51 +782,6 @@ impl Vote {
         !self.is_historical
     }
     
-}
-
-impl Epoch {
-    fn new(name: String, start_date: DateTime<Utc>, end_date: DateTime<Utc>) -> Result<Self, &'static str> {
-        if start_date >= end_date {
-            return Err("Start date must be before end date")
-        }
-
-        Ok(Self {
-            id: Uuid::new_v4(),
-            name,
-            start_date,
-            end_date,
-            status: EpochStatus::Planned,
-            associated_proposals: Vec::new(),
-            reward: None,
-            team_rewards: HashMap::new(),
-        })
-    }
-
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn set_reward(&mut self, token: String, amount: f64) -> Result<(), &'static str> {
-        self.reward = Some(EpochReward { token, amount });
-        Ok(())
-    }
-
-    fn id(&self) -> Uuid {
-        self.id
-    }
-
-    fn start_date(&self) -> DateTime<Utc> {
-        self.start_date
-    }
-
-    fn end_date(&self) -> DateTime<Utc> {
-        self.end_date
-    }
-
-    fn status(&self) -> &EpochStatus {
-        &self.status
-    }
-
 }
 
 #[derive(Clone, Serialize, Deserialize)]
