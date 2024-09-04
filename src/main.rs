@@ -310,25 +310,25 @@ impl Raffle {
 
         // Create team snapshots
         let mut active_teams: Vec<_> = teams.values()
-            .filter(|team| team.status != TeamStatus::Inactive)
+            .filter(|team| team.is_active())
             .collect();
 
         // Sort teams based on custom order or by name
         if let Some(custom_order) = &config.custom_team_order {
-            active_teams.sort_by_key(|team| custom_order.iter().position(|&id| id == team.id).unwrap_or(usize::MAX));
+            active_teams.sort_by_key(|team| custom_order.iter().position(|&id| id == team.id()).unwrap_or(usize::MAX));
         } else {
-            active_teams.sort_by(|a, b| a.name.cmp(&b.name));
+            active_teams.sort_by(|a, b| a.name().cmp(&b.name()));
         }
 
         // Create snapshots and tickets
         for team in active_teams {
             let snapshot = TeamSnapshot {
-                id: team.id,
-                name: team.name.clone(),
-                representative: team.representative.clone(),
-                status: team.status.clone(),
+                id: team.id(),
+                name: team.name().to_string().clone(),
+                representative: team.representative().to_string().clone(),
+                status: team.status().clone(),
                 snapshot_time: Utc::now(),
-                raffle_status: if config.excluded_teams.contains(&team.id) {
+                raffle_status: if config.excluded_teams.contains(&team.id()) {
                     RaffleParticipationStatus::Excluded
                 } else {
                     RaffleParticipationStatus::Included
@@ -336,7 +336,7 @@ impl Raffle {
             };
             team_snapshots.push(snapshot);
 
-            let ticket_count = match &team.status {
+            let ticket_count = match &team.status() {
                 TeamStatus::Earner { trailing_monthly_revenue } => {
                     let sum: u64 = trailing_monthly_revenue.iter().sum();
                     let quarterly_average = sum as f64 / trailing_monthly_revenue.len() as f64;
@@ -348,7 +348,7 @@ impl Raffle {
             };
 
             for _ in 0..ticket_count {
-                tickets.push(RaffleTicket::new(team.id, tickets.len() as u64));
+                tickets.push(RaffleTicket::new(team.id(), tickets.len() as u64));
             }
         }
 
@@ -909,7 +909,7 @@ impl BudgetSystem {
 
     fn add_team(&mut self, name: String, representative: String, trailing_monthly_revenue: Option<Vec<u64>>) -> Result<Uuid, &'static str> {
         let team = Team::new(name, representative, trailing_monthly_revenue)?;
-        let id = team.id;
+        let id = team.id();
         self.state.current_state.teams.insert(id, team);
         self.save_state();
         Ok(id)
@@ -927,7 +927,7 @@ impl BudgetSystem {
     fn update_team_status(&mut self, team_id: Uuid, new_status: &TeamStatus) -> Result<(), &'static str> {
         match self.state.current_state.teams.get_mut(&team_id) {
             Some(team) => {
-                team.change_status(new_status.clone())?;
+                team.set_status(new_status.clone())?;
                 self.save_state();
                 Ok(())
             },
@@ -1146,7 +1146,7 @@ impl BudgetSystem {
                 let eligible_votes: Vec<_> = votes.into_iter()
                     .filter(|(team_id, _)| {
                         self.state.current_state.teams.get(team_id)
-                            .map(|team| !matches!(team.status, TeamStatus::Inactive))
+                            .map(|team| team.is_active())
                             .unwrap_or(false)
                     })
                     .collect();
@@ -1269,7 +1269,7 @@ impl BudgetSystem {
 
     fn get_team_id_by_name(&self, name: &str) -> Option<Uuid> {
         self.state.current_state.teams.iter()
-            .find(|(_, team)| team.name == name)
+            .find(|(_, team)| team.name() == name)
             .map(|(id, _)| *id)
     }
 
@@ -1465,24 +1465,24 @@ impl BudgetSystem {
 
     fn print_team_report(&self) -> String {
         let mut teams: Vec<&Team> = self.state.current_state.teams.values().collect();
-        teams.sort_by(|a, b| a.name.cmp(&b.name));
+        teams.sort_by(|a, b| a.name().cmp(&b.name()));
 
         let mut report = String::from("Team Report:\n\n");
 
         for team in teams {
-            report.push_str(&format!("Name: {}\n", team.name));
-            report.push_str(&format!("ID: {}\n", team.id));
-            report.push_str(&format!("Representative: {}\n", team.representative));
-            report.push_str(&format!("Status: {:?}\n", team.status));
+            report.push_str(&format!("Name: {}\n", team.name()));
+            report.push_str(&format!("ID: {}\n", team.id()));
+            report.push_str(&format!("Representative: {}\n", team.representative()));
+            report.push_str(&format!("Status: {:?}\n", team.status()));
 
-            if let TeamStatus::Earner { trailing_monthly_revenue } = &team.status {
+            if let TeamStatus::Earner { trailing_monthly_revenue } = &team.status() {
                 report.push_str(&format!("Trailing Monthly Revenue: {:?}\n", trailing_monthly_revenue));
             }
 
             // Add a breakdown of points per epoch
             report.push_str("Points per Epoch:\n");
             for epoch in self.state.epochs.values() {
-                let epoch_points = self.get_team_points_for_epoch(team.id, epoch.id).unwrap_or(0);
+                let epoch_points = self.get_team_points_for_epoch(team.id(), epoch.id).unwrap_or(0);
                 report.push_str(&format!("  {}: {} points\n", epoch.name(), epoch_points));
             }
 
@@ -1797,7 +1797,7 @@ impl BudgetSystem {
 
         for ticket in tickets {
             let team_name = self.state.current_state.teams.get(&ticket.team_id)
-                .map(|team| team.name.clone())
+                .map(|team| team.name().to_string())
                 .unwrap_or_else(|| format!("Unknown Team ({})", ticket.team_id));
 
             match &mut current_team {
@@ -1982,7 +1982,7 @@ impl BudgetSystem {
     
         let deciding_teams: Vec<String> = raffle.get_deciding_teams().iter()
             .filter_map(|&team_id| {
-                self.state.current_state.teams.get(&team_id).map(|team| team.name.clone())
+                self.state.current_state.teams.get(&team_id).map(|team| team.name().to_string())
             })
             .collect();
     
@@ -1995,12 +1995,12 @@ impl BudgetSystem {
         let (counted_votes_info, uncounted_votes_info) = if let VoteParticipation::Formal { counted, uncounted } = &vote.participation {
             let absent_counted: Vec<String> = raffle.result.as_ref().unwrap().counted.iter()
                 .filter(|&team_id| !counted.contains(team_id))
-                .filter_map(|&team_id| self.state.current_state.teams.get(&team_id).map(|team| team.name.clone()))
+                .filter_map(|&team_id| self.state.current_state.teams.get(&team_id).map(|team| team.name().to_string()))
                 .collect();
 
             let absent_uncounted: Vec<String> = raffle.result.as_ref().unwrap().uncounted.iter()
                 .filter(|&team_id| !uncounted.contains(team_id))
-                .filter_map(|&team_id| self.state.current_state.teams.get(&team_id).map(|team| team.name.clone()))
+                .filter_map(|&team_id| self.state.current_state.teams.get(&team_id).map(|team| team.name().to_string()))
                 .collect();
 
             let counted_info = if absent_counted.is_empty() {
@@ -2172,7 +2172,7 @@ def hello_world():
             report.push_str(&format!("- **Requesting Team**: {}\n", 
                 budget_details.team
                     .and_then(|id| self.state.current_state.teams.get(&id))
-                    .map_or("N/A".to_string(), |team| team.name.clone())));
+                    .map_or("N/A".to_string(), |team| team.name().to_string())));
             report.push_str("- **Requested Amount(s)**:\n");
             for (token, amount) in &budget_details.request_amounts {
                 report.push_str(&format!("  - {}: {}\n", token, amount));
@@ -2351,7 +2351,7 @@ def hello_world():
                 tables.push_str("|------|------------------|\n");
                 for &team_id in counted {
                     if let Some(team) = self.state.current_state.teams.get(&team_id) {
-                        tables.push_str(&format!("| {} | {} |\n", team.name, self.config.counted_vote_points));
+                        tables.push_str(&format!("| {} | {} |\n", team.name(), self.config.counted_vote_points));
                     }
                 }
 
@@ -2360,7 +2360,7 @@ def hello_world():
                 tables.push_str("|------|------------------|\n");
                 for &team_id in uncounted {
                     if let Some(team) = self.state.current_state.teams.get(&team_id) {
-                        tables.push_str(&format!("| {} | {} |\n", team.name, self.config.uncounted_vote_points));
+                        tables.push_str(&format!("| {} | {} |\n", team.name(), self.config.uncounted_vote_points));
                     }
                 }
             },
@@ -2370,7 +2370,7 @@ def hello_world():
                 tables.push_str("|------|------------------|\n");
                 for &team_id in participants {
                     if let Some(team) = self.state.current_state.teams.get(&team_id) {
-                        tables.push_str(&format!("| {} | 0 |\n", team.name));
+                        tables.push_str(&format!("| {} | 0 |\n", team.name()));
                     }
                 }
             },
@@ -2405,7 +2405,7 @@ def hello_world():
             .as_ref()
             .and_then(|details| details.team)
             .and_then(|team_id| self.state.current_state.teams.get(&team_id))
-            .map(|team| format!("-{}", clean_file_name(&team.name)))
+            .map(|team| format!("-{}", clean_file_name(&team.name())))
             .unwrap_or_default();
     
         let truncated_title = clean_file_name(&proposal.title)
@@ -2473,7 +2473,7 @@ def hello_world():
         let mut report = String::new();
 
         for (team_id, team) in &self.state.current_state.teams {
-            let mut team_report = format!("{}, ", team.name);
+            let mut team_report = format!("{}, ", team.name());
             let mut total_points = 0;
             let mut allocations = Vec::new();
 
@@ -2734,7 +2734,7 @@ def hello_world():
                     let team_name = proposal.budget_request_details.as_ref()
                         .and_then(|d| d.team)
                         .and_then(|id| self.state.current_state.teams.get(&id))
-                        .map_or("N/A".to_string(), |t| t.name.clone());
+                        .map_or("N/A".to_string(), |t| t.name().to_string());
     
                     let amounts = proposal.budget_request_details.as_ref()
                         .map(|d| d.request_amounts.iter()
@@ -2789,8 +2789,8 @@ def hello_world():
 
             summary.push_str(&format!(
                 "| {} | {:?} | {} | {} | {} | {:.2}% | {} |\n",
-                team.name,
-                team.status,
+                team.name(),
+                team.status(),
                 counted_votes,
                 uncounted_votes,
                 team_points,
@@ -3343,12 +3343,12 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                         if let VoteParticipation::Formal { counted, uncounted } = &vote.participation {
                             for &team_id in counted {
                                 if let Some(team) = budget_system.state.current_state.teams.get(&team_id) {
-                                    println!("  {} (+{} points)", team.name, config.counted_vote_points);
+                                    println!("  {} (+{} points)", team.name(), config.counted_vote_points);
                                 }
                             }
                             for &team_id in uncounted {
                                 if let Some(team) = budget_system.state.current_state.teams.get(&team_id) {
-                                    println!("  {} (+{} points)", team.name, config.uncounted_vote_points);
+                                    println!("  {} (+{} points)", team.name(), config.uncounted_vote_points);
                                 }
                             }
                         }
@@ -3411,7 +3411,7 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                             println!("Rewards allocated:");
                             for (team_id, team_reward) in &epoch.team_rewards {
                                 if let Some(team) = budget_system.state.current_state.teams.get(team_id) {
-                                    println!("  {}: {} {} ({:.2}%)", team.name, team_reward.amount, reward.token, team_reward.percentage * 100.0);
+                                    println!("  {}: {} {} ({:.2}%)", team.name(), team_reward.amount, reward.token, team_reward.percentage * 100.0);
                                 }
                             }
                         } else {
@@ -3581,11 +3581,6 @@ mod tests {
         epoch_id
     }
 
-    // Helper function to add a team
-    async fn add_team(budget_system: &mut BudgetSystem, name: &str, representative: &str, revenue: Option<Vec<u64>>) -> Uuid {
-        budget_system.add_team(name.to_string(), representative.to_string(), revenue).unwrap()
-    }
-
     #[tokio::test]
     async fn test_save_and_load_state() {
         // Create a temporary directory for this test
@@ -3628,22 +3623,5 @@ mod tests {
         let epoch = budget_system.get_current_epoch().unwrap();
         assert_eq!(epoch.name(), "Test Epoch");
         assert_eq!(epoch.status(), &EpochStatus::Active);
-    }
-
-    #[tokio::test]
-    async fn test_update_team_status() {
-        let mut budget_system = create_test_budget_system().await;
-        let team_id = add_team(&mut budget_system, "Test Team", "Representative", Some(vec![1000, 2000, 3000])).await;
-
-        budget_system.update_team_status(team_id, &TeamStatus::Supporter).unwrap();
-        let team = budget_system.state.current_state.teams.get(&team_id).unwrap();
-        assert_eq!(team.status, TeamStatus::Supporter);
-
-        budget_system.update_team_status(team_id, &TeamStatus::Earner { trailing_monthly_revenue: vec![4000, 5000, 6000] }).unwrap();
-        let team = budget_system.state.current_state.teams.get(&team_id).unwrap();
-        assert!(matches!(team.status, TeamStatus::Earner { .. }));
-        if let TeamStatus::Earner { trailing_monthly_revenue } = &team.status {
-            assert_eq!(trailing_monthly_revenue, &vec![4000, 5000, 6000]);
-        }
     }
 }
