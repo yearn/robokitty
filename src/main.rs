@@ -28,20 +28,11 @@ use uuid::Uuid;
 mod app_config;
 use app_config::AppConfig;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-enum TeamStatus {
-    Earner { trailing_monthly_revenue: Vec<u64>},
-    Supporter,
-    Inactive,
+pub mod core {
+    pub mod models;
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-struct Team {
-    id: Uuid,
-    name: String,
-    representative: String,
-    status: TeamStatus,
-}
+use crate::core::models::{Team, TeamStatus};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct TeamSnapshot {
@@ -246,42 +237,6 @@ struct Epoch {
 }
 
 // Implementations
-
-impl Team {
-    fn new(name: String, representative: String, trailing_monthly_revenue: Option<Vec<u64>>) -> Result<Self, &'static str> {
-        let status = match trailing_monthly_revenue {
-            Some(revenue) => {
-                if revenue.is_empty() {
-                    return Err("Revenue data cannot be empty");
-                } else if revenue.len() > 3 {
-                    return Err("Revenue data cannot exceed 3 entries");  
-                } 
-
-                TeamStatus::Earner { trailing_monthly_revenue: revenue }
-            },
-            None => TeamStatus::Supporter,
-        };
-
-        Ok(Team {
-            id: Uuid::new_v4(),
-            name,
-            representative,
-            status,
-        })
-    }
-
-    fn change_status(&mut self, new_status: TeamStatus) -> Result<(), &'static str> {
-        match (&self.status, &new_status) {
-            (TeamStatus::Supporter, TeamStatus::Earner { trailing_monthly_revenue }) if trailing_monthly_revenue.is_empty() => {
-                return Err("Trailing revenue data must be provided when changing to Earner status");
-            },
-            _ => {}
-        }
-        self.status = new_status;
-        Ok(())
-    }
-
-}
 
 impl RaffleBuilder {
     fn new(proposal_id: Uuid, epoch_id: Uuid, app_config: &AppConfig) -> Self {
