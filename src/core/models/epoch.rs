@@ -225,3 +225,162 @@ impl TeamReward {
         self.amount
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    #[test]
+    fn test_epoch_creation() {
+        let start_date = Utc::now();
+        let end_date = start_date + chrono::Duration::days(30);
+        let epoch = Epoch::new("Test Epoch".to_string(), start_date, end_date).unwrap();
+
+        assert_eq!(epoch.name(), "Test Epoch");
+        assert_eq!(epoch.start_date(), start_date);
+        assert_eq!(epoch.end_date(), end_date);
+        assert_eq!(epoch.status(), EpochStatus::Planned);
+        assert!(epoch.associated_proposals().is_empty());
+        assert!(epoch.reward().is_none());
+        assert!(epoch.team_rewards().is_empty());
+    }
+
+    #[test]
+    fn test_epoch_creation_invalid_dates() {
+        let start_date = Utc::now();
+        let end_date = start_date - chrono::Duration::days(1);
+        let result = Epoch::new("Invalid Epoch".to_string(), start_date, end_date);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_epoch_status_changes() {
+        let mut epoch = create_test_epoch();
+
+        assert!(epoch.is_planned());
+        
+        epoch.activate().unwrap();
+        assert!(epoch.is_active());
+        
+        epoch.close().unwrap();
+        assert!(epoch.is_closed());
+    }
+
+    #[test]
+    fn test_invalid_status_changes() {
+        let mut epoch = create_test_epoch();
+
+        // Cannot close a planned epoch
+        assert!(epoch.close().is_err());
+
+        epoch.activate().unwrap();
+
+        // Cannot activate an already active epoch
+        assert!(epoch.activate().is_err());
+
+        epoch.close().unwrap();
+
+        // Cannot activate or close an already closed epoch
+        assert!(epoch.activate().is_err());
+        assert!(epoch.close().is_err());
+    }
+
+    #[test]
+    fn test_epoch_date_management() {
+        let mut epoch = create_test_epoch();
+        let new_start = Utc::now() + chrono::Duration::days(1);
+        let new_end = new_start + chrono::Duration::days(60);
+
+        epoch.set_dates(new_start, new_end).unwrap();
+
+        assert_eq!(epoch.start_date(), new_start);
+        assert_eq!(epoch.end_date(), new_end);
+    }
+
+    #[test]
+    fn test_epoch_invalid_date_change() {
+        let mut epoch = create_test_epoch();
+        let new_start = Utc::now() + chrono::Duration::days(1);
+        let new_end = new_start - chrono::Duration::days(1);
+
+        assert!(epoch.set_dates(new_start, new_end).is_err());
+    }
+
+    #[test]
+    fn test_proposal_management() {
+        let mut epoch = create_test_epoch();
+        let proposal_id = Uuid::new_v4();
+
+        epoch.add_proposal(proposal_id);
+        assert!(epoch.is_proposal_associated(proposal_id));
+
+        epoch.remove_proposal(proposal_id);
+        assert!(!epoch.is_proposal_associated(proposal_id));
+    }
+
+    #[test]
+    fn test_reward_management() {
+        let mut epoch = create_test_epoch();
+        
+        epoch.set_reward("ETH".to_string(), 100.0).unwrap();
+        assert_eq!(epoch.reward().unwrap().token(), "ETH");
+        assert_eq!(epoch.reward().unwrap().amount(), 100.0);
+
+        epoch.remove_reward();
+        assert!(epoch.reward().is_none());
+    }
+
+    #[test]
+    fn test_invalid_reward() {
+        let mut epoch = create_test_epoch();
+        
+        assert!(epoch.set_reward("ETH".to_string(), -100.0).is_err());
+    }
+
+    #[test]
+    fn test_team_reward_management() {
+        let mut epoch = create_test_epoch();
+        let team_id = Uuid::new_v4();
+
+        epoch.set_team_reward(team_id, 10.0, 50.0).unwrap();
+        assert_eq!(epoch.team_rewards().get(&team_id).unwrap().percentage(), 10.0);
+        assert_eq!(epoch.team_rewards().get(&team_id).unwrap().amount(), 50.0);
+
+        epoch.remove_team_reward(&team_id);
+        assert!(epoch.team_rewards().get(&team_id).is_none());
+    }
+
+    #[test]
+    fn test_invalid_team_reward() {
+        let mut epoch = create_test_epoch();
+        let team_id = Uuid::new_v4();
+
+        assert!(epoch.set_team_reward(team_id, -10.0, 50.0).is_err());
+        assert!(epoch.set_team_reward(team_id, 110.0, 50.0).is_err());
+        assert!(epoch.set_team_reward(team_id, 10.0, -50.0).is_err());
+    }
+
+    #[test]
+    fn test_reward_calculations() {
+        let mut epoch = create_test_epoch();
+        epoch.set_reward("ETH".to_string(), 100.0).unwrap();
+
+        let team1_id = Uuid::new_v4();
+        let team2_id = Uuid::new_v4();
+
+        epoch.set_team_reward(team1_id, 60.0, 60.0).unwrap();
+        epoch.set_team_reward(team2_id, 30.0, 30.0).unwrap();
+
+        assert_eq!(epoch.total_reward_amount(), 100.0);
+        assert_eq!(epoch.distributed_reward_amount(), 90.0);
+        assert_eq!(epoch.remaining_reward_amount(), 10.0);
+    }
+
+    fn create_test_epoch() -> Epoch {
+        let start_date = Utc::now();
+        let end_date = start_date + chrono::Duration::days(30);
+        Epoch::new("Test Epoch".to_string(), start_date, end_date).unwrap()
+    }
+}
