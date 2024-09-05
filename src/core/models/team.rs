@@ -19,6 +19,13 @@ pub struct Team {
 impl Team {
     // Constructor
     pub fn new(name: String, representative: String, trailing_monthly_revenue: Option<Vec<u64>>) -> Result<Self, &'static str> {
+        if name.trim().is_empty() {
+            return Err("Team name cannot be empty");
+        }
+        if representative.trim().is_empty() {
+            return Err("Representative name cannot be empty");
+        }
+
         let status = match trailing_monthly_revenue {
             Some(revenue) => {
                 if revenue.is_empty() {
@@ -103,38 +110,149 @@ impl Team {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json;
 
     #[test]
-    fn test_update_team_status() {
-        let mut team = Team::new(
-            "Test Team".to_string(),
-            "Representative".to_string(),
-            Some(vec![1000, 2000, 3000])
-        ).unwrap();
+    fn test_create_valid_team() {
+        let earner = Team::new("Earner Team".to_string(), "John Doe".to_string(), Some(vec![1000, 2000, 3000])).unwrap();
+        assert_eq!(earner.name(), "Earner Team");
+        assert_eq!(earner.representative(), "John Doe");
+        assert!(matches!(earner.status(), TeamStatus::Earner { .. }));
 
-        // Test changing to Supporter status
-        team.set_status(TeamStatus::Supporter).unwrap();
+        let supporter = Team::new("Supporter Team".to_string(), "Jane Doe".to_string(), None).unwrap();
+        assert_eq!(supporter.name(), "Supporter Team");
+        assert_eq!(supporter.representative(), "Jane Doe");
+        assert!(matches!(supporter.status(), TeamStatus::Supporter));
+    }
+
+    #[test]
+    fn test_create_invalid_team() {
+        assert!(Team::new("".to_string(), "John Doe".to_string(), None).is_err());
+        assert!(Team::new(" ".to_string(), "John Doe".to_string(), None).is_err());
+        assert!(Team::new("Valid Name".to_string(), "".to_string(), None).is_err());
+        assert!(Team::new("Valid Name".to_string(), " ".to_string(), None).is_err());
+        assert!(Team::new("Earner".to_string(), "John Doe".to_string(), Some(vec![])).is_err());
+    }
+
+    #[test]
+    fn test_getter_methods() {
+        let team = Team::new("Test Team".to_string(), "Test Rep".to_string(), Some(vec![1000])).unwrap();
+        assert_eq!(team.name(), "Test Team");
+        assert_eq!(team.representative(), "Test Rep");
+        assert!(matches!(team.status(), TeamStatus::Earner { .. }));
+    }
+
+    #[test]
+    fn test_setter_methods() {
+        let mut team = Team::new("Old Name".to_string(), "Old Rep".to_string(), None).unwrap();
+        
+        team.set_name("New Name".to_string());
+        assert_eq!(team.name(), "New Name");
+
+        team.set_representative("New Rep".to_string());
+        assert_eq!(team.representative(), "New Rep");
+
+        team.set_status(TeamStatus::Earner { trailing_monthly_revenue: vec![1000, 2000] }).unwrap();
+        assert!(matches!(team.status(), TeamStatus::Earner { .. }));
+    }
+
+    #[test]
+    fn test_status_changes() {
+        let mut team = Team::new("Test Team".to_string(), "Test Rep".to_string(), None).unwrap();
+        
+        assert!(team.set_status(TeamStatus::Earner { trailing_monthly_revenue: vec![1000] }).is_ok());
+        assert!(team.is_earner());
+
+        assert!(team.set_status(TeamStatus::Supporter).is_ok());
         assert!(team.is_supporter());
 
-        // Test changing back to Earner status
-        team.set_status(TeamStatus::Earner { trailing_monthly_revenue: vec![4000, 5000, 6000] }).unwrap();
+        assert!(team.set_status(TeamStatus::Inactive).is_ok());
+        assert!(team.is_inactive());
+    }
+
+    #[test]
+    fn test_status_helper_methods() {
+        let mut team = Team::new("Test Team".to_string(), "Test Rep".to_string(), None).unwrap();
+        
+        assert!(team.is_active());
+        assert!(team.is_supporter());
+        assert!(!team.is_earner());
+        assert!(!team.is_inactive());
+
+        team.set_status(TeamStatus::Earner { trailing_monthly_revenue: vec![1000] }).unwrap();
+        assert!(team.is_active());
         assert!(team.is_earner());
+        assert!(!team.is_supporter());
+        assert!(!team.is_inactive());
+
+        team.set_status(TeamStatus::Inactive).unwrap();
+        assert!(!team.is_active());
+        assert!(!team.is_earner());
+        assert!(!team.is_supporter());
+        assert!(team.is_inactive());
+    }
+
+    #[test]
+    fn test_team_status_validation() {
+        let mut team = Team::new("Test Team".to_string(), "Test Rep".to_string(), None).unwrap();
+        
+        assert!(team.set_status(TeamStatus::Earner { trailing_monthly_revenue: vec![1000] }).is_ok());
+        assert!(team.set_status(TeamStatus::Earner { trailing_monthly_revenue: vec![1000, 2000, 3000] }).is_ok());
+        
+        assert!(team.set_status(TeamStatus::Earner { trailing_monthly_revenue: vec![] }).is_err());
+        assert!(team.set_status(TeamStatus::Earner { trailing_monthly_revenue: vec![1000, 2000, 3000, 4000] }).is_err());
+    }
+
+    #[test]
+    fn test_edge_cases() {
+        let long_name = "a".repeat(256);
+        let long_rep = "b".repeat(256);
+        let team = Team::new(long_name.clone(), long_rep.clone(), None).unwrap();
+        assert_eq!(team.name(), long_name);
+        assert_eq!(team.representative(), long_rep);
+
+        let max_revenue = u64::MAX;
+        let team = Team::new("Max Revenue".to_string(), "Test Rep".to_string(), Some(vec![max_revenue])).unwrap();
         if let TeamStatus::Earner { trailing_monthly_revenue } = team.status() {
-            assert_eq!(trailing_monthly_revenue, &vec![4000, 5000, 6000]);
+            assert_eq!(trailing_monthly_revenue[0], max_revenue);
         } else {
             panic!("Expected Earner status");
         }
+    }
 
-        // Test changing to Inactive status
-        team.set_status(TeamStatus::Inactive).unwrap();
-        assert!(team.is_inactive());
+    #[test]
+    fn test_serialization_deserialization() {
+        let original_team = Team::new(
+            "Serialize Team".to_string(),
+            "Serialize Rep".to_string(),
+            Some(vec![1000, 2000, 3000])
+        ).unwrap();
 
-        // Test error case: changing to Earner without revenue data
-        let result = team.set_status(TeamStatus::Earner { trailing_monthly_revenue: vec![] });
-        assert!(result.is_err());
+        let serialized = serde_json::to_string(&original_team).unwrap();
+        let deserialized_team: Team = serde_json::from_str(&serialized).unwrap();
 
-        // Test error case: changing to Earner with too much revenue data
-        let result = team.set_status(TeamStatus::Earner { trailing_monthly_revenue: vec![1000, 2000, 3000, 4000] });
-        assert!(result.is_err());
+        assert_eq!(original_team.id(), deserialized_team.id());
+        assert_eq!(original_team.name(), deserialized_team.name());
+        assert_eq!(original_team.representative(), deserialized_team.representative());
+        
+        match (original_team.status(), deserialized_team.status()) {
+            (TeamStatus::Earner { trailing_monthly_revenue: original_revenue },
+             TeamStatus::Earner { trailing_monthly_revenue: deserialized_revenue }) => {
+                assert_eq!(original_revenue, deserialized_revenue);
+            },
+            _ => panic!("Expected Earner status for both teams"),
+        }
+
+        // Test other status variants
+        let supporter_team = Team::new("Supporter".to_string(), "Support Rep".to_string(), None).unwrap();
+        let serialized = serde_json::to_string(&supporter_team).unwrap();
+        let deserialized: Team = serde_json::from_str(&serialized).unwrap();
+        assert!(matches!(deserialized.status(), TeamStatus::Supporter));
+
+        let mut inactive_team = supporter_team;
+        inactive_team.set_status(TeamStatus::Inactive).unwrap();
+        let serialized = serde_json::to_string(&inactive_team).unwrap();
+        let deserialized: Team = serde_json::from_str(&serialized).unwrap();
+        assert!(matches!(deserialized.status(), TeamStatus::Inactive));
     }
 }
