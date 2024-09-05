@@ -1,8 +1,15 @@
 //src/main.rs
 
+pub mod core {
+    pub mod models;
+}
+
 mod services;
 use services::ethereum::{EthereumService, EthereumServiceTrait};
 use services::telegram::{TelegramBot, spawn_command_executor};
+use crate::core::models::{Team, TeamStatus};
+use crate::core::models::epoch::{Epoch, EpochStatus, EpochReward, TeamReward};
+
 
 use chrono::{DateTime, NaiveDate, Utc, TimeZone};
 use dotenvy::dotenv;
@@ -28,12 +35,7 @@ use uuid::Uuid;
 mod app_config;
 use app_config::AppConfig;
 
-pub mod core {
-    pub mod models;
-}
 
-use crate::core::models::{Team, TeamStatus};
-use crate::core::models::epoch::{Epoch, EpochStatus, EpochReward, TeamReward};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct TeamSnapshot {
@@ -968,7 +970,7 @@ impl BudgetSystem {
         self.state.proposals.insert(proposal_id, proposal);
 
         if let Some(epoch) = self.state.epochs.get_mut(&current_epoch_id) {
-            epoch.associated_proposals.push(proposal_id);
+            epoch.add_proposal(proposal_id);
         } else {
             return Err("Current epoch not found");
         }
@@ -1107,8 +1109,8 @@ impl BudgetSystem {
 
         // Check for overlapping epochs
         for epoch in self.state.epochs.values() {
-            if (start_date < epoch.end_date && end_date > epoch.start_date) ||
-            (epoch.start_date < end_date && epoch.end_date > start_date) {
+            if (start_date < epoch.end_date() && end_date > epoch.start_date()) ||
+            (epoch.start_date() < end_date && epoch.end_date() > start_date) {
                 return Err("New epoch overlaps with an existing epoch");
             }
         }
@@ -1126,11 +1128,8 @@ impl BudgetSystem {
 
         let epoch = self.state.epochs.get_mut(&epoch_id).ok_or("Epoch not found")?;
 
-        if epoch.status != EpochStatus::Planned {
-            return Err("Only planned epochs can be activated");
-        }
-
-        epoch.status = EpochStatus::Active;
+        epoch.activate();
+        
         self.state.current_epoch = Some(epoch_id);
 
         self.save_state();
@@ -1152,7 +1151,7 @@ impl BudgetSystem {
 
     fn get_proposals_for_epoch(&self, epoch_id: Uuid) -> Vec<&Proposal> {
         if let Some(epoch) = self.state.epochs.get(&epoch_id) {
-            epoch.associated_proposals.iter()
+            epoch.associated_proposals().iter()
                 .filter_map(|&id| self.state.proposals.get(&id))
                 .collect()
         } else {
@@ -1163,25 +1162,21 @@ impl BudgetSystem {
     fn update_epoch_dates(&mut self, epoch_id: Uuid, new_start: DateTime<Utc>, new_end: DateTime<Utc>) -> Result<(), &'static str> {
         // Check for overlaps with other epochs
         for other_epoch in self.state.epochs.values() {
-            if other_epoch.id != epoch_id &&
-               ((new_start < other_epoch.end_date && new_end > other_epoch.start_date) ||
-                (other_epoch.start_date < new_end && other_epoch.end_date > new_start)) {
+            if other_epoch.id() != epoch_id &&
+               ((new_start < other_epoch.end_date() && new_end > other_epoch.start_date()) ||
+                (other_epoch.start_date() < new_end && other_epoch.end_date() > new_start)) {
                 return Err("New dates overlap with an existing epoch");
             }
         }
         
         let epoch = self.state.epochs.get_mut(&epoch_id).ok_or("Epoch not found")?;
 
-        if epoch.status != EpochStatus::Planned {
+        if !epoch.is_planned() {
             return Err("Can only modify dates of planned epochs");
         }
 
-        if new_start >= new_end {
-            return Err("Start date must be before end date");
-        }
+        epoch.set_dates(new_start, new_end);
 
-        epoch.start_date = new_start;
-        epoch.end_date = new_end;
         Ok(())
     }
 
@@ -1406,7 +1401,7 @@ impl BudgetSystem {
             // Add a breakdown of points per epoch
             report.push_str("Points per Epoch:\n");
             for epoch in self.state.epochs.values() {
-                let epoch_points = self.get_team_points_for_epoch(team.id(), epoch.id).unwrap_or(0);
+                let epoch_points = self.get_team_points_for_epoch(team.id(), epoch.id()).unwrap_or(0);
                 report.push_str(&format!("  {}: {} points\n", epoch.name(), epoch_points));
             }
 
@@ -1430,8 +1425,8 @@ impl BudgetSystem {
         report.push_str(&format!("End Date: `{}`\n", epoch.end_date().format("%Y-%m-%d %H:%M:%S UTC")));
         report.push_str(&format!("Status: `{:?}`\n", epoch.status()));
 
-        if let Some(reward) = &epoch.reward {
-            report.push_str(&format!("Epoch Reward: `{} {}`\n", reward.amount, escape_markdown(&reward.token)));
+        if let Some(reward) = epoch.reward() {
+            report.push_str(&format!("Epoch Reward: `{} {}`\n", reward.amount(), escape_markdown(reward.token())));
         } else {
             report.push_str("Epoch Reward: `Not set`\n");
         }
@@ -1518,7 +1513,7 @@ impl BudgetSystem {
         let mut vote_reports = Vec::new();
         let mut total_points = 0;
 
-        for vote_id in epoch.associated_proposals.iter()
+        for vote_id in epoch.associated_proposals().iter()
             .filter_map(|proposal_id| self.state.votes.values()
                 .find(|v| v.proposal_id == *proposal_id)
                 .map(|v| v.id)) 
@@ -2401,9 +2396,9 @@ def hello_world():
             let mut total_points = 0;
             let mut allocations = Vec::new();
 
-            for &proposal_id in &epoch.associated_proposals {
+            for proposal_id in epoch.associated_proposals() {
                 if let Some(proposal) = self.state.proposals.get(&proposal_id) {
-                    if let Some(vote) = self.state.votes.values().find(|v| v.proposal_id == proposal_id) {
+                    if let Some(vote) = self.state.votes.values().find(|v| v.proposal_id == *proposal_id) {
                         let (participation_type, points) = match (&vote.vote_type, &vote.participation) {
                             (VoteType::Formal { counted_points, uncounted_points, .. }, VoteParticipation::Formal { counted, uncounted }) => {
                                 if counted.contains(team_id) {
@@ -2456,8 +2451,8 @@ def hello_world():
         let epoch = self.state.epochs.get(&epoch_id).ok_or("Epoch not found")?;
         let mut total_points = 0;
 
-        for &proposal_id in &epoch.associated_proposals {
-            if let Some(vote) = self.state.votes.values().find(|v| v.proposal_id == proposal_id) {
+        for proposal_id in epoch.associated_proposals() {
+            if let Some(vote) = self.state.votes.values().find(|v| v.proposal_id == *proposal_id) {
                 if let (VoteType::Formal { counted_points, uncounted_points, .. }, VoteParticipation::Formal { counted, uncounted }) = (&vote.vote_type, &vote.participation) {
                     if counted.contains(&team_id) {
                         total_points += counted_points;
@@ -2478,59 +2473,63 @@ def hello_world():
             None => self.state.current_epoch
                 .ok_or("No active epoch")?
         };
-
+    
         // Collect necessary data
         let actionable_proposals = self.get_proposals_for_epoch(epoch_id)
             .iter()
             .filter(|p| p.is_actionable())
             .count();
-
+    
         if actionable_proposals > 0 {
             return Err(format!("Cannot close epoch: {} actionable proposals remaining", actionable_proposals).into());
         }
-
+    
         let total_points = self.get_total_points_for_epoch(epoch_id);
         let mut team_rewards = HashMap::new();
-
+    
         // Calculate rewards
         if let Some(epoch) = self.state.epochs.get(&epoch_id) {
-            if epoch.status == EpochStatus::Closed {
+            if epoch.is_closed() {
                 return Err("Epoch is already closed".into());
             }
-
-            if let Some(reward) = &epoch.reward {
+    
+            if let Some(reward) = epoch.reward() {
                 if total_points == 0 {
                     return Err("No points earned in this epoch".into());
                 }
-
+    
                 for (team_id, _) in &self.state.current_state.teams {
                     let team_points = self.calculate_team_points_for_epoch(*team_id, epoch_id);
-                    let percentage = team_points as f64 / total_points as f64;
-                    let amount = reward.amount * percentage;
-
-                    team_rewards.insert(*team_id, TeamReward {
-                        percentage,
-                        amount,
-                    });
+                    let percentage = team_points as f64 / total_points as f64 * 100.0; // Convert to percentage
+                    let amount = reward.amount() * (percentage / 100.0); // Convert percentage back to fraction
+    
+                    match TeamReward::new(percentage, amount) {
+                        Ok(team_reward) => {
+                            team_rewards.insert(*team_id, team_reward);
+                        },
+                        Err(e) => return Err(format!("Failed to create team reward: {}", e).into()),
+                    }
                 }
             }
         } else {
             return Err("Epoch not found".into());
         }
-
+    
         // Update epoch
         if let Some(epoch) = self.state.epochs.get_mut(&epoch_id) {
-            epoch.status = EpochStatus::Closed;
-            epoch.team_rewards = team_rewards;
+            epoch.set_status(EpochStatus::Closed);
+            for (team_id, team_reward) in team_rewards {
+                epoch.set_team_reward(team_id, team_reward.percentage(), team_reward.amount())?;
+            }
         }
-
+    
         // Clear current_epoch if this was the active epoch
         if self.state.current_epoch == Some(epoch_id) {
             self.state.current_epoch = None;
         }
-
+    
         self.save_state()?;
-
+    
         Ok(())
     }
 
@@ -2546,7 +2545,7 @@ def hello_world():
             None => return 0,
         };
 
-        epoch.associated_proposals.iter()
+        epoch.associated_proposals().iter()
             .filter_map(|proposal_id| self.state.votes.values().find(|v| v.proposal_id == *proposal_id))
             .map(|vote| match (&vote.vote_type, &vote.participation) {
                 (VoteType::Formal { counted_points, uncounted_points, .. }, VoteParticipation::Formal { counted, uncounted }) => {
@@ -2568,7 +2567,7 @@ def hello_world():
             .find(|e| e.name() == epoch_name)
             .ok_or_else(|| format!("Epoch not found: {}", epoch_name))?;
 
-        if epoch.status != EpochStatus::Closed {
+        if !epoch.is_closed() {
             return Err("Cannot generate report: Epoch is not closed".into());
         }
 
@@ -2623,7 +2622,7 @@ def hello_world():
             approved,
             rejected,
             retracted,
-            epoch.reward.as_ref().map_or("N/A".to_string(), |r| format!("{} {}", r.amount, r.token)),
+            epoch.reward().map_or("N/A".to_string(), |r| format!("{} {}", r.amount(), r.token())),
         );
 
         Ok(summary)
@@ -2707,8 +2706,8 @@ def hello_world():
 
             let (counted_votes, uncounted_votes) = self.get_team_vote_counts(*team_id, epoch.id());
 
-            let reward_amount = epoch.team_rewards.get(team_id)
-                .map(|reward| format!("{} {}", reward.amount, epoch.reward.as_ref().map_or("".to_string(), |r| r.token.clone())))
+            let reward_amount = epoch.team_rewards().get(team_id)
+                .map(|reward| format!("{} {}", reward.amount(), epoch.reward().as_ref().map_or("".to_string(), |r| r.token().to_string())))
                 .unwrap_or_else(|| "N/A".to_string());
 
             summary.push_str(&format!(
@@ -3331,11 +3330,11 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                     let epoch_info = epoch_name_clone.clone().unwrap_or("Active epoch".to_string());
                     println!("Successfully closed epoch: {}", epoch_info);
                     if let Some(epoch) = budget_system.state.epochs.values().find(|e| e.name() == epoch_name_clone.as_deref().unwrap_or("")) {
-                        if let Some(reward) = &epoch.reward {
+                        if let Some(reward) = epoch.reward() {
                             println!("Rewards allocated:");
-                            for (team_id, team_reward) in &epoch.team_rewards {
+                            for (team_id, team_reward) in epoch.team_rewards() {
                                 if let Some(team) = budget_system.state.current_state.teams.get(team_id) {
-                                    println!("  {}: {} {} ({:.2}%)", team.name(), team_reward.amount, reward.token, team_reward.percentage * 100.0);
+                                    println!("  {}: {} {} ({:.2}%)", team.name(), team_reward.amount(), reward.token(), team_reward.percentage() * 100.0);
                                 }
                             }
                         } else {
@@ -3546,6 +3545,6 @@ mod tests {
         
         let epoch = budget_system.get_current_epoch().unwrap();
         assert_eq!(epoch.name(), "Test Epoch");
-        assert_eq!(epoch.status(), &EpochStatus::Active);
+        assert!(epoch.is_active());
     }
 }

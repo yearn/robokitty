@@ -17,6 +17,7 @@ pub struct Team {
 }
 
 impl Team {
+    // Constructor
     pub fn new(name: String, representative: String, trailing_monthly_revenue: Option<Vec<u64>>) -> Result<Self, &'static str> {
         let status = match trailing_monthly_revenue {
             Some(revenue) => {
