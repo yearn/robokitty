@@ -257,19 +257,17 @@ impl Proposal {
         if let Some(url) = updates.url {
             self.set_url(Some(url));
         }
-        if let Some(announced_at) = updates.announced_at {
-            self.set_dates(Some(announced_at), self.published_at, self.resolved_at)?;
-        }
-        if let Some(published_at) = updates.published_at {
-            self.set_dates(self.announced_at, Some(published_at), self.resolved_at)?;
-        }
-        if let Some(resolved_at) = updates.resolved_at {
-            self.set_dates(self.announced_at, self.published_at, Some(resolved_at))?;
-        }
+        
+        let new_announced_at = updates.announced_at.or(self.announced_at);
+        let new_published_at = updates.published_at.or(self.published_at);
+        let new_resolved_at = updates.resolved_at.or(self.resolved_at);
+        
+        self.set_dates(new_announced_at, new_published_at, new_resolved_at)?;
+        
         if let Some(budget_details) = updates.budget_request_details {
             self.update_budget_request_details(&budget_details, team_id)?;
         }
-
+    
         Ok(())
     }
 
@@ -326,6 +324,12 @@ impl BudgetRequestDetails {
     }
 
     fn validate(&self) -> Result<(), &'static str> {
+
+        // Ensure payment_status is None for new proposals
+        if self.payment_status().is_some() {
+            return Err("New proposals should not have a payment status");
+        }
+
         // Validate request amounts
         if self.request_amounts.is_empty() {
             return Err("Request amounts cannot be empty");
@@ -417,5 +421,177 @@ impl BudgetRequestDetails {
 
     pub fn total_request_amount(&self) -> f64 {
         self.request_amounts.values().sum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::NaiveDate;
+
+    // Helper function to create a basic proposal
+    fn create_test_proposal() -> Proposal {
+        Proposal::new(
+            Uuid::new_v4(),
+            "Test Proposal".to_string(),
+            Some("http://example.com".to_string()),
+            None,
+            Some(NaiveDate::from_ymd_opt(2023, 1, 1).unwrap()),
+            Some(NaiveDate::from_ymd_opt(2023, 1, 5).unwrap()),
+            None,
+        )
+    }
+
+    #[test]
+    fn test_proposal_creation() {
+        let proposal = create_test_proposal();
+        assert_eq!(proposal.title(), "Test Proposal");
+        assert_eq!(proposal.url(), Some("http://example.com"));
+        assert_eq!(proposal.status(), ProposalStatus::Open);
+        assert!(proposal.resolution().is_none());
+    }
+
+    #[test]
+    fn test_proposal_status_changes() {
+        let mut proposal = create_test_proposal();
+        assert!(proposal.is_open());
+        
+        proposal.approve().unwrap();
+        assert!(proposal.is_closed());
+        assert!(proposal.is_approved());
+        
+        // Reset for the next test
+        proposal = create_test_proposal();
+        proposal.reject().unwrap();
+        assert!(proposal.is_closed());
+        assert!(proposal.is_rejected());
+    }
+
+    #[test]
+    fn test_proposal_resolution() {
+        let mut proposal = create_test_proposal();
+        proposal.set_resolution(Some(Resolution::Approved));
+        assert_eq!(proposal.resolution(), Some(Resolution::Approved));
+        
+        proposal.set_resolution(Some(Resolution::Rejected));
+        assert_eq!(proposal.resolution(), Some(Resolution::Rejected));
+    }
+
+    #[test]
+    fn test_budget_request_details() {
+        let mut proposal = create_test_proposal();
+        let budget_details = BudgetRequestDetails::new(
+            Some(Uuid::new_v4()),
+            [("ETH".to_string(), 100.0)].iter().cloned().collect(),
+            Some(NaiveDate::from_ymd_opt(2023, 2, 1).unwrap()),
+            Some(NaiveDate::from_ymd_opt(2023, 2, 28).unwrap()),
+            None,
+        ).unwrap();
+        
+        proposal.set_budget_request_details(Some(budget_details));
+        assert!(proposal.is_budget_request());
+        
+        let details = proposal.budget_request_details().unwrap();
+        assert_eq!(details.request_amounts().get("ETH"), Some(&100.0));
+    }
+
+    #[test]
+    fn test_proposal_dates() {
+        let mut proposal = create_test_proposal();
+        let new_announced = NaiveDate::from_ymd_opt(2023, 3, 1).unwrap();
+        let new_published = NaiveDate::from_ymd_opt(2023, 3, 5).unwrap();
+        let new_resolved = NaiveDate::from_ymd_opt(2023, 3, 10).unwrap();
+        
+        proposal.set_dates(Some(new_announced), Some(new_published), Some(new_resolved)).unwrap();
+        assert_eq!(proposal.announced_at(), Some(new_announced));
+        assert_eq!(proposal.published_at(), Some(new_published));
+        assert_eq!(proposal.resolved_at(), Some(new_resolved));
+    }
+
+    
+    #[test]
+    fn test_proposal_update() {
+        let mut proposal = create_test_proposal();
+        
+        proposal.set_dates(
+            Some(NaiveDate::from_ymd_opt(2023, 1, 1).unwrap()),
+            Some(NaiveDate::from_ymd_opt(2023, 1, 5).unwrap()),
+            Some(NaiveDate::from_ymd_opt(2023, 1, 10).unwrap())
+        ).unwrap();
+
+        let updates = UpdateProposalDetails {
+            title: Some("Updated Title".to_string()),
+            url: Some("http://updated.com".to_string()),
+            budget_request_details: Some(BudgetRequestDetailsScript {
+                team: Some("New Team".to_string()),
+                request_amounts: Some([("ETH".to_string(), 200.0)].iter().cloned().collect()),
+                start_date: Some(NaiveDate::from_ymd_opt(2023, 4, 1).unwrap()),
+                end_date: Some(NaiveDate::from_ymd_opt(2023, 4, 30).unwrap()),
+                payment_status: None,
+            }),
+            announced_at: Some(NaiveDate::from_ymd_opt(2023, 3, 15).unwrap()),
+            published_at: Some(NaiveDate::from_ymd_opt(2023, 3, 20).unwrap()),
+            resolved_at: Some(NaiveDate::from_ymd_opt(2023, 3, 25).unwrap()),
+        };
+        
+        proposal.update(updates, Some(Uuid::new_v4())).unwrap();
+        
+        assert_eq!(proposal.title(), "Updated Title");
+        assert_eq!(proposal.url(), Some("http://updated.com"));
+        assert_eq!(proposal.announced_at(), Some(NaiveDate::from_ymd_opt(2023, 3, 15).unwrap()));
+        assert_eq!(proposal.published_at(), Some(NaiveDate::from_ymd_opt(2023, 3, 20).unwrap()));
+        assert_eq!(proposal.resolved_at(), Some(NaiveDate::from_ymd_opt(2023, 3, 25).unwrap()));
+
+        let budget_details = proposal.budget_request_details().unwrap();
+        assert_eq!(budget_details.request_amounts().get("ETH"), Some(&200.0));
+        assert_eq!(budget_details.start_date(), Some(NaiveDate::from_ymd_opt(2023, 4, 1).unwrap()));
+        assert_eq!(budget_details.end_date(), Some(NaiveDate::from_ymd_opt(2023, 4, 30).unwrap()));
+    }
+
+    #[test]
+    fn test_proposal_duration() {
+        let mut proposal = create_test_proposal();
+        proposal.set_dates(
+            Some(NaiveDate::from_ymd_opt(2023, 1, 1).unwrap()),
+            Some(NaiveDate::from_ymd_opt(2023, 1, 5).unwrap()),
+            Some(NaiveDate::from_ymd_opt(2023, 1, 10).unwrap()),
+        ).unwrap();
+        
+        assert_eq!(proposal.duration().unwrap().num_days(), 9);
+    }
+
+    #[test]
+    #[should_panic(expected = "Announced date cannot be after published date")]
+    fn test_invalid_dates() {
+        let mut proposal = create_test_proposal();
+        proposal.set_dates(
+            Some(NaiveDate::from_ymd_opt(2023, 1, 10).unwrap()),
+            Some(NaiveDate::from_ymd_opt(2023, 1, 5).unwrap()),
+            None,
+        ).unwrap();
+    }
+
+    #[test]
+    fn test_budget_request_validation() {
+        let result = BudgetRequestDetails::new(
+            None,
+            [("ETH".to_string(), -100.0)].iter().cloned().collect(),
+            None,
+            None,
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_proposal_actionable_status() {
+        let mut proposal = create_test_proposal();
+        assert!(proposal.is_actionable());
+        
+        proposal.set_status(ProposalStatus::Closed);
+        assert!(!proposal.is_actionable());
+        
+        proposal.set_status(ProposalStatus::Reopened);
+        assert!(proposal.is_actionable());
     }
 }

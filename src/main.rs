@@ -18,7 +18,9 @@ use crate::core::models::{
     ProposalStatus,
     Resolution,
     PaymentStatus,
-    BudgetRequestDetails
+    BudgetRequestDetails,
+    NameMatches,
+    get_id_by_name
 };
 
 
@@ -733,30 +735,8 @@ impl BudgetSystem {
     fn add_proposal(&mut self, title: String, url: Option<String>, budget_request_details: Option<BudgetRequestDetails>, announced_at: Option<NaiveDate>, published_at: Option<NaiveDate>, is_historical: Option<bool>) -> Result<Uuid, &'static str> {
         let current_epoch_id = self.state.current_epoch.ok_or("No active epoch")?;
     
-        // Validate dates if present
-        if let Some(details) = &budget_request_details {
-            if let (Some(start), Some(end)) = (details.start_date, details.end_date) {
-                if start > end {
-                    return Err("Start date cannot be after end date");
-                }
-            }
-            // Ensure payment_status is None for new proposals
-            if details.payment_status.is_some() {
-                return Err("New proposals should not have a payment status");
-            }
-            // Validate request_amounts
-            if details.request_amounts.is_empty() {
-                return Err("Budget request must include at least one token amount");
-            }
-            for &amount in details.request_amounts.values() {
-                if amount <= 0.0 {
-                    return Err("All requested amounts must be positive");
-                }
-            }
-        }
-    
         let proposal = Proposal::new(current_epoch_id, title, url, budget_request_details, announced_at, published_at, is_historical);
-        let proposal_id = proposal.id;
+        let proposal_id = proposal.id();
         self.state.proposals.insert(proposal_id, proposal);
 
         if let Some(epoch) = self.state.epochs.get_mut(&current_epoch_id) {
@@ -770,16 +750,16 @@ impl BudgetSystem {
 
     fn close_with_reason(&mut self, id: Uuid, resolution: &Resolution) -> Result<(), &'static str> {
         if let Some(proposal) = self.state.proposals.get_mut(&id) {
-            if proposal.status == ProposalStatus::Closed {
+            if proposal.is_closed() {
                 return Err("Proposal is already closed");
             }
-            if let Some(details) = &proposal.budget_request_details {
-                if matches!(details.payment_status, Some(PaymentStatus::Paid)) {
+            if let Some(details) = &proposal.budget_request_details() {
+                if details.is_paid() {
                     return Err("Cannot close: Proposal is already paid");
                 }
             }
-            proposal.set_resolution(resolution.clone());
-            proposal.update_status(ProposalStatus::Closed);
+            proposal.set_resolution(Some(resolution.clone()));
+            proposal.set_status(ProposalStatus::Closed);
             self.save_state();
             Ok(())
         } else {
@@ -795,7 +775,7 @@ impl BudgetSystem {
             return Err("Proposal is not in a votable state");
         }
 
-        let epoch_id = proposal.epoch_id;
+        let epoch_id = proposal.epoch_id();
 
         let raffle = &self.state.raffles.get(&raffle_id)
             .ok_or("Raffle not found")?;
@@ -826,7 +806,7 @@ impl BudgetSystem {
             return Err("Proposal is not in a votable state");
         }
 
-        let epoch_id = proposal.epoch_id;
+        let epoch_id = proposal.epoch_id();
 
         let vote = Vote::new_informal(proposal_id, epoch_id);
         let vote_id = vote.id;
@@ -970,22 +950,16 @@ impl BudgetSystem {
         Ok(())
     }
 
-    fn get_epoch_id_by_name(&self, name: &str) -> Option<Uuid> {
-        self.state.epochs.iter()
-            .find(|(_, epoch)| epoch.name() == name)
-            .map(|(id, _)| *id)
+    pub fn get_team_id_by_name(&self, name: &str) -> Option<Uuid> {
+        get_id_by_name(&self.state.current_state.teams, name)
     }
 
-    fn get_team_id_by_name(&self, name: &str) -> Option<Uuid> {
-        self.state.current_state.teams.iter()
-            .find(|(_, team)| team.name() == name)
-            .map(|(id, _)| *id)
+    pub fn get_epoch_id_by_name(&self, name: &str) -> Option<Uuid> {
+        get_id_by_name(&self.state.epochs, name)
     }
 
-    fn get_proposal_id_by_name(&self, name: &str) -> Option<Uuid> {
-        self.state.proposals.iter()
-            .find(|(_, proposal)| proposal.title == name)
-            .map(|(id, _)| *id)
+    pub fn get_proposal_id_by_name(&self, name: &str) -> Option<Uuid> {
+        get_id_by_name(&self.state.proposals, name)
     }
 
     fn import_predefined_raffle(
@@ -1130,7 +1104,7 @@ impl BudgetSystem {
         } else {
             proposal.reject()?;
         }
-        proposal.update_status(ProposalStatus::Closed);
+        proposal.set_status(ProposalStatus::Closed);
 
         self.save_state()?;
 
@@ -1230,7 +1204,7 @@ impl BudgetSystem {
         let mut retracted_count = 0;
 
         for proposal in &proposals {
-            match &proposal.resolution {
+            match proposal.resolution() {
                 Some(Resolution::Approved) => approved_count += 1,
                 Some(Resolution::Rejected) => rejected_count += 1,
                 Some(Resolution::Retracted) => retracted_count += 1,
@@ -1256,19 +1230,19 @@ impl BudgetSystem {
             report.push_str("📬 *Open proposals*\n\n");
         
             for proposal in open_proposals {
-                report.push_str(&format!("*{}*\n", escape_markdown(&proposal.title)));
-                if let Some(url) = &proposal.url {
+                report.push_str(&format!("*{}*\n", escape_markdown(proposal.title())));
+                if let Some(url) = proposal.url() {
                     report.push_str(&format!("🔗 {}\n", escape_markdown(url)));
                 }
-                if let Some(details) = &proposal.budget_request_details {
-                    if let (Some(start), Some(end)) = (details.start_date, details.end_date) {
+                if let Some(details) = proposal.budget_request_details() {
+                    if let (Some(start), Some(end)) = (details.start_date(), details.end_date()) {
                         report.push_str(&format!("📆 {} \\- {}\n", 
                             escape_markdown(&start.format("%b %d").to_string()),
                             escape_markdown(&end.format("%b %d").to_string())
                         ));
                     }
-                    if !details.request_amounts.is_empty() {
-                        let amounts: Vec<String> = details.request_amounts.iter()
+                    if !details.request_amounts().is_empty() {
+                        let amounts: Vec<String> = details.request_amounts().iter()
                             .map(|(token, amount)| format!("{} {}", 
                                 escape_markdown(&amount.to_string()), 
                                 escape_markdown(token)
@@ -1355,7 +1329,7 @@ impl BudgetSystem {
                         Participation: {}\n\
                         Result: {}\n\
                         Points Earned: {}\n\n",
-                        vote_id, proposal.title, vote_type, status, result, points
+                        vote_id, proposal.title(), vote_type, status, result, points
                     )
                 ));
             }
@@ -1380,7 +1354,7 @@ impl BudgetSystem {
     }
 
     fn days_open(&self, proposal: &Proposal) -> i64 {
-        let announced_date = proposal.announced_at
+        let announced_date = proposal.announced_at()
             .unwrap_or_else(|| Utc::now().date_naive());
         Utc::now().date_naive().signed_duration_since(announced_date).num_days()
     }
@@ -1544,7 +1518,7 @@ impl BudgetSystem {
         // Check if the proposal already has a resolution
         let proposal = self.state.proposals.get(&proposal_id)
             .ok_or_else(|| "Proposal not found after ID lookup".to_string())?;
-        if proposal.resolution.is_some() {
+        if proposal.resolution().is_some() {
             return Err("Cannot create vote: Proposal already has a resolution".into());
         }
 
@@ -1636,8 +1610,8 @@ impl BudgetSystem {
         let proposal = self.state.proposals.get_mut(&proposal_id)
             .ok_or_else(|| format!("Proposal not found: {}", proposal_id))?;
         
-        println!("Proposal status before update: {:?}", proposal.status);
-        println!("Proposal resolution before update: {:?}", proposal.resolution);
+        println!("Proposal status before update: {:?}", proposal.status());
+        println!("Proposal resolution before update: {:?}", proposal.resolution());
         
         let result = if passed {
             proposal.approve()
@@ -1648,10 +1622,10 @@ impl BudgetSystem {
         match result {
             Ok(()) => {
                 if let Some(closed) = vote_closed {
-                    proposal.set_resolved_at(closed);
+                    proposal.set_resolved_at(Some(closed));
                 }
-                println!("Proposal status after update: {:?}", proposal.status);
-                println!("Proposal resolution after update: {:?}", proposal.resolution);
+                println!("Proposal status after update: {:?}", proposal.status());
+                println!("Proposal resolution after update: {:?}", proposal.resolution());
                 self.save_state()?;
                 Ok(passed)
             },
@@ -1735,8 +1709,8 @@ impl BudgetSystem {
     
         let report = format!(
             "**{}**\n{}\n\n**Status: {}**\n__{} in favor, {} against, {} absent__\n\n**Deciding teams**\n`{:?}`\n\n{}\n{}",
-            proposal.title,
-            proposal.url.as_deref().unwrap_or(""),
+            proposal.title(),
+            proposal.url().as_deref().unwrap_or(""),
             status,
             counted_yes,
             counted_no,
@@ -1780,12 +1754,24 @@ impl BudgetSystem {
     }
 
     fn update_proposal(&mut self, proposal_name: &str, updates: UpdateProposalDetails) -> Result<(), &'static str> {
+        // Find the team_id if it's needed
+        let team_id = if let Some(budget_details) = &updates.budget_request_details {
+            if let Some(team_name) = &budget_details.team {
+                self.get_team_id_by_name(team_name)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+    
+        // Update the proposal
         let proposal = self.state.proposals.values_mut()
-            .find(|p| p.title == proposal_name)
+            .find(|p| p.title() == proposal_name)
             .ok_or("Proposal not found")?;
-
+    
         proposal.update(updates, team_id)?;
-
+    
         self.save_state();
         Ok(())
     }
@@ -1814,16 +1800,16 @@ def hello_world():
         let proposal = self.state.proposals.get(&proposal_id)
             .ok_or_else(|| format!("Proposal not found: {:?}", proposal_id))?;
     
-        debug!("Found proposal: {:?}", proposal.title);
+        debug!("Found proposal: {:?}", proposal.title());
     
         let mut report = String::new();
     
         // Main title (moved outside of Summary)
-        report.push_str(&format!("# Proposal Report: {}\n\n", proposal.title));
+        report.push_str(&format!("# Proposal Report: {}\n\n", proposal.title()));
     
         // Summary
         report.push_str("## Summary\n\n");
-        if let (Some(announced), Some(resolved)) = (proposal.announced_at, proposal.resolved_at) {
+        if let (Some(announced), Some(resolved)) = (proposal.announced_at(), proposal.resolved_at()) {
             let resolution_days = self.calculate_days_between(announced, resolved);
             report.push_str(&format!("This proposal was resolved in {} days from its announcement date. ", resolution_days));
         }
@@ -1840,12 +1826,12 @@ def hello_world():
             report.push_str("No voting information is available for this proposal. ");
         }
     
-        if let Some(budget_details) = &proposal.budget_request_details {
+        if let Some(budget_details) = proposal.budget_request_details() {
             report.push_str(&format!("The budget request was for {} {} for the period from {} to {}. ",
-                budget_details.request_amounts.values().sum::<f64>(),
-                budget_details.request_amounts.keys().next().unwrap_or(&String::new()),
-                budget_details.start_date.map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string()),
-                budget_details.end_date.map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())
+                budget_details.request_amounts().values().sum::<f64>(),
+                budget_details.request_amounts().keys().next().unwrap_or(&String::new()),
+                budget_details.start_date().map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string()),
+                budget_details.end_date().map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())
             ));
         }
     
@@ -1853,30 +1839,30 @@ def hello_world():
     
         // Proposal Details
         report.push_str("## Proposal Details\n\n");
-        report.push_str(&format!("- **ID**: {}\n", proposal.id));
-        report.push_str(&format!("- **Title**: {}\n", proposal.title));
-        report.push_str(&format!("- **URL**: {}\n", proposal.url.as_deref().unwrap_or("N/A")));
-        report.push_str(&format!("- **Status**: {:?}\n", proposal.status));
-        report.push_str(&format!("- **Resolution**: {}\n", proposal.resolution.as_ref().map_or("N/A".to_string(), |r| format!("{:?}", r))));
-        report.push_str(&format!("- **Announced**: {}\n", proposal.announced_at.map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())));
-        report.push_str(&format!("- **Published**: {}\n", proposal.published_at.map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())));
-        report.push_str(&format!("- **Resolved**: {}\n", proposal.resolved_at.map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())));
-        report.push_str(&format!("- **Is Historical**: {}\n\n", proposal.is_historical));
+        report.push_str(&format!("- **ID**: {}\n", proposal.id()));
+        report.push_str(&format!("- **Title**: {}\n", proposal.title()));
+        report.push_str(&format!("- **URL**: {}\n", proposal.url().as_deref().unwrap_or("N/A")));
+        report.push_str(&format!("- **Status**: {:?}\n", proposal.status()));
+        report.push_str(&format!("- **Resolution**: {}\n", proposal.resolution().as_ref().map_or("N/A".to_string(), |r| format!("{:?}", r))));
+        report.push_str(&format!("- **Announced**: {}\n", proposal.announced_at().map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())));
+        report.push_str(&format!("- **Published**: {}\n", proposal.published_at().map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())));
+        report.push_str(&format!("- **Resolved**: {}\n", proposal.resolved_at().map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())));
+        report.push_str(&format!("- **Is Historical**: {}\n\n", proposal.is_historical()));
     
         // Budget Request Details
-        if let Some(budget_details) = &proposal.budget_request_details {
+        if let Some(budget_details) = proposal.budget_request_details() {
             report.push_str("## Budget Request Details\n\n");
             report.push_str(&format!("- **Requesting Team**: {}\n", 
-                budget_details.team
+                budget_details.team()
                     .and_then(|id| self.state.current_state.teams.get(&id))
                     .map_or("N/A".to_string(), |team| team.name().to_string())));
             report.push_str("- **Requested Amount(s)**:\n");
-            for (token, amount) in &budget_details.request_amounts {
+            for (token, amount) in budget_details.request_amounts() {
                 report.push_str(&format!("  - {}: {}\n", token, amount));
             }
-            report.push_str(&format!("- **Start Date**: {}\n", budget_details.start_date.map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())));
-            report.push_str(&format!("- **End Date**: {}\n", budget_details.end_date.map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())));
-            report.push_str(&format!("- **Payment Status**: {:?}\n\n", budget_details.payment_status));
+            report.push_str(&format!("- **Start Date**: {}\n", budget_details.start_date().map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())));
+            report.push_str(&format!("- **End Date**: {}\n", budget_details.end_date().map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())));
+            report.push_str(&format!("- **Payment Status**: {:?}\n\n", budget_details.payment_status()));
         }
     
         // Raffle Information
@@ -2081,7 +2067,7 @@ def hello_world():
     }
 
     fn generate_report_file_path(&self, proposal: &Proposal, epoch_name: &str) -> PathBuf {
-        debug!("Generating report file path for proposal: {:?}", proposal.id);
+        debug!("Generating report file path for proposal: {:?}", proposal.id());
     
         let state_file_path = PathBuf::from(&self.config.state_file);
         let state_file_dir = state_file_path.parent().unwrap_or_else(|| {
@@ -2090,22 +2076,22 @@ def hello_world():
         });
         let reports_dir = state_file_dir.join("reports").join(epoch_name);
     
-        let date = proposal.published_at
-            .or(proposal.announced_at)
+        let date = proposal.published_at()
+            .or(proposal.announced_at())
             .map(|date| date.format("%Y%m%d").to_string())
             .unwrap_or_else(|| {
-                debug!("No published_at or announced_at date for proposal: {:?}", proposal.id);
+                debug!("No published_at or announced_at date for proposal: {:?}", proposal.id());
                 "00000000".to_string()
             });
     
-        let team_part = proposal.budget_request_details
+        let team_part = proposal.budget_request_details()
             .as_ref()
-            .and_then(|details| details.team)
+            .and_then(|details| details.team())
             .and_then(|team_id| self.state.current_state.teams.get(&team_id))
             .map(|team| format!("-{}", clean_file_name(&team.name())))
             .unwrap_or_default();
     
-        let truncated_title = clean_file_name(&proposal.title)
+        let truncated_title = clean_file_name(proposal.title())
             .chars()
             .take(30)
             .collect::<String>()
@@ -2199,7 +2185,7 @@ def hello_world():
 
                         total_points += points;
                         allocations.push(format!("{}: {} voter, {} points", 
-                            proposal.title, participation_type, points));
+                            proposal.title(), participation_type, points));
                     }
                 }
             }
@@ -2380,9 +2366,9 @@ def hello_world():
 
     fn generate_epoch_summary(&self, epoch: &Epoch) -> Result<String, Box<dyn Error>> {
         let proposals = self.get_proposals_for_epoch(epoch.id());
-        let approved = proposals.iter().filter(|p| matches!(p.resolution, Some(Resolution::Approved))).count();
-        let rejected = proposals.iter().filter(|p| matches!(p.resolution, Some(Resolution::Rejected))).count();
-        let retracted = proposals.iter().filter(|p| matches!(p.resolution, Some(Resolution::Retracted))).count();
+        let approved = proposals.iter().filter(|p| matches!(p.resolution(), Some(Resolution::Approved))).count();
+        let rejected = proposals.iter().filter(|p| matches!(p.resolution(), Some(Resolution::Rejected))).count();
+        let retracted = proposals.iter().filter(|p| matches!(p.resolution(), Some(Resolution::Retracted))).count();
 
         let summary = format!(
             "# End of Epoch Report: {}\n\n\
@@ -2418,7 +2404,7 @@ def hello_world():
     
         for (status, resolution) in statuses {
             let filtered_proposals: Vec<&Proposal> = proposals.iter()
-                .filter(|p| matches!(&p.resolution, Some(r) if *r == resolution))
+                .filter(|p| matches!(p.resolution(), Some(r) if r == resolution))
                 .map(|p| *p)  // Dereference once to go from &&Proposal to &Proposal
                 .collect();
     
@@ -2429,16 +2415,16 @@ def hello_world():
     
                 for proposal in &filtered_proposals {
                     // Generate individual proposal report
-                    let report_path = self.generate_and_save_proposal_report(proposal.id, epoch.name())?;
+                    let report_path = self.generate_and_save_proposal_report(proposal.id(), epoch.name())?;
                     let report_link = report_path.file_name().unwrap().to_str().unwrap();
     
-                    let team_name = proposal.budget_request_details.as_ref()
-                        .and_then(|d| d.team)
+                    let team_name = proposal.budget_request_details()
+                        .and_then(|d| d.team())
                         .and_then(|id| self.state.current_state.teams.get(&id))
                         .map_or("N/A".to_string(), |t| t.name().to_string());
     
-                    let amounts = proposal.budget_request_details.as_ref()
-                        .map(|d| d.request_amounts.iter()
+                    let amounts = proposal.budget_request_details()
+                        .map(|d| d.request_amounts().iter()
                             .map(|(token, amount)| format!("{} {}", amount, token))
                             .collect::<Vec<_>>()
                             .join(", "))
@@ -2446,14 +2432,14 @@ def hello_world():
     
                     tables.push_str(&format!(
                         "| {} | {} | {} | {} | {} | {} | {} | {} | [Report]({}) |\n",
-                        proposal.title,
-                        proposal.url.as_deref().unwrap_or("N/A"),
+                        proposal.title(),
+                        proposal.url().as_deref().unwrap_or("N/A"),
                         team_name,
                         amounts,
-                        proposal.budget_request_details.as_ref().and_then(|d| d.start_date).map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string()),
-                        proposal.budget_request_details.as_ref().and_then(|d| d.end_date).map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string()),
-                        proposal.announced_at.map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string()),
-                        proposal.resolved_at.map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string()),
+                        proposal.budget_request_details().and_then(|d| d.start_date()).map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string()),
+                        proposal.budget_request_details().and_then(|d| d.end_date()).map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string()),
+                        proposal.announced_at().map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string()),
+                        proposal.resolved_at().map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string()),
                         report_link
                     ));
                 }
@@ -2645,15 +2631,20 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
             println!("Added team: {} ({})", name, team_id);
         },
         ScriptCommand::AddProposal { title, url, budget_request_details, announced_at, published_at, is_historical } => {
-            let budget_request_details = budget_request_details.map(|details| {
-                BudgetRequestDetails {
-                    team: details.team.as_ref().and_then(|name| budget_system.get_team_id_by_name(name)),
-                    request_amounts: details.request_amounts.unwrap_or_default(),
-                    start_date: details.start_date,
-                    end_date: details.end_date,
-                    payment_status: details.payment_status,
-                }
-            });
+            let budget_request_details = if let Some(details) = budget_request_details {
+                let team_id = details.team.as_ref()
+                    .and_then(|name| budget_system.get_team_id_by_name(name));
+                
+                Some(BudgetRequestDetails::new(
+                    team_id,
+                    details.request_amounts.unwrap_or_default(),
+                    details.start_date,
+                    details.end_date,
+                    details.payment_status
+                )?)
+            } else {
+                None
+            };
             
             let proposal_id = budget_system.add_proposal(title.clone(), url, budget_request_details, announced_at, published_at, is_historical)?;
             println!("Added proposal: {} ({})", title, proposal_id);
@@ -3068,13 +3059,13 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
             
             let closed_proposals: Vec<_> = budget_system.get_proposals_for_epoch(epoch_id)
                 .into_iter()
-                .filter(|p| p.status == ProposalStatus::Closed)
+                .filter(|p| p.is_closed())
                 .collect();
 
             for proposal in closed_proposals {
-                match budget_system.generate_and_save_proposal_report(proposal.id, &epoch_name) {
-                    Ok(file_path) => println!("Report generated for proposal '{}' at {:?}", proposal.title, file_path),
-                    Err(e) => println!("Failed to generate report for proposal '{}': {}", proposal.title, e),
+                match budget_system.generate_and_save_proposal_report(proposal.id(), &epoch_name) {
+                    Ok(file_path) => println!("Report generated for proposal '{}' at {:?}", proposal.title(), file_path),
+                    Err(e) => println!("Failed to generate report for proposal '{}': {}", proposal.title(), e),
                 }
             }
         },
@@ -3084,12 +3075,12 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
             
             let proposal = budget_system.get_proposals_for_epoch(current_epoch.id())
                 .into_iter()
-                .find(|p| p.title == proposal_name)
+                .find(|p| p.name_matches(&proposal_name))
                 .ok_or_else(|| format!("Proposal not found in current epoch: {}", proposal_name))?;
 
-            match budget_system.generate_and_save_proposal_report(proposal.id, &current_epoch.name()) {
-                Ok(file_path) => println!("Report generated for proposal '{}' at {:?}", proposal.title, file_path),
-                Err(e) => println!("Failed to generate report for proposal '{}': {}", proposal.title, e),
+            match budget_system.generate_and_save_proposal_report(proposal.id(), &current_epoch.name()) {
+                Ok(file_path) => println!("Report generated for proposal '{}' at {:?}", proposal.title(), file_path),
+                Err(e) => println!("Failed to generate report for proposal '{}': {}", proposal.title(), e),
             }
         },
         ScriptCommand::PrintPointReport { epoch_name } => {
