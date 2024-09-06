@@ -1780,18 +1780,6 @@ impl BudgetSystem {
     }
 
     fn update_proposal(&mut self, proposal_name: &str, updates: UpdateProposalDetails) -> Result<(), &'static str> {
-        // Perform team ID lookup if necessary
-        let team_id = if let Some(ref budget_details) = updates.budget_request_details {
-            if let Some(ref team_name) = budget_details.team {
-                self.get_team_id_by_name(team_name)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        // Find and update the proposal
         let proposal = self.state.proposals.values_mut()
             .find(|p| p.title == proposal_name)
             .ok_or("Proposal not found")?;

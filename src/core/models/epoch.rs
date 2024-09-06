@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Serialize, Deserialize};
 use uuid::Uuid;
 use std::collections::HashMap;
+use super::common::NameMatches;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Epoch {
@@ -187,6 +188,12 @@ impl Epoch {
         matches!(self.status, EpochStatus::Closed)
     }
 
+}
+
+impl NameMatches for Epoch {
+    fn name_matches(&self, name: &str) -> bool {
+        self.name() == name
+    }
 }
 
 impl EpochReward {

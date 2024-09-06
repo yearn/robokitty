@@ -1,5 +1,6 @@
 use serde::{Serialize, Deserialize};
 use uuid::Uuid;
+use super::common::NameMatches;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TeamStatus {
@@ -105,6 +106,12 @@ impl Team {
         matches!(self.status, TeamStatus::Inactive)
     }
 
+}
+
+impl NameMatches for Team {
+    fn name_matches(&self, name: &str) -> bool {
+        self.name() == name
+    }
 }
 
 #[cfg(test)]
