@@ -267,18 +267,18 @@ impl BudgetSystem {
 
         let config = raffle.config();
 
-        let vote = Vote::new_formal(
-            proposal_id,
-            epoch_id,
+        let vote_type = VoteType::Formal { 
             raffle_id,
-            config.total_counted_seats() as u32,
-            self.config.default_qualified_majority_threshold,
-            self.config.counted_vote_points,
-            self.config.uncounted_vote_points
-        );
+            total_eligible_seats: config.total_counted_seats() as u32,
+            threshold: self.config.default_qualified_majority_threshold,
+            counted_points: self.config.counted_vote_points,
+            uncounted_points: self.config.uncounted_vote_points
+        };
+
+        let vote = Vote::new(proposal_id, epoch_id, vote_type, false);
 
 
-        let vote_id = vote.id;
+        let vote_id = vote.id();
         self.state.votes.insert(vote_id, vote);
         self.save_state();
         Ok(vote_id)
@@ -294,8 +294,9 @@ impl BudgetSystem {
 
         let epoch_id = proposal.epoch_id();
 
-        let vote = Vote::new_informal(proposal_id, epoch_id);
-        let vote_id = vote.id;
+        let vote = Vote::new(proposal_id, epoch_id, VoteType::Informal, false);
+
+        let vote_id = vote.id();
         self.state.votes.insert(vote_id, vote);
         self.save_state();
         Ok(vote_id)
@@ -304,37 +305,16 @@ impl BudgetSystem {
     fn cast_votes(&mut self, vote_id: Uuid, votes: Vec<(Uuid, VoteChoice)>) -> Result<(), &'static str> {
         let vote = self.state.votes.get_mut(&vote_id).ok_or("Vote not found")?;
 
-        match &vote.vote_type {
+        let raffle_result = match &vote.vote_type() {
             VoteType::Formal { raffle_id, .. } => {
-                let raffle = self.state.raffles.get(raffle_id).ok_or("Associated raffle not found")?;
-                let raffle_result = raffle.result().ok_or("Raffle teams have not been selected")?;
-
-                let mut counted_votes = Vec::new();
-                let mut uncounted_votes = Vec::new();
-
-                for (team_id, choice) in votes {
-                    if raffle_result.counted().contains(&team_id) {
-                        counted_votes.push((team_id, choice));
-                    } else if raffle_result.uncounted().contains(&team_id) {
-                        uncounted_votes.push((team_id, choice));
-                    }
-                    // Votes from teams not in the raffle result are silently ignored
-                }
-
-                vote.cast_counted_votes(&counted_votes)?;
-                vote.cast_uncounted_votes(&uncounted_votes)?;
+                self.state.raffles.get(raffle_id)
+                    .and_then(|raffle| raffle.result())
             },
-            VoteType::Informal => {
-                let eligible_votes: Vec<_> = votes.into_iter()
-                    .filter(|(team_id, _)| {
-                        self.state.current_state.teams.get(team_id)
-                            .map(|team| team.is_active())
-                            .unwrap_or(false)
-                    })
-                    .collect();
+            VoteType::Informal => None,
+        };
 
-                vote.cast_informal_votes(&eligible_votes)?;
-            },
+        for (team_id, choice) in votes {
+            vote.cast_vote(team_id, choice, raffle_result)?;
         }
 
         self.save_state();
@@ -344,13 +324,13 @@ impl BudgetSystem {
     fn close_vote(&mut self, vote_id: Uuid) -> Result<bool, &'static str> {
         let vote = self.state.votes.get_mut(&vote_id).ok_or("Vote not found")?;
         
-        if vote.status == VoteStatus::Closed {
+        if vote.is_closed() {
             return Err("Vote is already closed");
         }
 
         vote.close()?;
 
-        let result = match &vote.result {
+        let result = match vote.result() {
             Some(VoteResult::Formal { passed, .. }) => *passed,
             Some(VoteResult::Informal { .. }) => false,
             None => return Err("Vote result not available"),
@@ -525,60 +505,62 @@ impl BudgetSystem {
     ) -> Result<Uuid, Box<dyn Error>> {
         let proposal_id = self.get_proposal_id_by_name(proposal_name)
             .ok_or_else(|| format!("Proposal not found: {}", proposal_name))?;
-
+    
         let raffle_id = self.get_raffle_id_by_name(proposal_name)
             .ok_or_else(|| format!("No raffle found for proposal: {}", proposal_name))?;
-
+    
         let raffle = self.state.raffles.get(&raffle_id)
             .ok_or_else(|| format!("Raffle not found: {}", raffle_id))?;
-
+    
         let epoch_id = raffle.config().epoch_id();
-
+    
+        let vote_type = VoteType::Formal {
+            raffle_id,
+            total_eligible_seats: raffle.config().total_counted_seats() as u32,
+            threshold: self.config.default_qualified_majority_threshold,
+            counted_points: counted_points.unwrap_or(self.config.counted_vote_points),
+            uncounted_points: uncounted_points.unwrap_or(self.config.uncounted_vote_points)
+        };
+    
+        let mut vote = Vote::new(proposal_id, epoch_id, vote_type, true);
+    
+        // Determine participation
         let (participating_ids, _) = self.determine_participation(
             raffle,
             &participating_teams,
             &non_participating_teams
         )?;
-
-        let participation = VoteParticipation::Formal {
-            counted: participating_ids.iter()
-                .filter(|&id| raffle.result().unwrap().counted().contains(id))
-                .cloned()
-                .collect(),
-            uncounted: participating_ids.iter()
-                .filter(|&id| raffle.result().unwrap().uncounted().contains(id))
-                .cloned()
-                .collect(),
+    
+        let raffle_result = raffle.result().ok_or("Raffle result not found")?;
+    
+        // Set participation without casting actual votes
+        for &team_id in &participating_ids {
+            if raffle_result.counted().contains(&team_id) {
+                vote.add_participant(team_id, true)?;
+            } else if raffle_result.uncounted().contains(&team_id) {
+                vote.add_participant(team_id, false)?;
+            }
+        }
+    
+        // Close the vote
+        vote.close()?;
+    
+        // Set the result manually for historical votes
+        let result = VoteResult::Formal {
+            counted: VoteCount::new(),  // All zeros
+            uncounted: VoteCount::new(),  // All zeros
+            passed,
         };
-
-        let vote = Vote {
-            id: Uuid::new_v4(),
-            proposal_id,
-            epoch_id,
-            vote_type: VoteType::Formal {
-                raffle_id,
-                total_eligible_seats: raffle.config().total_counted_seats() as u32,
-                threshold: self.config.default_qualified_majority_threshold,
-                counted_points: counted_points.unwrap_or(self.config.counted_vote_points),
-                uncounted_points: uncounted_points.unwrap_or(self.config.uncounted_vote_points)
-            },
-            status: VoteStatus::Closed,
-            participation,
-            result: Some(VoteResult::Formal {
-                counted: VoteCount { yes: 0, no: 0 }, // We don't know the actual counts
-                uncounted: VoteCount { yes: 0, no: 0 }, // We don't know the actual counts
-                passed,
-            }),
-            opened_at: Utc::now(), // Use import time as a placeholder
-            closed_at: Some(Utc::now()), // Use import time as a placeholder
-            is_historical: true,
-            votes: HashMap::new(), // Empty, as we don't know individual votes
-        };
-
-        let vote_id = vote.id;
-
+        vote.set_result(Some(result));
+    
+        // Set dates (using current time as a placeholder)
+        let now = Utc::now();
+        vote.set_opened_at(now);
+        vote.set_closed_at(Some(now));
+    
+        let vote_id = vote.id();
         self.state.votes.insert(vote_id, vote);
-
+    
         // Update proposal status based on vote result
         let proposal = self.state.proposals.get_mut(&proposal_id)
             .ok_or_else(|| format!("Proposal not found: {}", proposal_id))?;
@@ -589,9 +571,9 @@ impl BudgetSystem {
             proposal.reject()?;
         }
         proposal.set_status(ProposalStatus::Closed);
-
+    
         self.save_state()?;
-
+    
         Ok(vote_id)
     }
 
@@ -746,7 +728,7 @@ impl BudgetSystem {
     fn print_team_vote_participation(&self, team_name: &str, epoch_name: Option<&str>) -> Result<String, Box<dyn Error>> {
         let team_id = self.get_team_id_by_name(team_name)
             .ok_or_else(|| format!("Team not found: {}", team_name))?;
-
+    
         let epoch = if let Some(name) = epoch_name {
             self.state.epochs.values()
                 .find(|e| e.name() == name)
@@ -755,19 +737,19 @@ impl BudgetSystem {
             self.get_current_epoch()
                 .ok_or("No active epoch and no epoch specified")?
         };
-
+    
         let mut report = format!("Vote Participation Report for Team: {}\n", team_name);
         report.push_str(&format!("Epoch: {} ({})\n\n", epoch.name(), epoch.id()));
         let mut vote_reports = Vec::new();
         let mut total_points = 0;
-
+    
         for vote_id in epoch.associated_proposals().iter()
             .filter_map(|proposal_id| self.state.votes.values()
-                .find(|v| v.proposal_id == *proposal_id)
-                .map(|v| v.id)) 
+                .find(|v| v.proposal_id() == *proposal_id)
+                .map(|v| v.id())) 
         {
             let vote = &self.state.votes[&vote_id];
-            let (participation_status, points) = match (&vote.vote_type, &vote.participation) {
+            let (participation_status, points) = match (vote.vote_type(), vote.participation()) {
                 (VoteType::Formal { counted_points, uncounted_points, .. }, VoteParticipation::Formal { counted, uncounted }) => {
                     if counted.contains(&team_id) {
                         (Some("Counted"), *counted_points)
@@ -786,26 +768,26 @@ impl BudgetSystem {
                 },
                 _ => (None, 0),
             };
-
+    
             if let Some(status) = participation_status {
-                let proposal = self.state.proposals.get(&vote.proposal_id)
+                let proposal = self.state.proposals.get(&vote.proposal_id())
                     .ok_or_else(|| format!("Proposal not found for vote: {}", vote_id))?;
-
-                let vote_type = match vote.vote_type {
+    
+                let vote_type = match vote.vote_type() {
                     VoteType::Formal { .. } => "Formal",
                     VoteType::Informal => "Informal",
                 };
-
-                let result = match vote.get_result() {
-                    Some(true) => "Passed",
-                    Some(false) => "Failed",
+    
+                let result = match vote.result() {
+                    Some(VoteResult::Formal { passed, .. }) => if *passed { "Passed" } else { "Failed" },
+                    Some(VoteResult::Informal { .. }) => "N/A (Informal)",
                     None => "Pending",
                 };
-
+    
                 total_points += points;
-
+    
                 vote_reports.push((
-                    vote.opened_at,
+                    vote.opened_at(),
                     format!(
                         "Vote ID: {}\n\
                         Proposal: {}\n\
@@ -818,22 +800,22 @@ impl BudgetSystem {
                 ));
             }
         }
-
+    
         // Sort vote reports by date, most recent first
         vote_reports.sort_by(|a, b| b.0.cmp(&a.0));
-
+    
         // Add total points to the report
         report.push_str(&format!("Total Points Earned: {}\n\n", total_points));
-
+    
         // Add individual vote reports
         for (_, vote_report) in &vote_reports {
             report.push_str(vote_report);
         }
-
+    
         if vote_reports.is_empty() {
             report.push_str("This team has not participated in any votes during this epoch.\n");
         }
-
+    
         Ok(report)
     }
 
@@ -1068,16 +1050,22 @@ impl BudgetSystem {
         vote_opened: Option<NaiveDate>,
         vote_closed: Option<NaiveDate>,
     ) -> Result<(), Box<dyn Error>> {
-        let vote = self.state.votes.get_mut(&vote_id).unwrap();
+        let vote = self.state.votes.get_mut(&vote_id).ok_or("Vote not found")?;
+        
         if let Some(opened) = vote_opened {
-            vote.opened_at = opened.and_hms_opt(0, 0, 0)
+            let opened_datetime = opened.and_hms_opt(0, 0, 0)
                 .map(|naive| Utc.from_utc_datetime(&naive))
-                .unwrap_or(vote.opened_at);
+                .ok_or("Invalid opened date")?;
+            vote.set_opened_at(opened_datetime);
         }
+        
         if let Some(closed) = vote_closed {
-            vote.closed_at = closed.and_hms_opt(23, 59, 59)
-                .map(|naive| Utc.from_utc_datetime(&naive));
+            let closed_datetime = closed.and_hms_opt(23, 59, 59)
+                .map(|naive| Utc.from_utc_datetime(&naive))
+                .ok_or("Invalid closed date")?;
+            vote.set_closed_at(Some(closed_datetime));
         }
+        
         Ok(())
     }
     
@@ -1121,28 +1109,28 @@ impl BudgetSystem {
 
     fn generate_vote_report(&self, vote_id: Uuid) -> Result<String, Box<dyn Error>> {
         let vote = self.state.votes.get(&vote_id).ok_or("Vote not found")?;
-        let proposal = self.state.proposals.get(&vote.proposal_id).ok_or("Proposal not found")?;
+        let proposal = self.state.proposals.get(&vote.proposal_id()).ok_or("Proposal not found")?;
         let raffle = self.state.raffles.values()
-            .find(|r| r.config().proposal_id() == vote.proposal_id)
+            .find(|r| r.config().proposal_id() == vote.proposal_id())
             .ok_or("Associated raffle not found")?;
     
-        let (counted, uncounted) = vote.get_vote_counts().ok_or("Vote counts not available")?;
-        let counted_yes = counted.yes;
-        let counted_no = counted.no;
+        let (counted, uncounted) = vote.vote_counts().ok_or("Vote counts not available")?;
+        let counted_yes = counted.yes();
+        let counted_no = counted.no();
         let total_counted_votes = counted_yes + counted_no;
         
-        let total_eligible_seats = match vote.vote_type {
+        let total_eligible_seats = match vote.vote_type() {
             VoteType::Formal { total_eligible_seats, .. } => total_eligible_seats,
-            _ => 0,
+            _ => &0,
         };
     
         // Calculate absent votes for counted seats only
         let absent = total_eligible_seats.saturating_sub(total_counted_votes as u32);
-    
-        let status = if vote.get_result().unwrap_or(false) {
-            "Approved"
-        } else {
-            "Not approved"
+
+        let status = match vote.result() {
+            Some(VoteResult::Formal { passed, .. }) => if *passed { "Approved" } else { "Not Approved" },
+            Some(VoteResult::Informal { .. }) => "N/A (Informal)",
+            None => "Pending",
         };
     
         let deciding_teams: Vec<String> = raffle.deciding_teams().iter()
@@ -1152,12 +1140,12 @@ impl BudgetSystem {
             .collect();
     
         // Calculate uncounted votes
-        let total_uncounted_votes = uncounted.yes + uncounted.no;
+        let total_uncounted_votes = uncounted.yes() + uncounted.no();
         let total_uncounted_seats = raffle.result()
             .map(|result| result.uncounted().len())
             .unwrap_or(0) as u32;
 
-        let (counted_votes_info, uncounted_votes_info) = if let VoteParticipation::Formal { counted, uncounted } = &vote.participation {
+        let (counted_votes_info, uncounted_votes_info) = if let VoteParticipation::Formal { counted, uncounted } = &vote.participation() {
             let absent_counted: Vec<String> = raffle.result().expect("Raffle result not found").counted().iter()
                 .filter(|&team_id| !counted.contains(team_id))
                 .filter_map(|&team_id| self.state.current_state.teams.get(&team_id).map(|team| team.name().to_string()))
@@ -1296,13 +1284,19 @@ def hello_world():
             report.push_str(&format!("This proposal was resolved in {} days from its announcement date. ", resolution_days));
         }
     
-        if let Some(vote) = self.state.votes.values().find(|v| v.proposal_id == proposal_id) {
-            if let Some(result) = vote.get_result() {
-                let (yes_votes, no_votes) = vote.get_vote_counts()
-                    .map(|(counted, _)| (counted.yes, counted.no))
-                    .unwrap_or((0, 0));
-                report.push_str(&format!("The proposal was {} with {} votes in favor and {} votes against. ", 
-                    if result { "approved" } else { "not approved" }, yes_votes, no_votes));
+        if let Some(vote) = self.state.votes.values().find(|v| v.proposal_id() == proposal_id) {
+            if let Some(result) = vote.result() {
+                match result {
+                    VoteResult::Formal { counted, uncounted, passed } => {
+                        report.push_str(&format!("The proposal was {} with {} votes in favor and {} votes against. ", 
+                            if *passed { "approved" } else { "not approved" }, 
+                            counted.yes(), counted.yes() + uncounted.yes()));
+                    },
+                    VoteResult::Informal { count } => {
+                        report.push_str(&format!("This was an informal vote with {} votes in favor and {} votes against. ", 
+                            count.yes(), count.no()));
+                    }
+                }
             }
         } else {
             report.push_str("No voting information is available for this proposal. ");
@@ -1358,10 +1352,10 @@ def hello_world():
             report.push_str(&format!("- **Total Counted Seats**: {}\n", raffle.config().total_counted_seats()));
             report.push_str(&format!("- **Max Earner Seats**: {}\n", raffle.config().max_earner_seats()));
             report.push_str(&format!("- **Is Historical**: {}\n\n", raffle.config().is_historical()));
-
+    
             // Team Snapshots
             report.push_str(&self.generate_team_snapshots_table(raffle));
-
+    
             // Raffle Outcome
             if let Some(result) = raffle.result() {
                 report.push_str("### Raffle Outcome\n\n");
@@ -1370,52 +1364,57 @@ def hello_world():
         } else {
             report.push_str("## Raffle Information\n\nNo raffle was conducted for this proposal.\n\n");
         }
-
+    
         // Voting Information
-        if let Some(vote) = self.state.votes.values().find(|v| v.proposal_id == proposal_id) {
+        if let Some(vote) = self.state.votes.values().find(|v| v.proposal_id() == proposal_id) {
             report.push_str("## Voting Information\n\n");
             report.push_str("### Vote Details\n\n");
-            report.push_str(&format!("- **Vote ID**: {}\n", vote.id));
-            report.push_str(&format!("- **Type**: {:?}\n", vote.vote_type));
-            report.push_str(&format!("- **Status**: {:?}\n", vote.status));
-            report.push_str(&format!("- **Opened**: {}\n", vote.opened_at.format("%Y-%m-%d %H:%M:%S")));
-            if let Some(closed_at) = vote.closed_at {
+            report.push_str(&format!("- **Vote ID**: {}\n", vote.id()));
+            report.push_str(&format!("- **Type**: {:?}\n", vote.vote_type()));
+            report.push_str(&format!("- **Status**: {:?}\n", vote.status()));
+            report.push_str(&format!("- **Opened**: {}\n", vote.opened_at().format("%Y-%m-%d %H:%M:%S")));
+            if let Some(closed_at) = vote.closed_at() {
                 report.push_str(&format!("- **Closed**: {}\n", closed_at.format("%Y-%m-%d %H:%M:%S")));
             }
-            if let Some(result) = vote.get_result() {
-                report.push_str(&format!("- **Result**: {}\n\n", if result { "Passed" } else { "Not Passed" }));
+            if let Some(result) = vote.result() {
+                match result {
+                    VoteResult::Formal { passed, .. } => {
+                        report.push_str(&format!("- **Result**: {}\n\n", if *passed { "Passed" } else { "Not Passed" }));
+                    },
+                    VoteResult::Informal { .. } => {
+                        report.push_str("- **Result**: Informal (No Pass/Fail)\n\n");
+                    }
+                }
             }
-
+    
             // Participation
             report.push_str("### Participation\n\n");
             report.push_str(&self.generate_vote_participation_tables(vote));
-
+    
             // Vote Counts
-            if vote.is_vote_count_available() {
+            if !vote.is_historical() {
                 report.push_str("### Vote Counts\n");
-                match vote.vote_type {
+                match vote.vote_type() {
                     VoteType::Formal { total_eligible_seats, .. } => {
-                        if let Some((counted, uncounted)) = vote.get_vote_counts() {
-                            let absent = total_eligible_seats as i32 - (counted.yes + counted.no) as i32;
+                        if let Some(VoteResult::Formal { counted, uncounted, .. }) = vote.result() {
+                            let absent = *total_eligible_seats as i32 - (counted.yes() + counted.no()) as i32;
                             
                             report.push_str("#### Counted Votes\n");
-                            report.push_str(&format!("- **Yes**: {}\n", counted.yes));
-                            report.push_str(&format!("- **No**: {}\n", counted.no));
+                            report.push_str(&format!("- **Yes**: {}\n", counted.yes()));
+                            report.push_str(&format!("- **No**: {}\n", counted.no()));
                             if absent > 0 {
                                 report.push_str(&format!("- **Absent**: {}\n", absent));
                             }
-
+    
                             report.push_str("\n#### Uncounted Votes\n");
-                            report.push_str(&format!("- **Yes**: {}\n", uncounted.yes));
-                            report.push_str(&format!("- **No**: {}\n", uncounted.no));
+                            report.push_str(&format!("- **Yes**: {}\n", uncounted.yes()));
+                            report.push_str(&format!("- **No**: {}\n", uncounted.no()));
                         }
                     },
                     VoteType::Informal => {
-                        if let Some((counted, uncounted)) = vote.get_vote_counts() {
-                            let total_yes = counted.yes + uncounted.yes;
-                            let total_no = counted.no + uncounted.no;
-                            report.push_str(&format!("- **Yes**: {}\n", total_yes));
-                            report.push_str(&format!("- **No**: {}\n", total_no));
+                        if let Some(VoteResult::Informal { count }) = vote.result() {
+                            report.push_str(&format!("- **Yes**: {}\n", count.yes()));
+                            report.push_str(&format!("- **No**: {}\n", count.no()));
                         }
                     }
                 }
@@ -1425,7 +1424,7 @@ def hello_world():
         } else {
             report.push_str("## Voting Information\n\nNo vote was conducted for this proposal.\n\n");
         }
-
+    
         Ok(report)
     }
 
@@ -1509,7 +1508,7 @@ def hello_world():
     fn generate_vote_participation_tables(&self, vote: &Vote) -> String {
         let mut tables = String::new();
 
-        match &vote.participation {
+        match &vote.participation() {
             VoteParticipation::Formal { counted, uncounted } => {
                 tables.push_str("#### Counted Votes\n");
                 tables.push_str("| Team | Points Credited |\n");
@@ -1644,8 +1643,8 @@ def hello_world():
 
             for proposal_id in epoch.associated_proposals() {
                 if let Some(proposal) = self.state.proposals.get(&proposal_id) {
-                    if let Some(vote) = self.state.votes.values().find(|v| v.proposal_id == *proposal_id) {
-                        let (participation_type, points) = match (&vote.vote_type, &vote.participation) {
+                    if let Some(vote) = self.state.votes.values().find(|v| v.proposal_id() == *proposal_id) {
+                        let (participation_type, points) = match (vote.vote_type(), vote.participation()) {
                             (VoteType::Formal { counted_points, uncounted_points, .. }, VoteParticipation::Formal { counted, uncounted }) => {
                                 if counted.contains(team_id) {
                                     ("Counted", *counted_points)
@@ -1698,8 +1697,8 @@ def hello_world():
         let mut total_points = 0;
 
         for proposal_id in epoch.associated_proposals() {
-            if let Some(vote) = self.state.votes.values().find(|v| v.proposal_id == *proposal_id) {
-                if let (VoteType::Formal { counted_points, uncounted_points, .. }, VoteParticipation::Formal { counted, uncounted }) = (&vote.vote_type, &vote.participation) {
+            if let Some(vote) = self.state.votes.values().find(|v| v.proposal_id() == *proposal_id) {
+                if let (VoteType::Formal { counted_points, uncounted_points, .. }, VoteParticipation::Formal { counted, uncounted }) = (vote.vote_type(), vote.participation()) {
                     if counted.contains(&team_id) {
                         total_points += counted_points;
                     } else if uncounted.contains(&team_id) {
@@ -1792,8 +1791,8 @@ def hello_world():
         };
 
         epoch.associated_proposals().iter()
-            .filter_map(|proposal_id| self.state.votes.values().find(|v| v.proposal_id == *proposal_id))
-            .map(|vote| match (&vote.vote_type, &vote.participation) {
+            .filter_map(|proposal_id| self.state.votes.values().find(|v| v.proposal_id() == *proposal_id))
+            .map(|vote| match (vote.vote_type(), vote.participation()) {
                 (VoteType::Formal { counted_points, uncounted_points, .. }, VoteParticipation::Formal { counted, uncounted }) => {
                     if counted.contains(&team_id) {
                         *counted_points
@@ -1976,8 +1975,8 @@ def hello_world():
         let mut uncounted = 0;
 
         for vote in self.state.votes.values() {
-            if vote.epoch_id == epoch_id {
-                match &vote.participation {
+            if vote.epoch_id() == epoch_id {
+                match vote.participation() {
                     VoteParticipation::Formal { counted: c, uncounted: u } => {
                         if c.contains(&team_id) {
                             counted += 1;
@@ -2191,7 +2190,7 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
             )?;
 
             let vote = budget_system.state.votes.get(&vote_id).unwrap();
-            let proposal = budget_system.state.proposals.get(&vote.proposal_id).unwrap();
+            let proposal = budget_system.state.proposals.get(&vote.proposal_id()).unwrap();
 
             println!("Imported historical vote for proposal '{}' (Vote ID: {})", proposal_name, vote_id);
             println!("Vote passed: {}", passed);
@@ -2201,9 +2200,9 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                 println!("  {}", team_name);
             }
 
-            if let VoteType::Formal { raffle_id, .. } = vote.vote_type {
+            if let VoteType::Formal { raffle_id, .. } = vote.vote_type() {
                 if let Some(raffle) = budget_system.state.raffles.get(&raffle_id) {
-                    if let VoteParticipation::Formal { counted, uncounted } = &vote.participation {
+                    if let VoteParticipation::Formal { counted, uncounted } = vote.participation() {
                         println!("\nCounted seats:");
                         for &team_id in counted {
                             if let Some(team) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
@@ -2508,13 +2507,13 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                 
                     // Print point credits
                     if let Some(vote_id) = budget_system.state.votes.values()
-                        .find(|v| v.proposal_id == budget_system.get_proposal_id_by_name(&proposal_name).unwrap())
-                        .map(|v| v.id)
+                        .find(|v| v.proposal_id() == budget_system.get_proposal_id_by_name(&proposal_name).unwrap())
+                        .map(|v| v.id())
                     {
                         let vote = budget_system.state.votes.get(&vote_id).unwrap();
                         
                         println!("\nPoints credited:");
-                        if let VoteParticipation::Formal { counted, uncounted } = &vote.participation {
+                        if let VoteParticipation::Formal { counted, uncounted } = &vote.participation() {
                             for &team_id in counted {
                                 if let Some(team) = budget_system.state.current_state.teams.get(&team_id) {
                                     println!("  {} (+{} points)", team.name(), config.counted_vote_points);
