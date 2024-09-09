@@ -517,15 +517,17 @@ impl BudgetSystem {
         let raffle = &self.state.raffles.get(&raffle_id)
             .ok_or("Raffle not found")?;
 
-        if raffle.result.is_none() {
+        if raffle.result().is_none() {
             return Err("Raffle results have not been generated");
         }
+
+        let config = raffle.config();
 
         let vote = Vote::new_formal(
             proposal_id,
             epoch_id,
             raffle_id, 
-            raffle.config.total_counted_seats as u32,
+            config.total_counted_seats() as u32,
             threshold,
             &self.config
         );
@@ -558,15 +560,15 @@ impl BudgetSystem {
         match &vote.vote_type {
             VoteType::Formal { raffle_id, .. } => {
                 let raffle = self.state.raffles.get(raffle_id).ok_or("Associated raffle not found")?;
-                let raffle_result = raffle.result.as_ref().ok_or("Raffle teams have not been selected")?;
+                let raffle_result = raffle.result().ok_or("Raffle teams have not been selected")?;
 
                 let mut counted_votes = Vec::new();
                 let mut uncounted_votes = Vec::new();
 
                 for (team_id, choice) in votes {
-                    if raffle_result.counted.contains(&team_id) {
+                    if raffle_result.counted().contains(&team_id) {
                         counted_votes.push((team_id, choice));
-                    } else if raffle_result.uncounted.contains(&team_id) {
+                    } else if raffle_result.uncounted().contains(&team_id) {
                         uncounted_votes.push((team_id, choice));
                     }
                     // Votes from teams not in the raffle result are silently ignored
@@ -699,6 +701,10 @@ impl BudgetSystem {
         get_id_by_name(&self.state.proposals, name)
     }
 
+    pub fn get_raffle_id_by_name(&self, name: &str) -> Option<Uuid> {
+        get_id_by_name(&self.state.raffles, name)
+    }
+
     fn import_predefined_raffle(
         &mut self,
         proposal_name: &str,
@@ -737,28 +743,24 @@ impl BudgetSystem {
             ).into());
         }
 
-        let raffle_config = RaffleConfig {
+        let raffle_config = RaffleConfig::new(
             proposal_id,
             epoch_id,
-            initiation_block: 0,
-            randomness_block: 0,
-            block_randomness: "N/A".to_string(),
             total_counted_seats,
             max_earner_seats,
-            excluded_teams: Vec::new(),
-            custom_allocation: None,
-            custom_team_order: Some(counted_team_ids.iter().chain(uncounted_team_ids.iter()).cloned().collect()),
-            is_historical: true,
-        };
+            Some(0),
+            Some(0),
+            Some("N/A".to_string()),
+            Some(Vec::new()),
+            None,
+            Some(counted_team_ids.iter().chain(uncounted_team_ids.iter()).cloned().collect()),
+            true,
+        );
 
         let mut raffle = Raffle::new(raffle_config, &self.state.current_state.teams)?;
-        
-        raffle.result = Some(RaffleResult {
-            counted: counted_team_ids,
-            uncounted: uncounted_team_ids,
-        });
+        raffle.set_result(RaffleResult::new(counted_team_ids, uncounted_team_ids));
 
-        let raffle_id = raffle.id;
+        let raffle_id = raffle.id();
         self.state.raffles.insert(raffle_id, raffle);
         self.save_state()?;
 
@@ -777,15 +779,13 @@ impl BudgetSystem {
         let proposal_id = self.get_proposal_id_by_name(proposal_name)
             .ok_or_else(|| format!("Proposal not found: {}", proposal_name))?;
 
-        let raffle_id = self.state.raffles.iter()
-            .find(|(_, raffle)| raffle.config.proposal_id == proposal_id)
-            .map(|(id, _)| *id)
+        let raffle_id = self.get_raffle_id_by_name(proposal_name)
             .ok_or_else(|| format!("No raffle found for proposal: {}", proposal_name))?;
 
         let raffle = self.state.raffles.get(&raffle_id)
             .ok_or_else(|| format!("Raffle not found: {}", raffle_id))?;
 
-        let epoch_id = raffle.config.epoch_id;
+        let epoch_id = raffle.config().epoch_id();
 
         let (participating_ids, _) = self.determine_participation(
             raffle,
@@ -795,11 +795,11 @@ impl BudgetSystem {
 
         let participation = VoteParticipation::Formal {
             counted: participating_ids.iter()
-                .filter(|&id| raffle.result.as_ref().unwrap().counted.contains(id))
+                .filter(|&id| raffle.result().unwrap().counted().contains(id))
                 .cloned()
                 .collect(),
             uncounted: participating_ids.iter()
-                .filter(|&id| raffle.result.as_ref().unwrap().uncounted.contains(id))
+                .filter(|&id| raffle.result().unwrap().uncounted().contains(id))
                 .cloned()
                 .collect(),
         };
@@ -810,7 +810,7 @@ impl BudgetSystem {
             epoch_id,
             vote_type: VoteType::Formal {
                 raffle_id,
-                total_eligible_seats: raffle.config.total_counted_seats as u32,
+                total_eligible_seats: raffle.config().total_counted_seats() as u32,
                 threshold: self.config.default_qualified_majority_threshold,
                 counted_points: counted_points.unwrap_or(self.config.counted_vote_points),
                 uncounted_points: uncounted_points.unwrap_or(self.config.uncounted_vote_points)
@@ -854,11 +854,11 @@ impl BudgetSystem {
         participating_teams: &[String],
         non_participating_teams: &[String]
     ) -> Result<(Vec<Uuid>, Vec<Uuid>), Box<dyn Error>> {
-        let raffle_result = raffle.result.as_ref()
+        let raffle_result = raffle.result()
             .ok_or("Raffle result not found")?;
 
-        let all_team_ids: Vec<Uuid> = raffle_result.counted.iter()
-            .chain(raffle_result.uncounted.iter())
+        let all_team_ids: Vec<Uuid> = raffle_result.counted().iter()
+            .chain(raffle_result.uncounted().iter())
             .cloned()
             .collect();
 
@@ -1108,23 +1108,23 @@ impl BudgetSystem {
                 .collect::<Vec<Uuid>>()
         }).unwrap_or_else(Vec::new);
 
-        let raffle_config = RaffleConfig {
+        let raffle_config = RaffleConfig::new(
             proposal_id,
             epoch_id,
-            initiation_block: 0,
-            randomness_block: 0,
-            block_randomness: String::new(),
-            total_counted_seats: app_config.default_total_counted_seats,
-            max_earner_seats: app_config.default_max_earner_seats,
-            excluded_teams: excluded_team_ids,
-            custom_allocation: None,
-            custom_team_order: None,
-            is_historical: false,
-        };
+            app_config.default_total_counted_seats,
+            app_config.default_max_earner_seats,
+            Some(0),
+            Some(0),
+            Some(String::new()),
+            Some(excluded_team_ids),
+            None,
+            None,
+            false
+        );
 
         let raffle = Raffle::new(raffle_config, &self.state.current_state.teams)?;
-        let raffle_id = raffle.id;
-        let tickets = raffle.tickets.clone();
+        let raffle_id = raffle.id();
+        let tickets = raffle.tickets().to_vec();
         
         self.state.raffles.insert(raffle_id, raffle);
         self.save_state()?;
@@ -1168,26 +1168,26 @@ impl BudgetSystem {
         if max_earner_seats > total_counted_seats {
             return Err("max_earner_seats cannot be greater than total_counted_seats".into());
         }
-    
-        let raffle_config = RaffleConfig {
+
+        let raffle_config = RaffleConfig::new(
             proposal_id,
             epoch_id,
-            initiation_block,
-            randomness_block,
-            block_randomness: randomness.clone(),
             total_counted_seats,
             max_earner_seats,
-            excluded_teams: excluded_team_ids,
-            custom_allocation: None,
+            Some(initiation_block),
+            Some(randomness_block),
+            Some(randomness),
+            Some(excluded_team_ids),
+            None,
             custom_team_order,
-            is_historical: true,
-        };
+            true
+        );
     
         let mut raffle = Raffle::new(raffle_config, &self.state.current_state.teams)?;
-        raffle.generate_scores()?;
-        raffle.select_teams();
+        raffle.generate_ticket_scores()?;
+        raffle.select_deciding_teams();
     
-        let raffle_id = raffle.id;
+        let raffle_id = raffle.id();
         self.state.raffles.insert(raffle_id, raffle.clone());
         self.save_state()?;
     
@@ -1198,12 +1198,12 @@ impl BudgetSystem {
         let raffle = self.state.raffles.get_mut(&raffle_id)
             .ok_or_else(|| format!("Raffle not found: {}", raffle_id))?;
     
-        raffle.config.initiation_block = initiation_block;
-        raffle.config.randomness_block = randomness_block;
-        raffle.config.block_randomness = randomness;
+        raffle.config_mut().set_initiation_block(initiation_block);
+        raffle.config_mut().set_randomness_block(randomness_block);
+        raffle.config_mut().set_block_randomness(randomness);
     
-        raffle.generate_scores()?;
-        raffle.select_teams();
+        raffle.generate_ticket_scores()?;
+        raffle.select_deciding_teams();
     
         let raffle_clone = raffle.clone();
         self.save_state()?;
@@ -1216,19 +1216,19 @@ impl BudgetSystem {
         let mut current_team: Option<(String, u64, u64)> = None;
 
         for ticket in tickets {
-            let team_name = self.state.current_state.teams.get(&ticket.team_id)
+            let team_name = self.state.current_state.teams.get(&ticket.team_id())
                 .map(|team| team.name().to_string())
-                .unwrap_or_else(|| format!("Unknown Team ({})", ticket.team_id));
+                .unwrap_or_else(|| format!("Unknown Team ({})", ticket.team_id()));
 
             match &mut current_team {
                 Some((name, _, end)) if *name == team_name => {
-                    *end = ticket.index;
+                    *end = ticket.index();
                 }
                 _ => {
                     if let Some(team) = current_team.take() {
                         grouped_tickets.push(team);
                     }
-                    current_team = Some((team_name, ticket.index, ticket.index));
+                    current_team = Some((team_name, ticket.index(), ticket.index()));
                 }
             }
         }
@@ -1293,9 +1293,7 @@ impl BudgetSystem {
         let proposal_id = self.get_proposal_id_by_name(proposal_name)
             .ok_or_else(|| format!("Proposal not found: {}", proposal_name))?;
         
-        let raffle_id = self.state.raffles.iter()
-            .find(|(_, raffle)| raffle.config.proposal_id == proposal_id)
-            .map(|(id, _)| *id)
+        let raffle_id = self.get_raffle_id_by_name(proposal_name)
             .ok_or_else(|| format!("No raffle found for proposal: {}", proposal_name))?;
     
         Ok((proposal_id, raffle_id))
@@ -1310,7 +1308,7 @@ impl BudgetSystem {
         let raffle = self.state.raffles.get(&raffle_id)
             .ok_or_else(|| format!("Raffle not found: {}", raffle_id))?;
     
-        if raffle.result.is_none() {
+        if !raffle.is_completed() {
             return Err("Raffle has not been conducted yet".into());
         }
     
@@ -1378,7 +1376,7 @@ impl BudgetSystem {
         let vote = self.state.votes.get(&vote_id).ok_or("Vote not found")?;
         let proposal = self.state.proposals.get(&vote.proposal_id).ok_or("Proposal not found")?;
         let raffle = self.state.raffles.values()
-            .find(|r| r.config.proposal_id == vote.proposal_id)
+            .find(|r| r.config().proposal_id() == vote.proposal_id)
             .ok_or("Associated raffle not found")?;
     
         let (counted, uncounted) = vote.get_vote_counts().ok_or("Vote counts not available")?;
@@ -1400,7 +1398,7 @@ impl BudgetSystem {
             "Not approved"
         };
     
-        let deciding_teams: Vec<String> = raffle.get_deciding_teams().iter()
+        let deciding_teams: Vec<String> = raffle.deciding_teams().iter()
             .filter_map(|&team_id| {
                 self.state.current_state.teams.get(&team_id).map(|team| team.name().to_string())
             })
@@ -1408,17 +1406,17 @@ impl BudgetSystem {
     
         // Calculate uncounted votes
         let total_uncounted_votes = uncounted.yes + uncounted.no;
-        let total_uncounted_seats = raffle.result.as_ref()
-            .map(|result| result.uncounted.len())
+        let total_uncounted_seats = raffle.result()
+            .map(|result| result.uncounted().len())
             .unwrap_or(0) as u32;
 
         let (counted_votes_info, uncounted_votes_info) = if let VoteParticipation::Formal { counted, uncounted } = &vote.participation {
-            let absent_counted: Vec<String> = raffle.result.as_ref().unwrap().counted.iter()
+            let absent_counted: Vec<String> = raffle.result().expect("Raffle result not found").counted().iter()
                 .filter(|&team_id| !counted.contains(team_id))
                 .filter_map(|&team_id| self.state.current_state.teams.get(&team_id).map(|team| team.name().to_string()))
                 .collect();
 
-            let absent_uncounted: Vec<String> = raffle.result.as_ref().unwrap().uncounted.iter()
+            let absent_uncounted: Vec<String> = raffle.result().expect("Raffle result not found").uncounted().iter()
                 .filter(|&team_id| !uncounted.contains(team_id))
                 .filter_map(|&team_id| self.state.current_state.teams.get(&team_id).map(|team| team.name().to_string()))
                 .collect();
@@ -1466,10 +1464,10 @@ impl BudgetSystem {
         counted_votes: &HashMap<String, VoteChoice>,
         uncounted_votes: &HashMap<String, VoteChoice>,
     ) -> Result<(), Box<dyn Error>> {
-        let raffle_result = raffle.result.as_ref().ok_or("Raffle result not found")?;
+        let raffle_result = raffle.result().ok_or("Raffle result not found")?;
     
-        let counted_team_ids: HashSet<_> = raffle_result.counted.iter().cloned().collect();
-        let uncounted_team_ids: HashSet<_> = raffle_result.uncounted.iter().cloned().collect();
+        let counted_team_ids: HashSet<_> = raffle_result.counted().iter().cloned().collect();
+        let uncounted_team_ids: HashSet<_> = raffle_result.uncounted().iter().cloned().collect();
     
         for team_name in counted_votes.keys() {
             let team_id = self.get_team_id_by_name(team_name)
@@ -1603,22 +1601,22 @@ def hello_world():
         }
     
         // Raffle Information
-        if let Some(raffle) = self.state.raffles.values().find(|r| r.config.proposal_id == proposal_id) {
+        if let Some(raffle) = self.state.raffles.values().find(|r| r.config().proposal_id() == proposal_id) {
             report.push_str("## Raffle Information\n\n");
-            report.push_str(&format!("- **Raffle ID**: {}\n", raffle.id));
-            report.push_str(&format!("- **Initiation Block**: {}\n", raffle.config.initiation_block));
+            report.push_str(&format!("- **Raffle ID**: {}\n", raffle.id()));
+            report.push_str(&format!("- **Initiation Block**: {}\n", raffle.config().initiation_block()));
             report.push_str(&format!("- **Randomness Block**: [{}]({})\n", 
-                raffle.config.randomness_block, raffle.get_etherscan_url()));
-            report.push_str(&format!("- **Block Randomness**: {}\n", raffle.config.block_randomness));
-            report.push_str(&format!("- **Total Counted Seats**: {}\n", raffle.config.total_counted_seats));
-            report.push_str(&format!("- **Max Earner Seats**: {}\n", raffle.config.max_earner_seats));
-            report.push_str(&format!("- **Is Historical**: {}\n\n", raffle.config.is_historical));
+                raffle.config().randomness_block(), raffle.etherscan_url()));
+            report.push_str(&format!("- **Block Randomness**: {}\n", raffle.config().block_randomness()));
+            report.push_str(&format!("- **Total Counted Seats**: {}\n", raffle.config().total_counted_seats()));
+            report.push_str(&format!("- **Max Earner Seats**: {}\n", raffle.config().max_earner_seats()));
+            report.push_str(&format!("- **Is Historical**: {}\n\n", raffle.config().is_historical()));
 
             // Team Snapshots
             report.push_str(&self.generate_team_snapshots_table(raffle));
 
             // Raffle Outcome
-            if let Some(result) = &raffle.result {
+            if let Some(result) = raffle.result() {
                 report.push_str("### Raffle Outcome\n\n");
                 self.generate_raffle_outcome(&mut report, raffle, result);
             }
@@ -1689,18 +1687,18 @@ def hello_world():
         table.push_str("| Team Name | Status | Revenue | Ballot Range | Ticket Count |\n");
         table.push_str("|-----------|--------|---------|--------------|--------------|\n");
 
-        for snapshot in &raffle.team_snapshots {
-            let team_name = &snapshot.name;
-            let status = format!("{:?}", snapshot.status);
-            let revenue = match &snapshot.status {
+        for snapshot in raffle.team_snapshots() {
+            let team_name = snapshot.name();
+            let status = format!("{:?}", snapshot.status());
+            let revenue = match snapshot.status() {
                 TeamStatus::Earner { trailing_monthly_revenue } => format!("{:?}", trailing_monthly_revenue),
                 _ => "N/A".to_string(),
             };
-            let tickets: Vec<_> = raffle.tickets.iter()
-                .filter(|t| t.team_id == snapshot.id)
+            let tickets: Vec<_> = raffle.tickets().iter()
+                .filter(|t| t.team_id() == snapshot.id())
                 .collect();
             let ballot_range = if !tickets.is_empty() {
-                format!("{} - {}", tickets.first().unwrap().index, tickets.last().unwrap().index)
+                format!("{} - {}", tickets.first().unwrap().index(), tickets.last().unwrap().index())
             } else {
                 "N/A".to_string()
             };
@@ -1715,48 +1713,48 @@ def hello_world():
     }
 
     fn generate_raffle_outcome(&self, report: &mut String, raffle: &Raffle, result: &RaffleResult) {
-        let counted_earners: Vec<_> = result.counted.iter()
-            .filter(|&team_id| raffle.team_snapshots.iter().any(|s| s.id == *team_id && matches!(s.status, TeamStatus::Earner { .. })))
+        let counted_earners: Vec<_> = result.counted().iter()
+            .filter(|&team_id| raffle.team_snapshots().iter().any(|s| s.id() == *team_id && matches!(s.status(), TeamStatus::Earner { .. })))
             .collect();
-        let counted_supporters: Vec<_> = result.counted.iter()
-            .filter(|&team_id| raffle.team_snapshots.iter().any(|s| s.id == *team_id && matches!(s.status, TeamStatus::Supporter)))
+        let counted_supporters: Vec<_> = result.counted().iter()
+            .filter(|&team_id| raffle.team_snapshots().iter().any(|s| s.id() == *team_id && matches!(s.status(), TeamStatus::Supporter)))
             .collect();
     
-        report.push_str(&format!("#### Counted Seats (Total: {})\n\n", result.counted.len()));
+        report.push_str(&format!("#### Counted Seats (Total: {})\n\n", result.counted().len()));
         
         report.push_str(&format!("##### Earner Seats ({})\n", counted_earners.len()));
         for team_id in counted_earners {
-            if let Some(snapshot) = raffle.team_snapshots.iter().find(|s| s.id == *team_id) {
-                let best_score = raffle.tickets.iter()
-                    .filter(|t| t.team_id == *team_id)
-                    .map(|t| t.score)
+            if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == *team_id) {
+                let best_score = raffle.tickets().iter()
+                    .filter(|t| t.team_id() == *team_id)
+                    .map(|t| t.score())
                     .max_by(|a, b| a.partial_cmp(b).unwrap())
                     .unwrap_or(0.0);
-                report.push_str(&format!("- {} (Best Score: {:.4})\n", snapshot.name, best_score));
+                report.push_str(&format!("- {} (Best Score: {:.4})\n", snapshot.name(), best_score));
             }
         }
     
         report.push_str(&format!("\n##### Supporter Seats ({})\n", counted_supporters.len()));
         for team_id in counted_supporters {
-            if let Some(snapshot) = raffle.team_snapshots.iter().find(|s| s.id == *team_id) {
-                let best_score = raffle.tickets.iter()
-                    .filter(|t| t.team_id == *team_id)
-                    .map(|t| t.score)
+            if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == *team_id) {
+                let best_score = raffle.tickets().iter()
+                    .filter(|t| t.team_id() == *team_id)
+                    .map(|t| t.score())
                     .max_by(|a, b| a.partial_cmp(b).unwrap())
                     .unwrap_or(0.0);
-                report.push_str(&format!("- {} (Best Score: {:.4})\n", snapshot.name, best_score));
+                report.push_str(&format!("- {} (Best Score: {:.4})\n", snapshot.name(), best_score));
             }
         }
     
         report.push_str("\n#### Uncounted Seats\n");
-        for team_id in &result.uncounted {
-            if let Some(snapshot) = raffle.team_snapshots.iter().find(|s| s.id == *team_id) {
-                let best_score = raffle.tickets.iter()
-                    .filter(|t| t.team_id == *team_id)
-                    .map(|t| t.score)
+        for team_id in result.uncounted() {
+            if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == *team_id) {
+                let best_score = raffle.tickets().iter()
+                    .filter(|t| t.team_id() == *team_id)
+                    .map(|t| t.score())
                     .max_by(|a, b| a.partial_cmp(b).unwrap())
                     .unwrap_or(0.0);
-                report.push_str(&format!("- {} (Best Score: {:.4})\n", snapshot.name, best_score));
+                report.push_str(&format!("- {} (Best Score: {:.4})\n", snapshot.name(), best_score));
             }
         }
     }
@@ -2415,15 +2413,15 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
 
             // Print team snapshots
             println!("\nTeam Snapshots:");
-            for snapshot in &raffle.team_snapshots {
-                println!("  {} ({}): {:?}", snapshot.name, snapshot.id, snapshot.status);
+            for snapshot in raffle.team_snapshots() {
+                println!("  {} ({}): {:?}", snapshot.name(), snapshot.id(), snapshot.status());
             }
 
             // Print raffle result
-            if let Some(result) = &raffle.result {
+            if let Some(result) = raffle.result() {
                 println!("\nRaffle Result:");
-                println!("  Counted teams: {:?}", result.counted);
-                println!("  Uncounted teams: {:?}", result.uncounted);
+                println!("  Counted teams: {:?}", result.counted());
+                println!("  Uncounted teams: {:?}", result.uncounted());
             } else {
                 println!("\nRaffle result not available");
             }
@@ -2461,15 +2459,15 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                     if let VoteParticipation::Formal { counted, uncounted } = &vote.participation {
                         println!("\nCounted seats:");
                         for &team_id in counted {
-                            if let Some(team) = raffle.team_snapshots.iter().find(|s| s.id == team_id) {
-                                println!("  {} (+{} points)", team.name, config.counted_vote_points);
+                            if let Some(team) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
+                                println!("  {} (+{} points)", team.name(), config.counted_vote_points);
                             }
                         }
 
                         println!("\nUncounted seats:");
                         for &team_id in uncounted {
-                            if let Some(team) = raffle.team_snapshots.iter().find(|s| s.id == team_id) {
-                                println!("  {} (+{} points)", team.name, config.uncounted_vote_points);
+                            if let Some(team) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
+                                println!("  {} (+{} points)", team.name(), config.uncounted_vote_points);
                             }
                         }
                     }
@@ -2502,7 +2500,7 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
             ).await?;
 
             println!("Imported historical raffle for proposal '{}' (Raffle ID: {})", proposal_name, raffle_id);
-            println!("Randomness: {}", raffle.config.block_randomness);
+            println!("Randomness: {}", raffle.config().block_randomness());
 
             // Print excluded teams
             if let Some(excluded) = excluded_teams {
@@ -2510,76 +2508,76 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
             }
 
             // Print ballot ID ranges for each team
-            for snapshot in &raffle.team_snapshots {
-                let tickets: Vec<_> = raffle.tickets.iter()
-                    .filter(|t| t.team_id == snapshot.id)
+            for snapshot in raffle.team_snapshots() {
+                let tickets: Vec<_> = raffle.tickets().iter()
+                    .filter(|t| t.team_id() == snapshot.id())
                     .collect();
                 
                 if !tickets.is_empty() {
-                    let start = tickets.first().unwrap().index;
-                    let end = tickets.last().unwrap().index;
-                    println!("Team '{}' ballot range: {} - {}", snapshot.name, start, end);
+                    let start = tickets.first().unwrap().index();
+                    let end = tickets.last().unwrap().index();
+                    println!("Team '{}' ballot range: {} - {}", snapshot.name(), start, end);
                 }
             }
 
             // Print raffle results
-            if let Some(result) = &raffle.result {
+            if let Some(result) = raffle.result() {
                 println!("Counted seats:");
                 println!("Earner seats:");
                 let mut earner_count = 0;
-                for &team_id in &result.counted {
-                    if let Some(snapshot) = raffle.team_snapshots.iter().find(|s| s.id == team_id) {
-                        if let TeamStatus::Earner { .. } = snapshot.status {
+                for &team_id in result.counted() {
+                    if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
+                        if let TeamStatus::Earner { .. } = snapshot.status() {
                             earner_count += 1;
-                            let best_score = raffle.tickets.iter()
-                                .filter(|t| t.team_id == team_id)
-                                .map(|t| t.score)
+                            let best_score = raffle.tickets().iter()
+                                .filter(|t| t.team_id() == team_id)
+                                .map(|t| t.score())
                                 .max_by(|a, b| a.partial_cmp(b).unwrap())
                                 .unwrap_or(0.0);
-                            println!("  {} (score: {})", snapshot.name, best_score);
+                            println!("  {} (score: {})", snapshot.name(), best_score);
                         }
                     }
                 }
                 println!("Supporter seats:");
-                for &team_id in &result.counted {
-                    if let Some(snapshot) = raffle.team_snapshots.iter().find(|s| s.id == team_id) {
-                        if let TeamStatus::Supporter = snapshot.status {
-                            let best_score = raffle.tickets.iter()
-                                .filter(|t| t.team_id == team_id)
-                                .map(|t| t.score)
+                for &team_id in result.counted() {
+                    if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
+                        if let TeamStatus::Supporter = snapshot.status() {
+                            let best_score = raffle.tickets().iter()
+                                .filter(|t| t.team_id() == team_id)
+                                .map(|t| t.score())
                                 .max_by(|a, b| a.partial_cmp(b).unwrap())
                                 .unwrap_or(0.0);
-                            println!("  {} (score: {})", snapshot.name, best_score);
+                            println!("  {} (score: {})", snapshot.name(), best_score);
                         }
                     }
                 }
                 println!("Total counted seats: {} (Earners: {}, Supporters: {})", 
-                         result.counted.len(), earner_count, result.counted.len() - earner_count);
+                         result.counted().len(), earner_count, result.counted().len() - earner_count);
 
                 println!("Uncounted seats:");
                 println!("Earner seats:");
-                for &team_id in &result.uncounted {
-                    if let Some(snapshot) = raffle.team_snapshots.iter().find(|s| s.id == team_id) {
-                        if let TeamStatus::Earner { .. } = snapshot.status {
-                            let best_score = raffle.tickets.iter()
-                                .filter(|t| t.team_id == team_id)
-                                .map(|t| t.score)
+                for &team_id in result.uncounted() {
+                    if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
+                        if let TeamStatus::Earner { .. } = snapshot.status() {
+                            let best_score = raffle.tickets().iter()
+                                .filter(|t| t.team_id() == team_id)
+                                .map(|t| t.score())
                                 .max_by(|a, b| a.partial_cmp(b).unwrap())
                                 .unwrap_or(0.0);
-                            println!("  {} (score: {})", snapshot.name, best_score);
+                            println!("  {} (score: {})", snapshot.name(), best_score);
                         }
                     }
                 }
                 println!("Supporter seats:");
-                for &team_id in &result.uncounted {
-                    if let Some(snapshot) = raffle.team_snapshots.iter().find(|s| s.id == team_id) {
-                        if let TeamStatus::Supporter = snapshot.status {
-                            let best_score = raffle.tickets.iter()
-                                .filter(|t| t.team_id == team_id)
-                                .map(|t| t.score)
+                for &team_id in result.uncounted() {
+                    if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
+                        if let TeamStatus::Supporter = snapshot.status() {
+                            let best_score = raffle.tickets().iter()
+                                .filter(|t| t.team_id() == team_id)
+                                .map(|t| t.score())
                                 .max_by(|a, b| a.partial_cmp(b).unwrap())
                                 .unwrap_or(0.0);
-                            println!("  {} (score: {})", snapshot.name, best_score);
+                            println!("  {} (score: {})", snapshot.name(), best_score);
                         }
                     }
                 }
@@ -2684,63 +2682,63 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
             println!("Raffle results for proposal '{}' (Raffle ID: {})", proposal_name, raffle_id);
 
             // Print raffle results
-            if let Some(result) = &raffle.result {
+            if let Some(result) = raffle.result() {
                 println!("**Counted voters:**");
                 println!("Earner teams:");
                 let mut earner_count = 0;
-                for &team_id in &result.counted {
-                    if let Some(snapshot) = raffle.team_snapshots.iter().find(|s| s.id == team_id) {
-                        if let TeamStatus::Earner { .. } = snapshot.status {
+                for &team_id in result.counted() {
+                    if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
+                        if let TeamStatus::Earner { .. } = snapshot.status() {
                             earner_count += 1;
-                            let best_score = raffle.tickets.iter()
-                                .filter(|t| t.team_id == team_id)
-                                .map(|t| t.score)
+                            let best_score = raffle.tickets().iter()
+                                .filter(|t| t.team_id() == team_id)
+                                .map(|t| t.score())
                                 .max_by(|a, b| a.partial_cmp(b).unwrap())
                                 .unwrap_or(0.0);
-                            println!("  {} (score: {})", snapshot.name, best_score);
+                            println!("  {} (score: {})", snapshot.name(), best_score);
                         }
                     }
                 }
                 println!("Supporter teams:");
-                for &team_id in &result.counted {
-                    if let Some(snapshot) = raffle.team_snapshots.iter().find(|s| s.id == team_id) {
-                        if let TeamStatus::Supporter = snapshot.status {
-                            let best_score = raffle.tickets.iter()
-                                .filter(|t| t.team_id == team_id)
-                                .map(|t| t.score)
+                for &team_id in result.counted() {
+                    if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
+                        if let TeamStatus::Supporter = snapshot.status() {
+                            let best_score = raffle.tickets().iter()
+                                .filter(|t| t.team_id() == team_id)
+                                .map(|t| t.score())
                                 .max_by(|a, b| a.partial_cmp(b).unwrap())
                                 .unwrap_or(0.0);
-                            println!("  {} (score: {})", snapshot.name, best_score);
+                            println!("  {} (score: {})", snapshot.name(), best_score);
                         }
                     }
                 }
                 println!("Total counted voters: {} (Earners: {}, Supporters: {})", 
-                         result.counted.len(), earner_count, result.counted.len() - earner_count);
+                         result.counted().len(), earner_count, result.counted().len() - earner_count);
 
                 println!("**Uncounted voters:**");
                 println!("Earner teams:");
-                for &team_id in &result.uncounted {
-                    if let Some(snapshot) = raffle.team_snapshots.iter().find(|s| s.id == team_id) {
-                        if let TeamStatus::Earner { .. } = snapshot.status {
-                            let best_score = raffle.tickets.iter()
-                                .filter(|t| t.team_id == team_id)
-                                .map(|t| t.score)
+                for &team_id in result.uncounted() {
+                    if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
+                        if let TeamStatus::Earner { .. } = snapshot.status() {
+                            let best_score = raffle.tickets().iter()
+                                .filter(|t| t.team_id() == team_id)
+                                .map(|t| t.score())
                                 .max_by(|a, b| a.partial_cmp(b).unwrap())
                                 .unwrap_or(0.0);
-                            println!("  {} (score: {})", snapshot.name, best_score);
+                            println!("  {} (score: {})", snapshot.name(), best_score);
                         }
                     }
                 }
                 println!("Supporter teams:");
-                for &team_id in &result.uncounted {
-                    if let Some(snapshot) = raffle.team_snapshots.iter().find(|s| s.id == team_id) {
-                        if let TeamStatus::Supporter = snapshot.status {
-                            let best_score = raffle.tickets.iter()
-                                .filter(|t| t.team_id == team_id)
-                                .map(|t| t.score)
+                for &team_id in result.uncounted() {
+                    if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
+                        if let TeamStatus::Supporter = snapshot.status() {
+                            let best_score = raffle.tickets().iter()
+                                .filter(|t| t.team_id() == team_id)
+                                .map(|t| t.score())
                                 .max_by(|a, b| a.partial_cmp(b).unwrap())
                                 .unwrap_or(0.0);
-                            println!("  {} (score: {})", snapshot.name, best_score);
+                            println!("  {} (score: {})", snapshot.name(), best_score);
                         }
                     }
                 }

@@ -5,58 +5,53 @@ use serde::{Serialize, Deserialize};
 use sha2::{Sha256, Digest};
 
 use super::team::{Team, TeamStatus};
-use crate::AppConfig;
+use super::common::NameMatches;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Raffle {
-    pub id: Uuid,
-    pub config: RaffleConfig,
-    pub team_snapshots: Vec<TeamSnapshot>,
-    pub tickets: Vec<RaffleTicket>,
-    pub result: Option<RaffleResult>,
+    id: Uuid,
+    config: RaffleConfig,
+    team_snapshots: Vec<TeamSnapshot>,
+    tickets: Vec<RaffleTicket>,
+    result: Option<RaffleResult>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RaffleConfig {
-    pub proposal_id: Uuid,
-    pub epoch_id: Uuid,
-    pub initiation_block: u64,
-    pub randomness_block: u64,
-    pub block_randomness: String,
-    pub total_counted_seats: usize,
-    pub max_earner_seats: usize,
-    pub excluded_teams: Vec<Uuid>,
-    pub custom_allocation: Option<HashMap<Uuid, u64>>,
-    pub custom_team_order: Option<Vec<Uuid>>,
-    pub is_historical: bool,
+    proposal_id: Uuid,
+    epoch_id: Uuid,
+    initiation_block: u64,
+    randomness_block: u64,
+    block_randomness: String,
+    total_counted_seats: usize,
+    max_earner_seats: usize,
+    excluded_teams: Vec<Uuid>,
+    custom_allocation: Option<HashMap<Uuid, u64>>,
+    custom_team_order: Option<Vec<Uuid>>,
+    is_historical: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TeamSnapshot {
-    pub id: Uuid,
-    pub name: String,
-    pub representative: String,
-    pub status: TeamStatus,
-    pub snapshot_time: DateTime<Utc>,
-    pub raffle_status: RaffleParticipationStatus,
+    id: Uuid,
+    name: String,
+    representative: String,
+    status: TeamStatus,
+    snapshot_time: DateTime<Utc>,
+    raffle_status: RaffleParticipationStatus,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RaffleTicket {
-    pub team_id: Uuid,
-    pub index: u64,
-    pub score: f64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RaffleBuilder {
-    pub config: RaffleConfig,
+    team_id: Uuid,
+    index: u64,
+    score: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RaffleResult {
-    pub counted: Vec<Uuid>,
-    pub uncounted: Vec<Uuid>,
+    counted: Vec<Uuid>,
+    uncounted: Vec<Uuid>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,73 +60,16 @@ pub enum RaffleParticipationStatus {
     Excluded,
 }
 
-impl RaffleBuilder {
-    fn new(proposal_id: Uuid, epoch_id: Uuid, app_config: &AppConfig) -> Self {
-        RaffleBuilder {
-            config: RaffleConfig {
-                proposal_id,
-                epoch_id,
-                initiation_block: 0,
-                randomness_block: 0,
-                block_randomness: String::new(),
-                total_counted_seats: app_config.default_total_counted_seats,
-                max_earner_seats: app_config.default_max_earner_seats,
-                excluded_teams: Vec::new(),
-                custom_allocation: None,
-                custom_team_order: None,
-                is_historical: false,
-            },
-        }
-    }
-
-    fn with_seats(mut self, total: usize, max_earner: usize) -> Self {
-        self.config.total_counted_seats = total;
-        self.config.max_earner_seats = max_earner;
-        self
-    }
-
-    fn with_randomness(mut self, initiation_block: u64, randomness_block: u64, randomness: String) -> Self {
-        self.config.initiation_block = initiation_block;
-        self.config.randomness_block = randomness_block;
-        self.config.block_randomness = randomness;
-        self
-    }
-
-    fn with_excluded_teams(mut self, excluded: Vec<Uuid>) -> Self {
-        self.config.excluded_teams = excluded;
-        self
-    }
-
-    fn with_custom_allocation(mut self, allocation: HashMap<Uuid, u64>) -> Self {
-        self.config.custom_allocation = Some(allocation);
-        self
-    }
-
-    fn with_custom_team_order(mut self, order: Vec<Uuid>) -> Self {
-        self.config.custom_team_order = Some(order);
-        self
-    }
-
-    fn historical(mut self) -> Self {
-        self.config.is_historical = true;
-        self
-    }
-
-    fn build(self, teams: &HashMap<Uuid, Team>) -> Result<Raffle, &'static str> {
-        if self.config.block_randomness.is_empty() {
+impl Raffle {
+    pub fn new(config: RaffleConfig, teams: &HashMap<Uuid, Team>) -> Result<Self, &'static str> {
+        if config.block_randomness().is_empty() {
             return Err("Block randomness must be provided");
         }
 
-        if self.config.max_earner_seats > self.config.total_counted_seats {
+        if config.max_earner_seats() > config.total_counted_seats() {
             return Err("Max earner seats cannot exceed total counted seats");
         }
 
-        Raffle::new(self.config, teams)
-    }
-}
-
-impl Raffle {
-    pub fn new(config: RaffleConfig, teams: &HashMap<Uuid, Team>) -> Result<Self, &'static str> {
         let mut team_snapshots = Vec::new();
         let mut tickets = Vec::new();
 
@@ -141,7 +79,7 @@ impl Raffle {
             .collect();
 
         // Sort teams based on custom order or by name
-        if let Some(custom_order) = &config.custom_team_order {
+        if let Some(custom_order) = config.custom_team_order() {
             active_teams.sort_by_key(|team| custom_order.iter().position(|&id| id == team.id()).unwrap_or(usize::MAX));
         } else {
             active_teams.sort_by(|a, b| a.name().cmp(&b.name()));
@@ -149,21 +87,20 @@ impl Raffle {
 
         // Create snapshots and tickets
         for team in active_teams {
-            let snapshot = TeamSnapshot {
-                id: team.id(),
-                name: team.name().to_string().clone(),
-                representative: team.representative().to_string().clone(),
-                status: team.status().clone(),
-                snapshot_time: Utc::now(),
-                raffle_status: if config.excluded_teams.contains(&team.id()) {
+            let snapshot = TeamSnapshot::new(
+                team.id(),
+                team.name().to_string(),
+                team.representative().to_string(),
+                team.status().clone(),
+                if config.excluded_teams().contains(&team.id()) {
                     RaffleParticipationStatus::Excluded
                 } else {
                     RaffleParticipationStatus::Included
                 },
-            };
+            );
             team_snapshots.push(snapshot);
 
-            let ticket_count = match &team.status() {
+            let ticket_count = match team.status() {
                 TeamStatus::Earner { trailing_monthly_revenue } => {
                     let sum: u64 = trailing_monthly_revenue.iter().sum();
                     let quarterly_average = sum as f64 / trailing_monthly_revenue.len() as f64;
@@ -188,17 +125,53 @@ impl Raffle {
         })
     }
 
-    pub fn generate_scores(&mut self) -> Result<(), &'static str> {
+    // Getter methods
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+
+    pub fn config(&self) -> &RaffleConfig {
+        &self.config
+    }
+
+    pub fn config_mut(&mut self) -> &mut RaffleConfig {
+        &mut self.config
+    }
+
+    pub fn team_snapshots(&self) -> &[TeamSnapshot] {
+        &self.team_snapshots
+    }
+
+    pub fn tickets(&self) -> &[RaffleTicket] {
+        &self.tickets
+    }
+
+    pub fn result(&self) -> Option<&RaffleResult> {
+        self.result.as_ref()
+    }
+
+    pub fn deciding_teams(&self) -> Vec<Uuid> {
+        self.result.as_ref()
+            .map(|result| result.counted.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn etherscan_url(&self) -> String {
+        format!("https://etherscan.io/block/{}#consensusinfo", self.config.randomness_block)
+    }
+
+    pub fn generate_ticket_scores(&mut self) -> Result<(), &'static str> {
         for ticket in &mut self.tickets {
-            if !self.config.excluded_teams.contains(&ticket.team_id) {
-                ticket.score = Self::generate_random_score_from_seed(&self.config.block_randomness, ticket.index);
+            if !self.config.excluded_teams().contains(&ticket.team_id()) {
+                let score = Self::generate_random_score_from_seed(self.config.block_randomness(), ticket.index());
+                ticket.set_score(score);
             }
             // Excluded teams keep their score as 0.0
         }
         Ok(())
     }
 
-    pub fn select_teams(&mut self) {
+    pub fn select_deciding_teams(&mut self) {
         let mut earner_tickets: Vec<_> = self.tickets.iter()
             .filter(|t| !self.config.excluded_teams.contains(&t.team_id))
             .filter(|t| self.team_snapshots.iter().any(|s| s.id == t.team_id && matches!(s.status, TeamStatus::Earner { .. })))
@@ -239,7 +212,7 @@ impl Raffle {
         self.result = Some(RaffleResult { counted, uncounted });
     }
 
-    pub fn generate_random_score_from_seed(randomness: &str, index: u64) -> f64 {
+    fn generate_random_score_from_seed(randomness: &str, index: u64) -> f64 {
         let combined_seed = format!("{}_{}", randomness, index);
         let mut hasher = Sha256::new();
 
@@ -251,25 +224,135 @@ impl Raffle {
         hash_num as f64 / max_num
     }
 
-    pub fn get_deciding_teams(&self) -> Vec<Uuid> {
-        self.result.as_ref()
-            .map(|result| result.counted.clone())
-            .unwrap_or_default()
+    // Setter methods
+    pub fn set_result(&mut self, result: RaffleResult) {
+        self.result = Some(result);
     }
 
-    pub fn get_etherscan_url(&self) -> String {
-        format!("https://etherscan.io/block/{}#consensusinfo", self.config.randomness_block)
+    // Helper methods
+    pub fn is_historical(&self) -> bool {
+        self.config.is_historical
     }
+
+    pub fn is_completed(&self) -> bool {
+        self.result.is_some()
+    }
+}
+
+impl NameMatches for Raffle {
+    fn name_matches(&self, name: &str) -> bool {
+        self.config.proposal_id.to_string() == name
+    }
+}
+
+impl RaffleConfig {
+    pub fn new(
+        proposal_id: Uuid,
+        epoch_id: Uuid,
+        total_counted_seats: usize,
+        max_earner_seats: usize,
+        initiation_block: Option<u64>,
+        randomness_block: Option<u64>,
+        block_randomness: Option<String>,
+        excluded_teams: Option<Vec<Uuid>>,
+        custom_allocation: Option<HashMap<Uuid, u64>>,
+        custom_team_order: Option<Vec<Uuid>>,
+        is_historical: bool,
+    ) -> Self {
+        Self {
+            proposal_id,
+            epoch_id,
+            initiation_block: initiation_block.unwrap_or(0),
+            randomness_block: randomness_block.unwrap_or(0),
+            block_randomness: block_randomness.unwrap_or_else(String::new),
+            total_counted_seats,
+            max_earner_seats,
+            excluded_teams: excluded_teams.unwrap_or_default(),
+            custom_allocation,
+            custom_team_order,
+            is_historical,
+        }
+    }
+
+    // Getter methods
+    pub fn proposal_id(&self) -> Uuid { self.proposal_id }
+    pub fn epoch_id(&self) -> Uuid { self.epoch_id }
+    pub fn initiation_block(&self) -> u64 { self.initiation_block }
+    pub fn randomness_block(&self) -> u64 { self.randomness_block }
+    pub fn block_randomness(&self) -> &str { &self.block_randomness }
+    pub fn total_counted_seats(&self) -> usize { self.total_counted_seats }
+    pub fn max_earner_seats(&self) -> usize { self.max_earner_seats }
+    pub fn excluded_teams(&self) -> &[Uuid] { &self.excluded_teams }
+    pub fn custom_allocation(&self) -> Option<&HashMap<Uuid, u64>> { self.custom_allocation.as_ref() }
+    pub fn custom_team_order(&self) -> Option<&[Uuid]> { self.custom_team_order.as_deref() }
+    pub fn is_historical(&self) -> bool { self.is_historical }
+
+    // Setter methods
+    pub fn set_initiation_block(&mut self, block: u64) { self.initiation_block = block; }
+    pub fn set_randomness_block(&mut self, block: u64) { self.randomness_block = block; }
+    pub fn set_block_randomness(&mut self, randomness: String) { self.block_randomness = randomness; }
+    pub fn set_excluded_teams(&mut self, teams: Vec<Uuid>) { self.excluded_teams = teams; }
+    pub fn set_custom_allocation(&mut self, allocation: Option<HashMap<Uuid, u64>>) { self.custom_allocation = allocation; }
+    pub fn set_custom_team_order(&mut self, order: Option<Vec<Uuid>>) { self.custom_team_order = order; }
 }
 
 impl RaffleTicket {
     pub fn new(team_id: Uuid, index: u64) -> Self {
-        RaffleTicket {
+        Self {
             team_id,
             index,
             score: 0.0,
         }
     }
+
+    // Getter methods
+    pub fn team_id(&self) -> Uuid { self.team_id }
+    pub fn index(&self) -> u64 { self.index }
+    pub fn score(&self) -> f64 { self.score }
+
+    // Setter methods
+    pub fn set_score(&mut self, score: f64) { self.score = score; }
+}
+
+impl TeamSnapshot {
+    pub fn new(
+        id: Uuid,
+        name: String,
+        representative: String,
+        status: TeamStatus,
+        raffle_status: RaffleParticipationStatus,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            representative,
+            status,
+            snapshot_time: Utc::now(),
+            raffle_status,
+        }
+    }
+
+    // Getter methods
+    pub fn id(&self) -> Uuid { self.id }
+    pub fn name(&self) -> &str { &self.name }
+    pub fn representative(&self) -> &str { &self.representative }
+    pub fn status(&self) -> &TeamStatus { &self.status }
+    pub fn snapshot_time(&self) -> DateTime<Utc> { self.snapshot_time }
+    pub fn raffle_status(&self) -> &RaffleParticipationStatus { &self.raffle_status }
+
+    // No setter methods as this is a snapshot and should not be modified after creation
+}
+
+impl RaffleResult {
+    pub fn new(counted: Vec<Uuid>, uncounted: Vec<Uuid>) -> Self {
+        Self { counted, uncounted }
+    }
+
+    // Getter methods
+    pub fn counted(&self) -> &[Uuid] { &self.counted }
+    pub fn uncounted(&self) -> &[Uuid] { &self.uncounted }
+
+    // No setter methods as the result should not be modified after creation
 }
 
 #[cfg(test)]
@@ -277,7 +360,6 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use uuid::Uuid;
-    use chrono::Utc;
 
     // Helper function to create a mock team
     fn create_mock_team(name: &str, status: TeamStatus) -> Team {
@@ -300,29 +382,6 @@ mod tests {
     }
 
     #[test]
-    fn test_raffle_builder() {
-        let proposal_id = Uuid::new_v4();
-        let epoch_id = Uuid::new_v4();
-        let builder = RaffleBuilder::new(proposal_id, epoch_id, &AppConfig::default())
-            .with_seats(7, 5)
-            .with_randomness(100, 110, "test_randomness".to_string())
-            .with_excluded_teams(vec![Uuid::new_v4()])
-            .with_custom_allocation(HashMap::new())
-            .with_custom_team_order(vec![Uuid::new_v4()]);
-
-        assert_eq!(builder.config.proposal_id, proposal_id);
-        assert_eq!(builder.config.epoch_id, epoch_id);
-        assert_eq!(builder.config.total_counted_seats, 7);
-        assert_eq!(builder.config.max_earner_seats, 5);
-        assert_eq!(builder.config.initiation_block, 100);
-        assert_eq!(builder.config.randomness_block, 110);
-        assert_eq!(builder.config.block_randomness, "test_randomness");
-        assert_eq!(builder.config.excluded_teams.len(), 1);
-        assert!(builder.config.custom_allocation.is_some());
-        assert!(builder.config.custom_team_order.is_some());
-    }
-
-    #[test]
     fn test_raffle_creation() {
         let teams = create_mock_teams();
         let config = create_test_config();
@@ -336,7 +395,7 @@ mod tests {
     #[test]
     fn test_generate_scores() {
         let mut raffle = create_test_raffle();
-        raffle.generate_scores().unwrap();
+        raffle.generate_ticket_scores().unwrap();
 
         for ticket in &raffle.tickets {
             assert!(ticket.score > 0.0 && ticket.score <= 1.0);
@@ -346,8 +405,8 @@ mod tests {
     #[test]
     fn test_select_teams() {
         let mut raffle = create_test_raffle();
-        raffle.generate_scores().unwrap();
-        raffle.select_teams();
+        raffle.generate_ticket_scores().unwrap();
+        raffle.select_deciding_teams();
 
         assert!(raffle.result.is_some());
         let result = raffle.result.as_ref().unwrap();
@@ -358,8 +417,8 @@ mod tests {
     #[test]
     fn test_max_earner_seats() {
         let mut raffle = create_test_raffle();
-        raffle.generate_scores().unwrap();
-        raffle.select_teams();
+        raffle.generate_ticket_scores().unwrap();
+        raffle.select_deciding_teams();
 
         let result = raffle.result.as_ref().unwrap();
         let counted_earners = result.counted.iter()
@@ -372,17 +431,17 @@ mod tests {
     #[test]
     fn test_get_deciding_teams() {
         let mut raffle = create_test_raffle();
-        raffle.generate_scores().unwrap();
-        raffle.select_teams();
+        raffle.generate_ticket_scores().unwrap();
+        raffle.select_deciding_teams();
 
-        let deciding_teams = raffle.get_deciding_teams();
+        let deciding_teams = raffle.deciding_teams();
         assert_eq!(deciding_teams.len(), 7); // Based on total_counted_seats
     }
 
     #[test]
     fn test_get_etherscan_url() {
         let raffle = create_test_raffle();
-        let url = raffle.get_etherscan_url();
+        let url = raffle.etherscan_url();
         assert_eq!(url, "https://etherscan.io/block/110#consensusinfo");
     }
 
@@ -422,8 +481,8 @@ mod tests {
         config.excluded_teams = vec![excluded_team_id];
 
         let mut raffle = Raffle::new(config, &teams).unwrap();
-        raffle.generate_scores().unwrap();
-        raffle.select_teams();
+        raffle.generate_ticket_scores().unwrap();
+        raffle.select_deciding_teams();
 
         assert!(raffle.result.is_some());
         let result = raffle.result.as_ref().unwrap();
