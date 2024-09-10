@@ -320,3 +320,175 @@ impl Default for VoteCount {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    // Helper function to create a test vote
+    fn create_test_vote(vote_type: VoteType) -> Vote {
+        Vote::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            vote_type,
+            false
+        )
+    }
+
+    #[test]
+    fn test_vote_creation() {
+        let formal_vote = create_test_vote(VoteType::Formal {
+            raffle_id: Uuid::new_v4(),
+            total_eligible_seats: 10,
+            threshold: 0.5,
+            counted_points: 2,
+            uncounted_points: 1,
+        });
+        assert!(matches!(formal_vote.vote_type(), VoteType::Formal { .. }));
+        assert_eq!(formal_vote.status(), &VoteStatus::Open);
+
+        let informal_vote = create_test_vote(VoteType::Informal);
+        assert!(matches!(informal_vote.vote_type(), VoteType::Informal));
+        assert_eq!(informal_vote.status(), &VoteStatus::Open);
+    }
+
+    #[test]
+    fn test_vote_type_and_status() {
+        let mut vote = create_test_vote(VoteType::Informal);
+        assert!(!vote.is_closed());
+        
+        vote.set_status(VoteStatus::Closed);
+        assert!(vote.is_closed());
+    }
+
+    #[test]
+    fn test_vote_participation() {
+        let mut vote = create_test_vote(VoteType::Formal {
+            raffle_id: Uuid::new_v4(),
+            total_eligible_seats: 10,
+            threshold: 0.5,
+            counted_points: 2,
+            uncounted_points: 1,
+        });
+
+        let team_id = Uuid::new_v4();
+        vote.add_participant(team_id, true).unwrap();
+
+        if let VoteParticipation::Formal { counted, uncounted } = vote.participation() {
+            assert!(counted.contains(&team_id));
+            assert!(!uncounted.contains(&team_id));
+        } else {
+            panic!("Expected Formal participation");
+        }
+    }
+
+    #[test]
+    fn test_vote_casting() {
+        let mut vote = create_test_vote(VoteType::Formal {
+            raffle_id: Uuid::new_v4(),
+            total_eligible_seats: 10,
+            threshold: 0.5,
+            counted_points: 2,
+            uncounted_points: 1,
+        });
+
+        let team_id = Uuid::new_v4();
+        let raffle_result = RaffleResult::new(vec![team_id], vec![]);
+
+        vote.cast_vote(team_id, VoteChoice::Yes, Some(&raffle_result)).unwrap();
+
+        let (counted, _) = vote.count_formal_votes();
+        assert_eq!(counted.yes(), 1);
+        assert_eq!(counted.no(), 0);
+    }
+
+    #[test]
+    fn test_vote_closing() {
+        let mut vote = create_test_vote(VoteType::Informal);
+        
+        vote.cast_vote(Uuid::new_v4(), VoteChoice::Yes, None).unwrap();
+        vote.cast_vote(Uuid::new_v4(), VoteChoice::No, None).unwrap();
+
+        vote.close().unwrap();
+
+        assert!(vote.is_closed());
+        assert!(vote.result().is_some());
+    }
+
+    #[test]
+    fn test_vote_counting() {
+        let mut vote = create_test_vote(VoteType::Formal {
+            raffle_id: Uuid::new_v4(),
+            total_eligible_seats: 10,
+            threshold: 0.5,
+            counted_points: 2,
+            uncounted_points: 1,
+        });
+
+        let raffle_result = RaffleResult::new(vec![Uuid::new_v4(), Uuid::new_v4()], vec![Uuid::new_v4()]);
+
+        vote.cast_vote(raffle_result.counted()[0], VoteChoice::Yes, Some(&raffle_result)).unwrap();
+        vote.cast_vote(raffle_result.counted()[1], VoteChoice::No, Some(&raffle_result)).unwrap();
+        vote.cast_vote(raffle_result.uncounted()[0], VoteChoice::Yes, Some(&raffle_result)).unwrap();
+
+        let (counted, uncounted) = vote.count_formal_votes();
+        assert_eq!(counted.yes(), 1);
+        assert_eq!(counted.no(), 1);
+        assert_eq!(uncounted.yes(), 1);
+        assert_eq!(uncounted.no(), 0);
+    }
+
+    #[test]
+    fn test_vote_results() {
+        let mut vote = create_test_vote(VoteType::Formal {
+            raffle_id: Uuid::new_v4(),
+            total_eligible_seats: 3,
+            threshold: 0.5,
+            counted_points: 2,
+            uncounted_points: 1,
+        });
+
+        let raffle_result = RaffleResult::new(vec![Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()], vec![]);
+
+        vote.cast_vote(raffle_result.counted()[0], VoteChoice::Yes, Some(&raffle_result)).unwrap();
+        vote.cast_vote(raffle_result.counted()[1], VoteChoice::Yes, Some(&raffle_result)).unwrap();
+        vote.cast_vote(raffle_result.counted()[2], VoteChoice::No, Some(&raffle_result)).unwrap();
+
+        vote.close().unwrap();
+
+        if let Some(VoteResult::Formal { passed, .. }) = vote.result() {
+            assert!(passed);
+        } else {
+            panic!("Expected Formal vote result");
+        }
+    }
+
+    #[test]
+    fn test_edge_cases_and_error_handling() {
+        let mut vote = create_test_vote(VoteType::Formal {
+            raffle_id: Uuid::new_v4(),
+            total_eligible_seats: 3,
+            threshold: 0.5,
+            counted_points: 2,
+            uncounted_points: 1,
+        });
+
+        // Attempt to cast vote without raffle result
+        assert!(vote.cast_vote(Uuid::new_v4(), VoteChoice::Yes, None).is_err());
+
+        // Attempt to cast vote for ineligible team
+        let raffle_result = RaffleResult::new(vec![Uuid::new_v4()], vec![]);
+        assert!(vote.cast_vote(Uuid::new_v4(), VoteChoice::Yes, Some(&raffle_result)).is_err());
+
+        // Close the vote
+        vote.close().unwrap();
+
+        // Attempt to cast vote after closing
+        assert!(vote.cast_vote(raffle_result.counted()[0], VoteChoice::Yes, Some(&raffle_result)).is_err());
+
+        // Attempt to close an already closed vote
+        assert!(vote.close().is_err());
+    }
+}
