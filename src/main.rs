@@ -2,11 +2,14 @@
 
 pub mod core {
     pub mod models;
+    pub mod state;
 }
 
 mod services;
 use services::ethereum::{EthereumService, EthereumServiceTrait};
 use services::telegram::{TelegramBot, spawn_command_executor};
+
+use crate::core::state::{SystemState, BudgetSystemState};
 use crate::core::models::{
     Team,
     TeamStatus,
@@ -58,23 +61,6 @@ use uuid::Uuid;
 
 mod app_config;
 use app_config::AppConfig;
-
-#[derive(Clone, Serialize, Deserialize)]
-struct SystemState {
-    teams: HashMap<Uuid, Team>,
-    timestamp: DateTime<Utc>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct BudgetSystemState {
-    current_state: SystemState,
-    history: Vec<SystemState>,
-    proposals: HashMap<Uuid, Proposal>,
-    raffles: HashMap<Uuid, Raffle>,
-    votes: HashMap<Uuid, Vote>,
-    epochs: HashMap<Uuid, Epoch>,
-    current_epoch: Option<Uuid>,
-}
 
 struct BudgetSystem {
     state: BudgetSystemState,
