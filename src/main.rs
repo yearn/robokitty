@@ -426,11 +426,7 @@ impl BudgetSystem {
 
     pub fn get_proposal_id_by_name(&self, name: &str) -> Option<Uuid> {
         get_id_by_name(&self.state.proposals, name)
-    }
-
-    pub fn get_raffle_id_by_name(&self, name: &str) -> Option<Uuid> {
-        get_id_by_name(&self.state.raffles, name)
-    }
+    } 
 
     fn import_predefined_raffle(
         &mut self,
@@ -506,9 +502,11 @@ impl BudgetSystem {
         let proposal_id = self.get_proposal_id_by_name(proposal_name)
             .ok_or_else(|| format!("Proposal not found: {}", proposal_name))?;
     
-        let raffle_id = self.get_raffle_id_by_name(proposal_name)
+        let raffle_id = self.state.raffles.iter()
+            .find(|(_, raffle)| raffle.config().proposal_id() == proposal_id)
+            .map(|(id, _)| *id)
             .ok_or_else(|| format!("No raffle found for proposal: {}", proposal_name))?;
-    
+
         let raffle = self.state.raffles.get(&raffle_id)
             .ok_or_else(|| format!("Raffle not found: {}", raffle_id))?;
     
@@ -1022,9 +1020,10 @@ impl BudgetSystem {
         let proposal_id = self.get_proposal_id_by_name(proposal_name)
             .ok_or_else(|| format!("Proposal not found: {}", proposal_name))?;
         
-        let raffle_id = self.get_raffle_id_by_name(proposal_name)
+        let raffle_id = self.state.raffles.iter()
+            .find(|(_, raffle)| raffle.config().proposal_id() == proposal_id)
+            .map(|(id, _)| *id)
             .ok_or_else(|| format!("No raffle found for proposal: {}", proposal_name))?;
-    
         Ok((proposal_id, raffle_id))
     }
     

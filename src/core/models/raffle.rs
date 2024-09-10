@@ -5,7 +5,6 @@ use serde::{Serialize, Deserialize};
 use sha2::{Sha256, Digest};
 
 use super::team::{Team, TeamStatus};
-use super::common::NameMatches;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Raffle {
@@ -62,9 +61,6 @@ pub enum RaffleParticipationStatus {
 
 impl Raffle {
     pub fn new(config: RaffleConfig, teams: &HashMap<Uuid, Team>) -> Result<Self, &'static str> {
-        if config.block_randomness().is_empty() {
-            return Err("Block randomness must be provided");
-        }
 
         if config.max_earner_seats() > config.total_counted_seats() {
             return Err("Max earner seats cannot exceed total counted seats");
@@ -236,12 +232,6 @@ impl Raffle {
 
     pub fn is_completed(&self) -> bool {
         self.result.is_some()
-    }
-}
-
-impl NameMatches for Raffle {
-    fn name_matches(&self, name: &str) -> bool {
-        self.config.proposal_id.to_string() == name
     }
 }
 
