@@ -75,18 +75,7 @@ impl BudgetSystem {
         }
         
         Ok(Self {
-            state: BudgetSystemState {
-                current_state: SystemState {
-                    teams: HashMap::new(),
-                    timestamp: Utc::now(),
-                },
-                history: Vec::new(),
-                proposals: HashMap::new(),
-                raffles: HashMap::new(),
-                votes: HashMap::new(),
-                epochs: HashMap::new(),
-                current_epoch: None,
-            },
+            state: BudgetSystemState::new(),
             ethereum_service,
             config
         })
@@ -94,14 +83,13 @@ impl BudgetSystem {
 
     fn add_team(&mut self, name: String, representative: String, trailing_monthly_revenue: Option<Vec<u64>>) -> Result<Uuid, &'static str> {
         let team = Team::new(name, representative, trailing_monthly_revenue)?;
-        let id = team.id();
-        self.state.current_state.teams.insert(id, team);
+        let id = self.state.add_team(team);
         self.save_state();
         Ok(id)
     }
 
     fn remove_team(&mut self, team_id: Uuid) -> Result<(), &'static str> {
-        if self.state.current_state.teams.remove(&team_id).is_some() {
+        if self.state.remove_team(team_id).is_some() {
             self.save_state();
             Ok(())
         } else {
@@ -110,13 +98,12 @@ impl BudgetSystem {
     }
 
     fn update_team_status(&mut self, team_id: Uuid, new_status: &TeamStatus) -> Result<(), &'static str> {
-        match self.state.current_state.teams.get_mut(&team_id) {
-            Some(team) => {
-                team.set_status(new_status.clone())?;
-                self.save_state();
-                Ok(())
-            },
-            None => Err("Team not found"),
+        if let Some(team) = self.state.get_team_mut(&team_id) {
+            team.set_status(new_status.clone())?;
+            self.save_state();
+            Ok(())
+        } else {
+            Err("Team not found")
         }
     }
 
@@ -178,18 +165,7 @@ impl BudgetSystem {
         let state = if Path::new(path).exists() {
             Self::load_state(path)?
         } else {
-            BudgetSystemState {
-                current_state: SystemState {
-                    teams: HashMap::new(),
-                    timestamp: Utc::now(),
-                },
-                history: Vec::new(),
-                proposals: HashMap::new(),
-                raffles: HashMap::new(),
-                votes: HashMap::new(),
-                epochs: HashMap::new(),
-                current_epoch: None,
-            }
+            BudgetSystemState::new()
         };
         
         Ok(Self {
@@ -200,13 +176,12 @@ impl BudgetSystem {
     }
 
     fn add_proposal(&mut self, title: String, url: Option<String>, budget_request_details: Option<BudgetRequestDetails>, announced_at: Option<NaiveDate>, published_at: Option<NaiveDate>, is_historical: Option<bool>) -> Result<Uuid, &'static str> {
-        let current_epoch_id = self.state.current_epoch.ok_or("No active epoch")?;
+        let current_epoch_id = self.state.current_epoch().ok_or("No active epoch")?;
     
         let proposal = Proposal::new(current_epoch_id, title, url, budget_request_details, announced_at, published_at, is_historical);
-        let proposal_id = proposal.id();
-        self.state.proposals.insert(proposal_id, proposal);
+        let proposal_id = self.state.add_proposal(&proposal);
 
-        if let Some(epoch) = self.state.epochs.get_mut(&current_epoch_id) {
+        if let Some(epoch) = self.state.get_epoch_mut(&current_epoch_id) {
             epoch.add_proposal(proposal_id);
         } else {
             return Err("Current epoch not found");
@@ -216,7 +191,7 @@ impl BudgetSystem {
     }
 
     fn close_with_reason(&mut self, id: Uuid, resolution: &Resolution) -> Result<(), &'static str> {
-        if let Some(proposal) = self.state.proposals.get_mut(&id) {
+        if let Some(proposal) = self.state.get_proposal_mut(&id) {
             if proposal.is_closed() {
                 return Err("Proposal is already closed");
             }
@@ -235,7 +210,7 @@ impl BudgetSystem {
     }
 
     fn create_formal_vote(&mut self, proposal_id: Uuid, raffle_id: Uuid, threshold: Option<f64>) -> Result<Uuid, &'static str> {
-        let proposal = self.state.proposals.get(&proposal_id)
+        let proposal = self.state.get_proposal_mut(&proposal_id)
             .ok_or("Proposal not found")?;
 
         if !proposal.is_actionable() {
@@ -244,7 +219,7 @@ impl BudgetSystem {
 
         let epoch_id = proposal.epoch_id();
 
-        let raffle = &self.state.raffles.get(&raffle_id)
+        let raffle = self.state.get_raffle(&raffle_id)
             .ok_or("Raffle not found")?;
 
         if raffle.result().is_none() {
@@ -264,14 +239,13 @@ impl BudgetSystem {
         let vote = Vote::new(proposal_id, epoch_id, vote_type, false);
 
 
-        let vote_id = vote.id();
-        self.state.votes.insert(vote_id, vote);
+        let vote_id = self.state.add_vote(&vote);
         self.save_state();
         Ok(vote_id)
     }
 
     fn create_informal_vote(&mut self, proposal_id: Uuid) -> Result<Uuid, &'static str> {
-        let proposal = self.state.proposals.get(&proposal_id)
+        let proposal = self.state.get_proposal_mut(&proposal_id)
             .ok_or("Proposal not found")?;
 
         if !proposal.is_actionable() {
@@ -282,33 +256,36 @@ impl BudgetSystem {
 
         let vote = Vote::new(proposal_id, epoch_id, VoteType::Informal, false);
 
-        let vote_id = vote.id();
-        self.state.votes.insert(vote_id, vote);
+        let vote_id = self.state.add_vote(&vote);
         self.save_state();
         Ok(vote_id)
     }
 
     fn cast_votes(&mut self, vote_id: Uuid, votes: Vec<(Uuid, VoteChoice)>) -> Result<(), &'static str> {
-        let vote = self.state.votes.get_mut(&vote_id).ok_or("Vote not found")?;
-
-        let raffle_result = match &vote.vote_type() {
-            VoteType::Formal { raffle_id, .. } => {
-                self.state.raffles.get(raffle_id)
-                    .and_then(|raffle| raffle.result())
-            },
-            VoteType::Informal => None,
+        let raffle_result = {
+            let vote = self.state.get_vote(&vote_id).ok_or("Vote not found")?;
+            match vote.vote_type() {
+                VoteType::Formal { raffle_id, .. } => {
+                    self.state.get_raffle(&raffle_id)
+                        .and_then(|raffle| raffle.result().cloned())
+                },
+                VoteType::Informal => None,
+            }
         };
-
-        for (team_id, choice) in votes {
-            vote.cast_vote(team_id, choice, raffle_result)?;
+    
+        {
+            let vote = self.state.get_vote_mut(&vote_id).ok_or("Vote not found")?;
+            for (team_id, choice) in votes {
+                vote.cast_vote(team_id, choice, raffle_result.as_ref())?;
+            }
         }
-
+    
         self.save_state();
         Ok(())
     }
 
     fn close_vote(&mut self, vote_id: Uuid) -> Result<bool, &'static str> {
-        let vote = self.state.votes.get_mut(&vote_id).ok_or("Vote not found")?;
+        let vote = self.state.get_vote_mut(&vote_id).ok_or("Vote not found")?;
         
         if vote.is_closed() {
             return Err("Vote is already closed");
@@ -330,37 +307,34 @@ impl BudgetSystem {
         let new_epoch = Epoch::new(name.to_string(), start_date, end_date)?;
 
         // Check for overlapping epochs
-        for epoch in self.state.epochs.values() {
+        for epoch in self.state.epochs().values() {
             if (start_date < epoch.end_date() && end_date > epoch.start_date()) ||
             (epoch.start_date() < end_date && epoch.end_date() > start_date) {
                 return Err("New epoch overlaps with an existing epoch");
             }
         }
 
-        let epoch_id = new_epoch.id();
-        self.state.epochs.insert(epoch_id, new_epoch);
+        let epoch_id = self.state.add_epoch(&new_epoch);
         self.save_state();
         Ok(epoch_id)
     }
 
     fn activate_epoch(&mut self, epoch_id: Uuid) -> Result<(), &'static str> {
-        if self.state.current_epoch.is_some() {
+        if self.state.current_epoch().is_some() {
             return Err("Another epoch is currently active");
         }
 
-        let epoch = self.state.epochs.get_mut(&epoch_id).ok_or("Epoch not found")?;
+        let epoch = self.state.get_epoch_mut(&epoch_id).ok_or("Epoch not found")?;
 
         epoch.activate();
-        
-        self.state.current_epoch = Some(epoch_id);
-
+        self.state.set_current_epoch(Some(epoch_id));
         self.save_state();
         Ok(())
     }
 
     fn set_epoch_reward(&mut self, token: &str, amount: f64) -> Result<(), &'static str> {
-        let epoch_id = self.state.current_epoch.ok_or("No active epoch")?;
-        let epoch = self.state.epochs.get_mut(&epoch_id).ok_or("Epoch not found")?;
+        let epoch_id = self.state.current_epoch().ok_or("No active epoch")?;
+        let epoch = self.state.get_epoch_mut(&epoch_id).ok_or("Epoch not found")?;
         
         epoch.set_reward(token.to_string(), amount);
         self.save_state();
@@ -368,13 +342,13 @@ impl BudgetSystem {
     }
 
     fn get_current_epoch(&self) -> Option<&Epoch> {
-        self.state.current_epoch.and_then(|id| self.state.epochs.get(&id))
+        self.state.current_epoch().and_then(|id| self.state.epochs().get(&id))
     }
 
     fn get_proposals_for_epoch(&self, epoch_id: Uuid) -> Vec<&Proposal> {
-        if let Some(epoch) = self.state.epochs.get(&epoch_id) {
+        if let Some(epoch) = self.state.epochs().get(&epoch_id) {
             epoch.associated_proposals().iter()
-                .filter_map(|&id| self.state.proposals.get(&id))
+                .filter_map(|&id| self.state.proposals().get(&id))
                 .collect()
         } else {
             vec![]
@@ -383,7 +357,7 @@ impl BudgetSystem {
 
     fn update_epoch_dates(&mut self, epoch_id: Uuid, new_start: DateTime<Utc>, new_end: DateTime<Utc>) -> Result<(), &'static str> {
         // Check for overlaps with other epochs
-        for other_epoch in self.state.epochs.values() {
+        for other_epoch in self.state.epochs().values() {
             if other_epoch.id() != epoch_id &&
                ((new_start < other_epoch.end_date() && new_end > other_epoch.start_date()) ||
                 (other_epoch.start_date() < new_end && other_epoch.end_date() > new_start)) {
@@ -391,7 +365,7 @@ impl BudgetSystem {
             }
         }
         
-        let epoch = self.state.epochs.get_mut(&epoch_id).ok_or("Epoch not found")?;
+        let epoch = self.state.get_epoch_mut(&epoch_id).ok_or("Epoch not found")?;
 
         if !epoch.is_planned() {
             return Err("Can only modify dates of planned epochs");
@@ -403,15 +377,15 @@ impl BudgetSystem {
     }
 
     pub fn get_team_id_by_name(&self, name: &str) -> Option<Uuid> {
-        get_id_by_name(&self.state.current_state.teams, name)
+        get_id_by_name(&self.state.current_state().teams(), name)
     }
 
     pub fn get_epoch_id_by_name(&self, name: &str) -> Option<Uuid> {
-        get_id_by_name(&self.state.epochs, name)
+        get_id_by_name(&self.state.epochs(), name)
     }
 
     pub fn get_proposal_id_by_name(&self, name: &str) -> Option<Uuid> {
-        get_id_by_name(&self.state.proposals, name)
+        get_id_by_name(&self.state.proposals(), name)
     } 
 
     fn import_predefined_raffle(
@@ -425,7 +399,7 @@ impl BudgetSystem {
         let proposal_id = self.get_proposal_id_by_name(proposal_name)
             .ok_or_else(|| format!("Proposal not found: {}", proposal_name))?;
         
-        let epoch_id = self.state.current_epoch
+        let epoch_id = self.state.current_epoch()
             .ok_or("No active epoch")?;
 
         let counted_team_ids: Vec<Uuid> = counted_teams.iter()
@@ -466,11 +440,10 @@ impl BudgetSystem {
             true,
         );
 
-        let mut raffle = Raffle::new(raffle_config, &self.state.current_state.teams)?;
+        let mut raffle = Raffle::new(raffle_config, self.state.current_state().teams())?;
         raffle.set_result(RaffleResult::new(counted_team_ids, uncounted_team_ids));
 
-        let raffle_id = raffle.id();
-        self.state.raffles.insert(raffle_id, raffle);
+        let raffle_id = self.state.add_raffle(&raffle);
         self.save_state()?;
 
         Ok(raffle_id)
@@ -488,12 +461,12 @@ impl BudgetSystem {
         let proposal_id = self.get_proposal_id_by_name(proposal_name)
             .ok_or_else(|| format!("Proposal not found: {}", proposal_name))?;
     
-        let raffle_id = self.state.raffles.iter()
+        let raffle_id = self.state.raffles().iter()
             .find(|(_, raffle)| raffle.config().proposal_id() == proposal_id)
             .map(|(id, _)| *id)
             .ok_or_else(|| format!("No raffle found for proposal: {}", proposal_name))?;
 
-        let raffle = self.state.raffles.get(&raffle_id)
+        let raffle = self.state.get_raffle(&raffle_id)
             .ok_or_else(|| format!("Raffle not found: {}", raffle_id))?;
     
         let epoch_id = raffle.config().epoch_id();
@@ -542,11 +515,10 @@ impl BudgetSystem {
         vote.set_opened_at(now);
         vote.set_closed_at(Some(now));
     
-        let vote_id = vote.id();
-        self.state.votes.insert(vote_id, vote);
+        let vote_id = self.state.add_vote(&vote);
     
         // Update proposal status based on vote result
-        let proposal = self.state.proposals.get_mut(&proposal_id)
+        let proposal = self.state.get_proposal_mut(&proposal_id)
             .ok_or_else(|| format!("Proposal not found: {}", proposal_id))?;
         
         if passed {
@@ -597,7 +569,7 @@ impl BudgetSystem {
     }
 
     fn print_team_report(&self) -> String {
-        let mut teams: Vec<&Team> = self.state.current_state.teams.values().collect();
+        let mut teams: Vec<&Team> = self.state.current_state().teams().values().collect();
         teams.sort_by(|a, b| a.name().cmp(&b.name()));
 
         let mut report = String::from("Team Report:\n\n");
@@ -614,7 +586,7 @@ impl BudgetSystem {
 
             // Add a breakdown of points per epoch
             report.push_str("Points per Epoch:\n");
-            for epoch in self.state.epochs.values() {
+            for epoch in self.state.epochs().values() {
                 let epoch_points = self.get_team_points_for_epoch(team.id(), epoch.id()).unwrap_or(0);
                 report.push_str(&format!("  {}: {} points\n", epoch.name(), epoch_points));
             }
@@ -714,7 +686,7 @@ impl BudgetSystem {
             .ok_or_else(|| format!("Team not found: {}", team_name))?;
     
         let epoch = if let Some(name) = epoch_name {
-            self.state.epochs.values()
+            self.state.epochs().values()
                 .find(|e| e.name() == name)
                 .ok_or_else(|| format!("Epoch not found: {}", name))?
         } else {
@@ -728,11 +700,11 @@ impl BudgetSystem {
         let mut total_points = 0;
     
         for vote_id in epoch.associated_proposals().iter()
-            .filter_map(|proposal_id| self.state.votes.values()
+            .filter_map(|proposal_id| self.state.votes().values()
                 .find(|v| v.proposal_id() == *proposal_id)
                 .map(|v| v.id())) 
         {
-            let vote = &self.state.votes[&vote_id];
+            let vote = self.state.get_vote(&vote_id).expect("Could not get Vote");
             let (participation_status, points) = match (vote.vote_type(), vote.participation()) {
                 (VoteType::Formal { counted_points, uncounted_points, .. }, VoteParticipation::Formal { counted, uncounted }) => {
                     if counted.contains(&team_id) {
@@ -754,7 +726,7 @@ impl BudgetSystem {
             };
     
             if let Some(status) = participation_status {
-                let proposal = self.state.proposals.get(&vote.proposal_id())
+                let proposal = self.state.proposals().get(&vote.proposal_id())
                     .ok_or_else(|| format!("Proposal not found for vote: {}", vote_id))?;
     
                 let vote_type = match vote.vote_type() {
@@ -812,7 +784,7 @@ impl BudgetSystem {
     fn prepare_raffle(&mut self, proposal_name: &str, excluded_teams: Option<Vec<String>>, app_config: &AppConfig) -> Result<(Uuid, Vec<RaffleTicket>), Box<dyn Error>> {
         let proposal_id = self.get_proposal_id_by_name(proposal_name)
             .ok_or_else(|| format!("Proposal not found: {}", proposal_name))?;
-        let epoch_id = self.state.current_epoch
+        let epoch_id = self.state.current_epoch()
             .ok_or("No active epoch")?;
 
         let excluded_team_ids = excluded_teams.map(|names| {
@@ -835,11 +807,9 @@ impl BudgetSystem {
             false
         );
 
-        let raffle = Raffle::new(raffle_config, &self.state.current_state.teams)?;
-        let raffle_id = raffle.id();
+        let raffle = Raffle::new(raffle_config, &self.state.current_state().teams())?;
         let tickets = raffle.tickets().to_vec();
-        
-        self.state.raffles.insert(raffle_id, raffle);
+        let raffle_id = self.state.add_raffle(&raffle);
         self.save_state()?;
 
         Ok((raffle_id, tickets))
@@ -858,7 +828,7 @@ impl BudgetSystem {
         let proposal_id = self.get_proposal_id_by_name(proposal_name)
             .ok_or_else(|| format!("Proposal not found: {}", proposal_name))?;
     
-        let epoch_id = self.state.current_epoch
+        let epoch_id = self.state.current_epoch()
             .ok_or("No active epoch")?;
     
         let randomness = self.ethereum_service.get_randomness(randomness_block).await?;
@@ -896,19 +866,18 @@ impl BudgetSystem {
             true
         );
     
-        let mut raffle = Raffle::new(raffle_config, &self.state.current_state.teams)?;
+        let mut raffle = Raffle::new(raffle_config, self.state.current_state().teams())?;
         raffle.generate_ticket_scores()?;
         raffle.select_deciding_teams();
     
-        let raffle_id = raffle.id();
-        self.state.raffles.insert(raffle_id, raffle.clone());
+        let raffle_id = self.state.add_raffle(&raffle);
         self.save_state()?;
     
         Ok((raffle_id, raffle))
     }
 
     async fn finalize_raffle(&mut self, raffle_id: Uuid, initiation_block: u64, randomness_block: u64, randomness: String) -> Result<Raffle, Box<dyn Error>> {
-        let raffle = self.state.raffles.get_mut(&raffle_id)
+        let raffle = self.state.get_raffle_mut(&raffle_id)
             .ok_or_else(|| format!("Raffle not found: {}", raffle_id))?;
     
         raffle.config_mut().set_initiation_block(initiation_block);
@@ -929,7 +898,7 @@ impl BudgetSystem {
         let mut current_team: Option<(String, u64, u64)> = None;
 
         for ticket in tickets {
-            let team_name = self.state.current_state.teams.get(&ticket.team_id())
+            let team_name = self.state.current_state().teams().get(&ticket.team_id())
                 .map(|team| team.name().to_string())
                 .unwrap_or_else(|| format!("Unknown Team ({})", ticket.team_id()));
 
@@ -966,7 +935,7 @@ impl BudgetSystem {
             .map_err(|e| format!("Failed to find proposal or raffle: {}", e))?;
         
         // Check if the proposal already has a resolution
-        let proposal = self.state.proposals.get(&proposal_id)
+        let proposal = self.state.get_proposal_mut(&proposal_id)
             .ok_or_else(|| "Proposal not found after ID lookup".to_string())?;
         if proposal.resolution().is_some() {
             return Err("Cannot create vote: Proposal already has a resolution".into());
@@ -1006,7 +975,7 @@ impl BudgetSystem {
         let proposal_id = self.get_proposal_id_by_name(proposal_name)
             .ok_or_else(|| format!("Proposal not found: {}", proposal_name))?;
         
-        let raffle_id = self.state.raffles.iter()
+        let raffle_id = self.state.raffles().iter()
             .find(|(_, raffle)| raffle.config().proposal_id() == proposal_id)
             .map(|(id, _)| *id)
             .ok_or_else(|| format!("No raffle found for proposal: {}", proposal_name))?;
@@ -1019,7 +988,7 @@ impl BudgetSystem {
         counted_votes: &HashMap<String, VoteChoice>,
         uncounted_votes: &HashMap<String, VoteChoice>,
     ) -> Result<(), Box<dyn Error>> {
-        let raffle = self.state.raffles.get(&raffle_id)
+        let raffle = self.state.raffles().get(&raffle_id)
             .ok_or_else(|| format!("Raffle not found: {}", raffle_id))?;
     
         if !raffle.is_completed() {
@@ -1035,7 +1004,7 @@ impl BudgetSystem {
         vote_opened: Option<NaiveDate>,
         vote_closed: Option<NaiveDate>,
     ) -> Result<(), Box<dyn Error>> {
-        let vote = self.state.votes.get_mut(&vote_id).ok_or("Vote not found")?;
+        let vote = self.state.get_vote_mut(&vote_id).ok_or("Vote not found")?;
         
         if let Some(opened) = vote_opened {
             let opened_datetime = opened.and_hms_opt(0, 0, 0)
@@ -1062,7 +1031,7 @@ impl BudgetSystem {
     ) -> Result<bool, Box<dyn Error>> {
         let passed = self.close_vote(vote_id)?;
         
-        let proposal = self.state.proposals.get_mut(&proposal_id)
+        let proposal = self.state.get_proposal_mut(&proposal_id)
             .ok_or_else(|| format!("Proposal not found: {}", proposal_id))?;
         
         println!("Proposal status before update: {:?}", proposal.status());
@@ -1093,9 +1062,9 @@ impl BudgetSystem {
     }
 
     fn generate_vote_report(&self, vote_id: Uuid) -> Result<String, Box<dyn Error>> {
-        let vote = self.state.votes.get(&vote_id).ok_or("Vote not found")?;
-        let proposal = self.state.proposals.get(&vote.proposal_id()).ok_or("Proposal not found")?;
-        let raffle = self.state.raffles.values()
+        let vote = self.state.get_vote(&vote_id).ok_or("Vote not found")?;
+        let proposal = self.state.proposals().get(&vote.proposal_id()).ok_or("Proposal not found")?;
+        let raffle = self.state.raffles().values()
             .find(|r| r.config().proposal_id() == vote.proposal_id())
             .ok_or("Associated raffle not found")?;
     
@@ -1120,7 +1089,7 @@ impl BudgetSystem {
     
         let deciding_teams: Vec<String> = raffle.deciding_teams().iter()
             .filter_map(|&team_id| {
-                self.state.current_state.teams.get(&team_id).map(|team| team.name().to_string())
+                self.state.current_state().teams().get(&team_id).map(|team| team.name().to_string())
             })
             .collect();
     
@@ -1133,12 +1102,12 @@ impl BudgetSystem {
         let (counted_votes_info, uncounted_votes_info) = if let VoteParticipation::Formal { counted, uncounted } = &vote.participation() {
             let absent_counted: Vec<String> = raffle.result().expect("Raffle result not found").counted().iter()
                 .filter(|&team_id| !counted.contains(team_id))
-                .filter_map(|&team_id| self.state.current_state.teams.get(&team_id).map(|team| team.name().to_string()))
+                .filter_map(|&team_id| self.state.current_state().teams().get(&team_id).map(|team| team.name().to_string()))
                 .collect();
 
             let absent_uncounted: Vec<String> = raffle.result().expect("Raffle result not found").uncounted().iter()
                 .filter(|&team_id| !uncounted.contains(team_id))
-                .filter_map(|&team_id| self.state.current_state.teams.get(&team_id).map(|team| team.name().to_string()))
+                .filter_map(|&team_id| self.state.current_state().teams().get(&team_id).map(|team| team.name().to_string()))
                 .collect();
 
             let counted_info = if absent_counted.is_empty() {
@@ -1221,9 +1190,8 @@ impl BudgetSystem {
         };
     
         // Update the proposal
-        let proposal = self.state.proposals.values_mut()
-            .find(|p| p.title() == proposal_name)
-            .ok_or("Proposal not found")?;
+        let proposal_id = self.get_proposal_id_by_name(proposal_name).ok_or("Name not matching a proposal")?;
+        let proposal = self.state.get_proposal_mut(&proposal_id).ok_or("Proposal not found")?;
     
         proposal.update(updates, team_id)?;
     
@@ -1252,7 +1220,7 @@ def hello_world():
     fn generate_proposal_report(&self, proposal_id: Uuid) -> Result<String, Box<dyn Error>> {
         debug!("Generating proposal report for ID: {:?}", proposal_id);
     
-        let proposal = self.state.proposals.get(&proposal_id)
+        let proposal = self.state.get_proposal(&proposal_id)
             .ok_or_else(|| format!("Proposal not found: {:?}", proposal_id))?;
     
         debug!("Found proposal: {:?}", proposal.title());
@@ -1269,7 +1237,7 @@ def hello_world():
             report.push_str(&format!("This proposal was resolved in {} days from its announcement date. ", resolution_days));
         }
     
-        if let Some(vote) = self.state.votes.values().find(|v| v.proposal_id() == proposal_id) {
+        if let Some(vote) = self.state.votes().values().find(|v| v.proposal_id() == proposal_id) {
             if let Some(result) = vote.result() {
                 match result {
                     VoteResult::Formal { counted, uncounted, passed } => {
@@ -1315,7 +1283,7 @@ def hello_world():
             report.push_str("## Budget Request Details\n\n");
             report.push_str(&format!("- **Requesting Team**: {}\n", 
                 budget_details.team()
-                    .and_then(|id| self.state.current_state.teams.get(&id))
+                    .and_then(|id| self.state.current_state().teams().get(&id))
                     .map_or("N/A".to_string(), |team| team.name().to_string())));
             report.push_str("- **Requested Amount(s)**:\n");
             for (token, amount) in budget_details.request_amounts() {
@@ -1327,7 +1295,7 @@ def hello_world():
         }
     
         // Raffle Information
-        if let Some(raffle) = self.state.raffles.values().find(|r| r.config().proposal_id() == proposal_id) {
+        if let Some(raffle) = self.state.raffles().values().find(|r| r.config().proposal_id() == proposal_id) {
             report.push_str("## Raffle Information\n\n");
             report.push_str(&format!("- **Raffle ID**: {}\n", raffle.id()));
             report.push_str(&format!("- **Initiation Block**: {}\n", raffle.config().initiation_block()));
@@ -1351,7 +1319,7 @@ def hello_world():
         }
     
         // Voting Information
-        if let Some(vote) = self.state.votes.values().find(|v| v.proposal_id() == proposal_id) {
+        if let Some(vote) = self.state.votes().values().find(|v| v.proposal_id() == proposal_id) {
             report.push_str("## Voting Information\n\n");
             report.push_str("### Vote Details\n\n");
             report.push_str(&format!("- **Vote ID**: {}\n", vote.id()));
@@ -1499,7 +1467,7 @@ def hello_world():
                 tables.push_str("| Team | Points Credited |\n");
                 tables.push_str("|------|------------------|\n");
                 for &team_id in counted {
-                    if let Some(team) = self.state.current_state.teams.get(&team_id) {
+                    if let Some(team) = self.state.current_state().teams().get(&team_id) {
                         tables.push_str(&format!("| {} | {} |\n", team.name(), self.config.counted_vote_points));
                     }
                 }
@@ -1508,7 +1476,7 @@ def hello_world():
                 tables.push_str("| Team | Points Credited |\n");
                 tables.push_str("|------|------------------|\n");
                 for &team_id in uncounted {
-                    if let Some(team) = self.state.current_state.teams.get(&team_id) {
+                    if let Some(team) = self.state.current_state().teams().get(&team_id) {
                         tables.push_str(&format!("| {} | {} |\n", team.name(), self.config.uncounted_vote_points));
                     }
                 }
@@ -1518,7 +1486,7 @@ def hello_world():
                 tables.push_str("| Team | Points Credited |\n");
                 tables.push_str("|------|------------------|\n");
                 for &team_id in participants {
-                    if let Some(team) = self.state.current_state.teams.get(&team_id) {
+                    if let Some(team) = self.state.current_state().teams().get(&team_id) {
                         tables.push_str(&format!("| {} | 0 |\n", team.name()));
                     }
                 }
@@ -1553,7 +1521,7 @@ def hello_world():
         let team_part = proposal.budget_request_details()
             .as_ref()
             .and_then(|details| details.team())
-            .and_then(|team_id| self.state.current_state.teams.get(&team_id))
+            .and_then(|team_id| self.state.current_state().teams().get(&team_id))
             .map(|team| format!("-{}", clean_file_name(&team.name())))
             .unwrap_or_default();
     
@@ -1580,7 +1548,7 @@ def hello_world():
     fn generate_and_save_proposal_report(&self, proposal_id: Uuid, epoch_name: &str) -> Result<PathBuf, Box<dyn Error>> {
         debug!("Generating report for proposal: {:?}", proposal_id);
     
-        let proposal = self.state.proposals.get(&proposal_id)
+        let proposal = self.state.get_proposal(&proposal_id)
             .ok_or_else(|| {
                 let err = format!("Proposal not found: {:?}", proposal_id);
                 error!("{}", err);
@@ -1599,14 +1567,14 @@ def hello_world():
     fn get_current_or_specified_epoch(&self, epoch_name: Option<&str>) -> Result<(&Epoch, Uuid), &'static str> {
         match epoch_name {
             Some(name) => {
-                let (id, epoch) = self.state.epochs.iter()
+                let (id, epoch) = self.state.epochs().iter()
                     .find(|(_, e)| e.name() == name)
                     .ok_or("Specified epoch not found")?;
                 Ok((epoch, *id))
             },
             None => {
-                let current_epoch_id = self.state.current_epoch.ok_or("No active epoch")?;
-                let epoch = self.state.epochs.get(&current_epoch_id).ok_or("Current epoch not found")?;
+                let current_epoch_id = self.state.current_epoch().ok_or("No active epoch")?;
+                let epoch = self.state.epochs().get(&current_epoch_id).ok_or("Current epoch not found")?;
                 Ok((epoch, current_epoch_id))
             }
         }
@@ -1618,17 +1586,17 @@ def hello_world():
     }
 
     fn generate_point_report_for_epoch(&self, epoch_id: Uuid) -> Result<String, &'static str> {
-        let epoch = self.state.epochs.get(&epoch_id).ok_or("Epoch not found")?;
+        let epoch = self.state.epochs().get(&epoch_id).ok_or("Epoch not found")?;
         let mut report = String::new();
 
-        for (team_id, team) in &self.state.current_state.teams {
+        for (team_id, team) in self.state.current_state().teams() {
             let mut team_report = format!("{}, ", team.name());
             let mut total_points = 0;
             let mut allocations = Vec::new();
 
             for proposal_id in epoch.associated_proposals() {
-                if let Some(proposal) = self.state.proposals.get(&proposal_id) {
-                    if let Some(vote) = self.state.votes.values().find(|v| v.proposal_id() == *proposal_id) {
+                if let Some(proposal) = self.state.get_proposal(&proposal_id) {
+                    if let Some(vote) = self.state.votes().values().find(|v| v.proposal_id() == *proposal_id) {
                         let (participation_type, points) = match (vote.vote_type(), vote.participation()) {
                             (VoteType::Formal { counted_points, uncounted_points, .. }, VoteParticipation::Formal { counted, uncounted }) => {
                                 if counted.contains(team_id) {
@@ -1669,7 +1637,7 @@ def hello_world():
     }
 
     fn get_team_points_history(&self, team_id: Uuid) -> Result<Vec<(Uuid, u32)>, &'static str> {
-        self.state.epochs.iter()
+        self.state.epochs().iter()
             .map(|(&epoch_id, _)| {
                 self.get_team_points_for_epoch(team_id, epoch_id)
                     .map(|points| (epoch_id, points))
@@ -1678,11 +1646,11 @@ def hello_world():
     }
 
     fn get_team_points_for_epoch(&self, team_id: Uuid, epoch_id: Uuid) -> Result<u32, &'static str> {
-        let epoch = self.state.epochs.get(&epoch_id).ok_or("Epoch not found")?;
+        let epoch = self.state.epochs().get(&epoch_id).ok_or("Epoch not found")?;
         let mut total_points = 0;
 
         for proposal_id in epoch.associated_proposals() {
-            if let Some(vote) = self.state.votes.values().find(|v| v.proposal_id() == *proposal_id) {
+            if let Some(vote) = self.state.votes().values().find(|v| v.proposal_id() == *proposal_id) {
                 if let (VoteType::Formal { counted_points, uncounted_points, .. }, VoteParticipation::Formal { counted, uncounted }) = (vote.vote_type(), vote.participation()) {
                     if counted.contains(&team_id) {
                         total_points += counted_points;
@@ -1700,11 +1668,11 @@ def hello_world():
         let epoch_id = match epoch_name {
             Some(name) => self.get_epoch_id_by_name(name)
                 .ok_or_else(|| format!("Epoch not found: {}", name))?,
-            None => self.state.current_epoch
+            None => self.state.current_epoch()
                 .ok_or("No active epoch")?
         };
     
-        // Collect necessary data
+        // Check for actionable proposals
         let actionable_proposals = self.get_proposals_for_epoch(epoch_id)
             .iter()
             .filter(|p| p.is_actionable())
@@ -1718,21 +1686,24 @@ def hello_world():
         let mut team_rewards = HashMap::new();
     
         // Calculate rewards
-        if let Some(epoch) = self.state.epochs.get(&epoch_id) {
+        {
+            let epoch = self.state.get_epoch(&epoch_id)
+                .ok_or("Epoch not found")?;
+
             if epoch.is_closed() {
                 return Err("Epoch is already closed".into());
             }
-    
+
             if let Some(reward) = epoch.reward() {
                 if total_points == 0 {
                     return Err("No points earned in this epoch".into());
                 }
-    
-                for (team_id, _) in &self.state.current_state.teams {
+
+                for team_id in self.state.current_state().teams().keys() {
                     let team_points = self.calculate_team_points_for_epoch(*team_id, epoch_id);
-                    let percentage = team_points as f64 / total_points as f64 * 100.0; // Convert to percentage
-                    let amount = reward.amount() * (percentage / 100.0); // Convert percentage back to fraction
-    
+                    let percentage = team_points as f64 / total_points as f64 * 100.0;
+                    let amount = reward.amount() * (percentage / 100.0);
+
                     match TeamReward::new(percentage, amount) {
                         Ok(team_reward) => {
                             team_rewards.insert(*team_id, team_reward);
@@ -1741,42 +1712,43 @@ def hello_world():
                     }
                 }
             }
-        } else {
-            return Err("Epoch not found".into());
         }
     
-        // Update epoch
-        if let Some(epoch) = self.state.epochs.get_mut(&epoch_id) {
+         // Update epoch
+        {
+            let epoch = self.state.get_epoch_mut(&epoch_id)
+                .ok_or("Epoch not found")?;
+
             epoch.set_status(EpochStatus::Closed);
             for (team_id, team_reward) in team_rewards {
                 epoch.set_team_reward(team_id, team_reward.percentage(), team_reward.amount())?;
             }
         }
-    
+
         // Clear current_epoch if this was the active epoch
-        if self.state.current_epoch == Some(epoch_id) {
-            self.state.current_epoch = None;
+        if self.state.current_epoch() == Some(epoch_id) {
+            self.state.set_current_epoch(None);
         }
-    
+
         self.save_state()?;
-    
+
         Ok(())
     }
 
     fn get_total_points_for_epoch(&self, epoch_id: Uuid) -> u32 {
-        self.state.current_state.teams.keys()
+        self.state.current_state().teams().keys()
             .map(|team_id| self.calculate_team_points_for_epoch(*team_id, epoch_id))
             .sum()
     }
 
     fn calculate_team_points_for_epoch(&self, team_id: Uuid, epoch_id: Uuid) -> u32 {
-        let epoch = match self.state.epochs.get(&epoch_id) {
+        let epoch = match self.state.epochs().get(&epoch_id) {
             Some(e) => e,
             None => return 0,
         };
 
         epoch.associated_proposals().iter()
-            .filter_map(|proposal_id| self.state.votes.values().find(|v| v.proposal_id() == *proposal_id))
+            .filter_map(|proposal_id| self.state.votes().values().find(|v| v.proposal_id() == *proposal_id))
             .map(|vote| match (vote.vote_type(), vote.participation()) {
                 (VoteType::Formal { counted_points, uncounted_points, .. }, VoteParticipation::Formal { counted, uncounted }) => {
                     if counted.contains(&team_id) {
@@ -1793,7 +1765,7 @@ def hello_world():
     }
 
     fn generate_end_of_epoch_report(&self, epoch_name: &str) -> Result<(), Box<dyn Error>> {
-        let epoch = self.state.epochs.values()
+        let epoch = self.state.epochs().values()
             .find(|e| e.name() == epoch_name)
             .ok_or_else(|| format!("Epoch not found: {}", epoch_name))?;
 
@@ -1886,7 +1858,7 @@ def hello_world():
     
                     let team_name = proposal.budget_request_details()
                         .and_then(|d| d.team())
-                        .and_then(|id| self.state.current_state.teams.get(&id))
+                        .and_then(|id| self.state.current_state().teams().get(&id))
                         .map_or("N/A".to_string(), |t| t.name().to_string());
     
                     let amounts = proposal.budget_request_details()
@@ -1922,11 +1894,11 @@ def hello_world():
         summary.push_str("| Team Name | Status | Counted Votes | Uncounted Votes | Total Points | % of Total Points | Reward Amount |\n");
         summary.push_str("|-----------|--------|---------------|-----------------|--------------|-------------------|---------------|\n");
 
-        let total_points: u32 = self.state.current_state.teams.keys()
+        let total_points: u32 = self.state.current_state().teams().keys()
             .map(|team_id| self.get_team_points_for_epoch(*team_id, epoch.id()).unwrap_or(0))
             .sum();
 
-        for (team_id, team) in &self.state.current_state.teams {
+        for (team_id, team) in self.state.current_state().teams() {
             let team_points = self.get_team_points_for_epoch(*team_id, epoch.id()).unwrap_or(0);
             let percentage = if total_points > 0 {
                 (team_points as f64 / total_points as f64) * 100.0
@@ -1959,7 +1931,7 @@ def hello_world():
         let mut counted = 0;
         let mut uncounted = 0;
 
-        for vote in self.state.votes.values() {
+        for vote in self.state.votes().values() {
             if vote.epoch_id() == epoch_id {
                 match vote.participation() {
                     VoteParticipation::Formal { counted: c, uncounted: u } => {
@@ -2134,7 +2106,7 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                 max_earner_seats
             )?;
             
-            let raffle = budget_system.state.raffles.get(&raffle_id).unwrap();
+            let raffle = budget_system.state.raffles().get(&raffle_id).unwrap();
 
             println!("Imported predefined raffle for proposal '{}' (Raffle ID: {})", proposal_name, raffle_id);
             println!("  Counted teams: {:?}", counted_teams);
@@ -2174,8 +2146,8 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                 uncounted_points
             )?;
 
-            let vote = budget_system.state.votes.get(&vote_id).unwrap();
-            let proposal = budget_system.state.proposals.get(&vote.proposal_id()).unwrap();
+            let vote = budget_system.state.votes().get(&vote_id).unwrap();
+            let proposal = budget_system.state.proposals().get(&vote.proposal_id()).unwrap();
 
             println!("Imported historical vote for proposal '{}' (Vote ID: {})", proposal_name, vote_id);
             println!("Vote passed: {}", passed);
@@ -2186,7 +2158,7 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
             }
 
             if let VoteType::Formal { raffle_id, .. } = vote.vote_type() {
-                if let Some(raffle) = budget_system.state.raffles.get(&raffle_id) {
+                if let Some(raffle) = budget_system.state.raffles().get(&raffle_id) {
                     if let VoteParticipation::Formal { counted, uncounted } = vote.participation() {
                         println!("\nCounted seats:");
                         for &team_id in counted {
@@ -2491,21 +2463,21 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                     println!("Vote report:\n{}", report);
                 
                     // Print point credits
-                    if let Some(vote_id) = budget_system.state.votes.values()
+                    if let Some(vote_id) = budget_system.state.votes().values()
                         .find(|v| v.proposal_id() == budget_system.get_proposal_id_by_name(&proposal_name).unwrap())
                         .map(|v| v.id())
                     {
-                        let vote = budget_system.state.votes.get(&vote_id).unwrap();
+                        let vote = budget_system.state.votes().get(&vote_id).unwrap();
                         
                         println!("\nPoints credited:");
                         if let VoteParticipation::Formal { counted, uncounted } = &vote.participation() {
                             for &team_id in counted {
-                                if let Some(team) = budget_system.state.current_state.teams.get(&team_id) {
+                                if let Some(team) = budget_system.state.current_state().teams().get(&team_id) {
                                     println!("  {} (+{} points)", team.name(), config.counted_vote_points);
                                 }
                             }
                             for &team_id in uncounted {
-                                if let Some(team) = budget_system.state.current_state.teams.get(&team_id) {
+                                if let Some(team) = budget_system.state.current_state().teams().get(&team_id) {
                                     println!("  {} (+{} points)", team.name(), config.uncounted_vote_points);
                                 }
                             }
@@ -2564,11 +2536,11 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                 Ok(_) => {
                     let epoch_info = epoch_name_clone.clone().unwrap_or("Active epoch".to_string());
                     println!("Successfully closed epoch: {}", epoch_info);
-                    if let Some(epoch) = budget_system.state.epochs.values().find(|e| e.name() == epoch_name_clone.as_deref().unwrap_or("")) {
+                    if let Some(epoch) = budget_system.state.epochs().values().find(|e| e.name() == epoch_name_clone.as_deref().unwrap_or("")) {
                         if let Some(reward) = epoch.reward() {
                             println!("Rewards allocated:");
                             for (team_id, team_reward) in epoch.team_rewards() {
-                                if let Some(team) = budget_system.state.current_state.teams.get(team_id) {
+                                if let Some(team) = budget_system.state.current_state().teams().get(team_id) {
                                     println!("  {}: {} {} ({:.2}%)", team.name(), team_reward.amount(), reward.token(), team_reward.percentage() * 100.0);
                                 }
                             }
@@ -2769,8 +2741,8 @@ mod tests {
         ).await.unwrap();
 
         // Verify the loaded state
-        assert_eq!(loaded_system.state.epochs.len(), 1);
-        assert_eq!(loaded_system.state.current_state.teams.len(), 1);
+        assert_eq!(loaded_system.state.epochs().len(), 1);
+        assert_eq!(loaded_system.state.current_state().teams().len(), 1);
     }
 
     #[tokio::test]
