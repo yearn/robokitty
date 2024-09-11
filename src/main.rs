@@ -157,7 +157,7 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
             println!("Set epoch reward: {} {}", amount, token);
         },
         ScriptCommand::AddTeam { name, representative, trailing_monthly_revenue } => {
-            let team_id = budget_system.add_team(name.clone(), representative, trailing_monthly_revenue)?;
+            let team_id = budget_system.create_team(name.clone(), representative, trailing_monthly_revenue)?;
             println!("Added team: {} ({})", name, team_id);
         },
         ScriptCommand::AddProposal { title, url, budget_request_details, announced_at, published_at, is_historical } => {
@@ -198,7 +198,7 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                 max_earner_seats
             )?;
             
-            let raffle = budget_system.state.raffles().get(&raffle_id).unwrap();
+            let raffle = budget_system.state().raffles().get(&raffle_id).unwrap();
 
             println!("Imported predefined raffle for proposal '{}' (Raffle ID: {})", proposal_name, raffle_id);
             println!("  Counted teams: {:?}", counted_teams);
@@ -238,8 +238,8 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                 uncounted_points
             )?;
 
-            let vote = budget_system.state.votes().get(&vote_id).unwrap();
-            let proposal = budget_system.state.proposals().get(&vote.proposal_id()).unwrap();
+            let vote = budget_system.state().votes().get(&vote_id).unwrap();
+            let proposal = budget_system.state().proposals().get(&vote.proposal_id()).unwrap();
 
             println!("Imported historical vote for proposal '{}' (Vote ID: {})", proposal_name, vote_id);
             println!("Vote passed: {}", passed);
@@ -250,7 +250,7 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
             }
 
             if let VoteType::Formal { raffle_id, .. } = vote.vote_type() {
-                if let Some(raffle) = budget_system.state.raffles().get(&raffle_id) {
+                if let Some(raffle) = budget_system.state().raffles().get(&raffle_id) {
                     if let VoteParticipation::Formal { counted, uncounted } = vote.participation() {
                         println!("\nCounted seats:");
                         for &team_id in counted {
@@ -290,8 +290,8 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                 randomness_block,
                 team_order.clone(),
                 excluded_teams.clone(),
-                total_counted_seats.or(Some(budget_system.config.default_total_counted_seats)),
-                max_earner_seats.or(Some(budget_system.config.default_max_earner_seats)),
+                total_counted_seats.or(Some(budget_system.config().default_total_counted_seats)),
+                max_earner_seats.or(Some(budget_system.config().default_max_earner_seats)),
             ).await?;
 
             println!("Imported historical raffle for proposal '{}' (Raffle ID: {})", proposal_name, raffle_id);
@@ -446,7 +446,7 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                 println!("Excluded teams: {:?}", excluded);
             }
 
-            let current_block = budget_system.ethereum_service.get_current_block().await?;
+            let current_block = budget_system.ethereum_service().get_current_block().await?;
             println!("Current block number: {}", current_block);
 
             let initiation_block = current_block;
@@ -457,9 +457,9 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
             // Wait for target block
             println!("Waiting for target block...");
             let mut last_observed_block = current_block;
-            while budget_system.ethereum_service.get_current_block().await? < target_block {
+            while budget_system.ethereum_service().get_current_block().await? < target_block {
                 tokio::time::sleep(Duration::from_secs(1)).await;
-                let new_block = budget_system.ethereum_service.get_current_block().await?;
+                let new_block = budget_system.ethereum_service().get_current_block().await?;
                 if new_block != last_observed_block {
                     println!("Latest observed block: {}", new_block);
                     last_observed_block = new_block;
@@ -467,7 +467,7 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
             }
 
             // FINALIZATION PHASE
-            let randomness = budget_system.ethereum_service.get_randomness(target_block).await?;
+            let randomness = budget_system.ethereum_service().get_randomness(target_block).await?;
             println!("Block randomness: {}", randomness);
             println!("Etherscan URL: https://etherscan.io/block/{}#consensusinfo", target_block);
 
@@ -555,21 +555,21 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                     println!("Vote report:\n{}", report);
                 
                     // Print point credits
-                    if let Some(vote_id) = budget_system.state.votes().values()
+                    if let Some(vote_id) = budget_system.state().votes().values()
                         .find(|v| v.proposal_id() == budget_system.get_proposal_id_by_name(&proposal_name).unwrap())
                         .map(|v| v.id())
                     {
-                        let vote = budget_system.state.votes().get(&vote_id).unwrap();
+                        let vote = budget_system.state().votes().get(&vote_id).unwrap();
                         
                         println!("\nPoints credited:");
                         if let VoteParticipation::Formal { counted, uncounted } = &vote.participation() {
                             for &team_id in counted {
-                                if let Some(team) = budget_system.state.current_state().teams().get(&team_id) {
+                                if let Some(team) = budget_system.state().current_state().teams().get(&team_id) {
                                     println!("  {} (+{} points)", team.name(), config.counted_vote_points);
                                 }
                             }
                             for &team_id in uncounted {
-                                if let Some(team) = budget_system.state.current_state().teams().get(&team_id) {
+                                if let Some(team) = budget_system.state().current_state().teams().get(&team_id) {
                                     println!("  {} (+{} points)", team.name(), config.uncounted_vote_points);
                                 }
                             }
@@ -628,11 +628,11 @@ async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptComman
                 Ok(_) => {
                     let epoch_info = epoch_name_clone.clone().unwrap_or("Active epoch".to_string());
                     println!("Successfully closed epoch: {}", epoch_info);
-                    if let Some(epoch) = budget_system.state.epochs().values().find(|e| e.name() == epoch_name_clone.as_deref().unwrap_or("")) {
+                    if let Some(epoch) = budget_system.state().epochs().values().find(|e| e.name() == epoch_name_clone.as_deref().unwrap_or("")) {
                         if let Some(reward) = epoch.reward() {
                             println!("Rewards allocated:");
                             for (team_id, team_reward) in epoch.team_rewards() {
-                                if let Some(team) = budget_system.state.current_state().teams().get(team_id) {
+                                if let Some(team) = budget_system.state().current_state().teams().get(team_id) {
                                     println!("  {}: {} {} ({:.2}%)", team.name(), team_reward.amount(), reward.token(), team_reward.percentage() * 100.0);
                                 }
                             }
@@ -774,13 +774,12 @@ mod tests {
     }
 
     // Helper function to create a test BudgetSystem
-    async fn create_test_budget_system() -> BudgetSystem {
-        let temp_dir = TempDir::new().unwrap();
+    async fn create_test_budget_system(state_file: &str) -> BudgetSystem {
         let config = AppConfig {
-            state_file: temp_dir.path().join("test_state.json").to_str().unwrap().to_string(),
-            ipc_path: temp_dir.path().join("test_reth.ipc").to_str().unwrap().to_string(),
+            state_file: state_file.to_string(),
+            ipc_path: "/tmp/test_reth.ipc".to_string(),
             future_block_offset: 10,
-            script_file: temp_dir.path().join("test_script.json").to_str().unwrap().to_string(),
+            script_file: "test_script.json".to_string(),
             default_total_counted_seats: 7,
             default_max_earner_seats: 5,
             default_qualified_majority_threshold: 0.7,
@@ -792,7 +791,7 @@ mod tests {
             },
         };
         let ethereum_service = Arc::new(MockEthereumService);
-        BudgetSystem::new(config, ethereum_service).await.unwrap()
+        BudgetSystem::load_from_file(state_file, config, ethereum_service).await.unwrap()
     }
 
     // Helper function to create and activate an epoch
@@ -808,39 +807,53 @@ mod tests {
     async fn test_save_and_load_state() {
         // Create a temporary directory for this test
         let temp_dir = TempDir::new().unwrap();
-        let state_file = temp_dir.path().join("test_state.json");
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
 
-        // Get a default test budget system
-        let mut budget_system = create_test_budget_system().await;
+        // Create a BudgetSystem and modify its state
+        let mut budget_system = create_test_budget_system(&state_file).await;
 
-        // Modify the state_file in the config
-        budget_system.config.state_file = state_file.to_str().unwrap().to_string();
-
-        // Create an epoch and add a team
+        // Create an epoch
         let start_date = Utc::now();
         let end_date = start_date + chrono::Duration::days(30);
-        budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
-        budget_system.add_team("Test Team".to_string(), "Representative".to_string(), Some(vec![1000, 2000, 3000])).unwrap();
+        let epoch_id = budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
+
+        // Add a team
+        let team_id = budget_system.create_team("Test Team".to_string(), "Representative".to_string(), Some(vec![1000, 2000, 3000])).unwrap();
 
         // Save the state
         budget_system.save_state().unwrap();
 
-        // Load the state into a new BudgetSystem
-        let ethereum_service = Arc::new(MockEthereumService);
-        let loaded_system = BudgetSystem::load_from_file(
-            &budget_system.config.state_file,
-            budget_system.config.clone(),
-            ethereum_service
-        ).await.unwrap();
+        // Create a new BudgetSystem and load the state
+        let loaded_system = create_test_budget_system(&state_file).await;
 
         // Verify the loaded state
-        assert_eq!(loaded_system.state.epochs().len(), 1);
-        assert_eq!(loaded_system.state.current_state().teams().len(), 1);
+        assert_eq!(loaded_system.state().epochs().len(), 1);
+        assert!(loaded_system.state().epochs().contains_key(&epoch_id));
+        assert_eq!(loaded_system.state().current_state().teams().len(), 1);
+        assert!(loaded_system.state().current_state().teams().contains_key(&team_id));
+
+        // Verify epoch details
+        let loaded_epoch = loaded_system.get_epoch(&epoch_id).unwrap();
+        assert_eq!(loaded_epoch.name(), "Test Epoch");
+
+        // Verify team details
+        let loaded_team = loaded_system.get_team(&team_id).unwrap();
+        assert_eq!(loaded_team.name(), "Test Team");
+        assert_eq!(loaded_team.representative(), "Representative");
+        if let TeamStatus::Earner { trailing_monthly_revenue } = loaded_team.status() {
+            assert_eq!(trailing_monthly_revenue, &vec![1000, 2000, 3000]);
+        } else {
+            panic!("Expected Earner status");
+        }
     }
 
     #[tokio::test]
     async fn test_create_epoch() {
-        let mut budget_system = create_test_budget_system().await;
+        // Create a temporary directory for this test
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+       
+        let mut budget_system = create_test_budget_system(&state_file).await;
         let _epoch_id = create_active_epoch(&mut budget_system, "Test Epoch", 30).await;
         
         let epoch = budget_system.get_current_epoch().unwrap();

@@ -25,13 +25,13 @@ use std::{
 use log::{info, debug, error};
 
 pub struct BudgetSystem {
-    pub state: BudgetSystemState,
-    pub ethereum_service: Arc<dyn EthereumServiceTrait>,
-    pub config: AppConfig,
+    state: BudgetSystemState,
+    ethereum_service: Arc<dyn EthereumServiceTrait>,
+    config: AppConfig,
 }
 
 impl BudgetSystem {
-    pub async fn new(config: AppConfig, ethereum_service: Arc<dyn EthereumServiceTrait>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn new(config: AppConfig, ethereum_service: Arc<dyn EthereumServiceTrait>) -> Result<Self, Box<dyn Error>> {
         if let Some(parent) = Path::new(&config.state_file).parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -43,30 +43,72 @@ impl BudgetSystem {
         })
     }
 
-    pub fn add_team(&mut self, name: String, representative: String, trailing_monthly_revenue: Option<Vec<u64>>) -> Result<Uuid, &'static str> {
+    pub fn state(&self) -> &BudgetSystemState {
+        &self.state
+    }
+
+    pub fn config(&self) -> &AppConfig {
+        &self.config
+    }
+
+    pub fn set_config(&mut self, config: AppConfig) {
+        self.config = config;
+    }
+
+    pub fn get_team(&self, id: &Uuid) -> Option<&Team> {
+        self.state.current_state().teams().get(id)
+    }
+
+    pub fn get_proposal(&self, id: &Uuid) -> Option<&Proposal> {
+        self.state.proposals().get(id)
+    }
+
+    pub fn get_epoch(&self, id: &Uuid) -> Option<&Epoch> {
+        self.state.epochs().get(id)
+    }
+
+    pub fn get_raffle(&self, id: &Uuid) -> Option<&Raffle> {
+        self.state.raffles().get(id)
+    }
+
+    pub fn get_vote(&self, id: &Uuid) -> Option<&Vote> {
+        self.state.votes().get(id)
+    }
+
+    pub fn create_team(&mut self, name: String, representative: String, trailing_monthly_revenue: Option<Vec<u64>>) -> Result<Uuid, Box<dyn Error>> {
         let team = Team::new(name, representative, trailing_monthly_revenue)?;
         let id = self.state.add_team(team);
-        self.save_state();
+        self.save_state()?;
         Ok(id)
     }
 
-    pub fn remove_team(&mut self, team_id: Uuid) -> Result<(), &'static str> {
-        if self.state.remove_team(team_id).is_some() {
-            self.save_state();
-            Ok(())
-        } else {
-            Err("Team not found")
-        }
+    pub fn remove_team(&mut self, team_id: Uuid) -> Result<(), Box<dyn Error>> {
+        self.state.remove_team(team_id).ok_or("Team not found")?;
+        self.save_state()?;
+        Ok(())
     }
 
-    pub fn update_team_status(&mut self, team_id: Uuid, new_status: &TeamStatus) -> Result<(), &'static str> {
-        if let Some(team) = self.state.get_team_mut(&team_id) {
-            team.set_status(new_status.clone())?;
-            self.save_state();
-            Ok(())
-        } else {
-            Err("Team not found")
-        }
+    pub fn update_team_status(&mut self, team_id: Uuid, new_status: &TeamStatus) -> Result<(), Box<dyn Error>> {
+        let team = self.state.get_team_mut(&team_id).ok_or("Team not found")?;
+        team.set_status(new_status.clone())?;
+        self.save_state()?;
+        Ok(())
+    }
+
+    pub fn ethereum_service(&self) -> &Arc<dyn EthereumServiceTrait> {
+        &self.ethereum_service
+    }
+
+    pub async fn get_current_block(&self) -> Result<u64, Box<dyn Error>> {
+        self.ethereum_service.get_current_block().await
+    }
+
+    pub async fn get_randomness(&self, block_number: u64) -> Result<String, Box<dyn Error>> {
+        self.ethereum_service.get_randomness(block_number).await
+    }
+
+    pub async fn get_raffle_randomness(&self) -> Result<(u64, u64, String), Box<dyn Error>> {
+        self.ethereum_service.get_raffle_randomness().await
     }
 
     pub fn save_state(&self) -> Result<(), Box<dyn std::error::Error>> {
