@@ -9,7 +9,7 @@ pub enum TeamStatus {
     Inactive,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Team {
     id: Uuid,
     name: String,
