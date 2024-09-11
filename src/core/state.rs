@@ -249,7 +249,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use uuid::Uuid;
-    use crate::{TeamStatus, RaffleConfig, VoteType};
+    use crate::core::models::{TeamStatus, RaffleConfig, VoteType};
 
     // Helper functions to create test entities
     fn create_test_team(name: &str) -> Team {

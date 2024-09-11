@@ -1,4 +1,4 @@
-use crate::BudgetSystem;
+use crate::core::budget_system::BudgetSystem;
 use teloxide::prelude::*;
 use teloxide::types::ParseMode;
 use tokio::sync::mpsc;
