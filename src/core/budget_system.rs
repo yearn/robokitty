@@ -1953,3 +1953,612 @@ def hello_world():
         (counted, uncounted)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Utc, Duration};
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use uuid::Uuid;
+    use async_trait::async_trait;
+    use crate::app_config::TelegramConfig;
+
+    struct MockEthereumService;
+
+    #[async_trait]
+    impl EthereumServiceTrait for MockEthereumService {
+        async fn get_current_block(&self) -> Result<u64, Box<dyn std::error::Error>> {
+            Ok(12345)
+        }
+
+        async fn get_randomness(&self, block_number: u64) -> Result<String, Box<dyn std::error::Error>> {
+            Ok(format!("mock_randomness_for_block_{}", block_number))
+        }
+
+        async fn get_raffle_randomness(&self) -> Result<(u64, u64, String), Box<dyn std::error::Error>> {
+            Ok((12345, 12355, "mock_randomness".to_string()))
+        }
+    }
+
+    // Helpers
+
+    async fn create_test_budget_system(state_file: &str) -> BudgetSystem {
+        let config = AppConfig {
+            state_file: state_file.to_string(),
+            ipc_path: "/tmp/test_reth.ipc".to_string(),
+            future_block_offset: 10,
+            script_file: "test_script.json".to_string(),
+            default_total_counted_seats: 7,
+            default_max_earner_seats: 5,
+            default_qualified_majority_threshold: 0.7,
+            counted_vote_points: 5,
+            uncounted_vote_points: 2,
+            telegram: TelegramConfig {
+                chat_id: "test_chat_id".to_string(),
+                token: "test_token".to_string(),
+            },
+        };
+        let ethereum_service = Arc::new(MockEthereumService);
+        BudgetSystem::new(config, ethereum_service).await.unwrap()
+    }
+
+    async fn create_active_epoch(budget_system: &mut BudgetSystem) -> Uuid {
+        let start_date = Utc::now();
+        let end_date = start_date + Duration::days(30);
+        let epoch_id = budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
+        budget_system.activate_epoch(epoch_id).unwrap();
+        epoch_id
+    }
+
+    async fn create_proposal_with_raffle(budget_system: &mut BudgetSystem, proposal_name: &str) -> (Uuid, Uuid) {
+        let proposal_id = budget_system.add_proposal(
+            proposal_name.to_string(),
+            None,
+            None,
+            Some(Utc::now().date_naive()),
+            Some(Utc::now().date_naive()),
+            None
+        ).unwrap();
+    
+        let config = budget_system.config().clone();
+        let (raffle_id, _) = budget_system.prepare_raffle(proposal_name, None, &config).unwrap();
+        budget_system.finalize_raffle(
+            raffle_id,
+            12345,
+            12355,
+            "mock_randomness".to_string()
+        ).await.unwrap();
+    
+        (proposal_id, raffle_id)
+    }
+    
+    // Tests
+
+    #[tokio::test]
+    async fn test_state_management() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+
+        // Test creating a new BudgetSystem
+        let mut budget_system = create_test_budget_system(&state_file).await;
+        assert!(budget_system.state().epochs().is_empty());
+        assert!(budget_system.state().current_state().teams().is_empty());
+
+        // Modify state
+        let epoch_id = budget_system.create_epoch("Test Epoch", Utc::now(), Utc::now() + Duration::days(30)).unwrap();
+        let team_id = budget_system.create_team("Test Team".to_string(), "Representative".to_string(), Some(vec![1000, 2000, 3000])).unwrap();
+
+        // Test saving state
+        budget_system.save_state().unwrap();
+
+        // Test loading state
+        let loaded_system = BudgetSystem::load_from_file(&state_file, budget_system.config().clone(), Arc::new(MockEthereumService)).await.unwrap();
+        assert_eq!(loaded_system.state().epochs().len(), 1);
+        assert!(loaded_system.state().epochs().contains_key(&epoch_id));
+        assert_eq!(loaded_system.state().current_state().teams().len(), 1);
+        assert!(loaded_system.state().current_state().teams().contains_key(&team_id));
+
+        // Test loading from non-existent file (should create new system)
+        let non_existent_file = temp_dir.path().join("non_existent.json").to_str().unwrap().to_string();
+        let new_system = BudgetSystem::load_from_file(&non_existent_file, budget_system.config().clone(), Arc::new(MockEthereumService)).await.unwrap();
+        assert!(new_system.state().epochs().is_empty());
+        assert!(new_system.state().current_state().teams().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_epoch_management() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+        let mut budget_system = create_test_budget_system(&state_file).await;
+
+        // Test creating a new epoch
+        let start_date = Utc::now();
+        let end_date = start_date + Duration::days(30);
+        let epoch_id = budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
+        let epoch = budget_system.get_epoch(&epoch_id).unwrap();
+        assert_eq!(epoch.name(), "Test Epoch");
+        assert_eq!(epoch.start_date(), start_date);
+        assert_eq!(epoch.end_date(), end_date);
+
+        // Test activating an epoch
+        budget_system.activate_epoch(epoch_id).unwrap();
+        assert_eq!(budget_system.state().current_epoch(), Some(epoch_id));
+
+        // Test setting epoch reward
+        budget_system.set_epoch_reward("ETH", 100.0).unwrap();
+        let updated_epoch = budget_system.get_epoch(&epoch_id).unwrap();
+        assert_eq!(updated_epoch.reward().unwrap().token(), "ETH");
+        assert_eq!(updated_epoch.reward().unwrap().amount(), 100.0);
+
+        // Test creating overlapping epoch (should fail)
+        let overlapping_start = start_date + Duration::days(15);
+        let overlapping_end = end_date + Duration::days(15);
+        assert!(budget_system.create_epoch("Overlapping Epoch", overlapping_start, overlapping_end).is_err());
+
+        // Test activating an epoch when another is already active (should fail)
+        let another_epoch_id = budget_system.create_epoch("Another Epoch", end_date + Duration::days(1), end_date + Duration::days(31)).unwrap();
+        assert!(budget_system.activate_epoch(another_epoch_id).is_err());
+
+        // Ensure points are earned before closing an epoch
+        let team_id = budget_system.create_team("Test Team".to_string(), "Rep".to_string(), Some(vec![1000])).unwrap();
+        let (proposal_id, raffle_id) = create_proposal_with_raffle(&mut budget_system, "Test Proposal").await;
+        let vote_id = budget_system.create_formal_vote(proposal_id, raffle_id, None).unwrap();
+        budget_system.cast_votes(vote_id, vec![(team_id, VoteChoice::Yes)]).unwrap();
+        budget_system.close_vote(vote_id).unwrap();
+
+        // Close the proposal before closing the epoch
+        budget_system.close_with_reason(proposal_id, &Resolution::Approved).unwrap();
+
+        budget_system.close_epoch(Some("Test Epoch")).unwrap();
+        let closed_epoch = budget_system.get_epoch(&epoch_id).unwrap();
+        assert!(closed_epoch.is_closed());
+        assert_eq!(budget_system.state().current_epoch(), None);
+    }
+
+    #[tokio::test]
+    async fn test_team_management() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+        let mut budget_system = create_test_budget_system(&state_file).await;
+
+        // Test creating a new team
+        let team_id = budget_system.create_team(
+            "Test Team".to_string(),
+            "Representative".to_string(),
+            Some(vec![1000, 2000, 3000])
+        ).unwrap();
+        let team = budget_system.get_team(&team_id).unwrap();
+        assert_eq!(team.name(), "Test Team");
+        assert_eq!(team.representative(), "Representative");
+        assert!(matches!(team.status(), TeamStatus::Earner { .. }));
+
+        // Test updating team status
+        budget_system.update_team_status(team_id, &TeamStatus::Supporter).unwrap();
+        let updated_team = budget_system.get_team(&team_id).unwrap();
+        assert!(matches!(updated_team.status(), TeamStatus::Supporter));
+
+        // Test getting team by name
+        let team_id_by_name = budget_system.get_team_id_by_name("Test Team").unwrap();
+        assert_eq!(team_id_by_name, team_id);
+
+        // Test removing a team
+        budget_system.remove_team(team_id).unwrap();
+        assert!(budget_system.get_team(&team_id).is_none());
+
+        // Test creating a team with invalid data (should fail)
+        assert!(budget_system.create_team("".to_string(), "Representative".to_string(), None).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_proposal_management() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+        let mut budget_system = create_test_budget_system(&state_file).await;
+
+        // Create an active epoch
+        let epoch_id = create_active_epoch(&mut budget_system).await;
+
+        // Test adding a new proposal
+        let proposal_id = budget_system.add_proposal(
+            "Test Proposal".to_string(),
+            Some("http://example.com".to_string()),
+            Some(BudgetRequestDetails::new(
+                None,
+                [("ETH".to_string(), 100.0)].iter().cloned().collect(),
+                Some(Utc::now().date_naive()),
+                Some((Utc::now() + Duration::days(30)).date_naive()),
+                None
+            ).unwrap()),
+            Some(Utc::now().date_naive()),
+            Some(Utc::now().date_naive()),
+            None
+        ).unwrap();
+
+        let proposal = budget_system.get_proposal(&proposal_id).unwrap();
+        assert_eq!(proposal.title(), "Test Proposal");
+
+        // Test updating a proposal
+        let updates = UpdateProposalDetails {
+            title: Some("Updated Proposal".to_string()),
+            url: None,
+            budget_request_details: None,
+            announced_at: None,
+            published_at: None,
+            resolved_at: None,
+        };
+        budget_system.update_proposal("Test Proposal", updates).unwrap();
+        let updated_proposal = budget_system.get_proposal(&proposal_id).unwrap();
+        assert_eq!(updated_proposal.title(), "Updated Proposal");
+
+        // Test closing a proposal
+        budget_system.close_with_reason(proposal_id, &Resolution::Approved).unwrap();
+        let closed_proposal = budget_system.get_proposal(&proposal_id).unwrap();
+        assert!(closed_proposal.is_closed());
+        assert_eq!(closed_proposal.resolution(), Some(Resolution::Approved));
+
+        // Test getting proposals for an epoch
+        let epoch_proposals = budget_system.get_proposals_for_epoch(epoch_id);
+        assert_eq!(epoch_proposals.len(), 1);
+        assert_eq!(epoch_proposals[0].id(), proposal_id);
+
+        // Test adding a proposal without an active epoch (should fail)
+        budget_system.close_epoch(None).unwrap();
+        assert!(budget_system.add_proposal(
+            "Failed Proposal".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None
+        ).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_raffle_management() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+        let mut budget_system = create_test_budget_system(&state_file).await;
+
+        // Create an active epoch and a proposal
+        let epoch_id = create_active_epoch(&mut budget_system).await;
+        let proposal_id = budget_system.add_proposal(
+            "Test Proposal".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None
+        ).unwrap();
+
+        // Create some teams
+        let team_id1 = budget_system.create_team("Team 1".to_string(), "Rep 1".to_string(), Some(vec![1000])).unwrap();
+        let team_id2 = budget_system.create_team("Team 2".to_string(), "Rep 2".to_string(), None).unwrap();
+
+        // Test preparing a raffle
+        let config = budget_system.config().clone();
+        let (raffle_id, tickets) = budget_system.prepare_raffle(
+            "Test Proposal",
+            None,
+            &config
+        ).unwrap();
+        assert!(!tickets.is_empty());
+
+        // Test finalizing a raffle
+        let raffle = budget_system.finalize_raffle(
+            raffle_id,
+            12345,
+            12355,
+            "mock_randomness".to_string()
+        ).await.unwrap();
+        assert!(raffle.result().is_some());
+
+        // Test importing a predefined raffle
+        let imported_raffle_id = budget_system.import_predefined_raffle(
+            "Test Proposal",
+            vec!["Team 1".to_string()],
+            vec!["Team 2".to_string()],
+            1,
+            1
+        ).unwrap();
+        let imported_raffle = budget_system.get_raffle(&imported_raffle_id).unwrap();
+        assert_eq!(imported_raffle.result().unwrap().counted(), &[team_id1]);
+        assert_eq!(imported_raffle.result().unwrap().uncounted(), &[team_id2]);
+
+        // Test importing a historical raffle
+        let (historical_raffle_id, historical_raffle) = budget_system.import_historical_raffle(
+            "Test Proposal",
+            12345,
+            12355,
+            Some(vec!["Team 1".to_string(), "Team 2".to_string()]),
+            None,
+            Some(2),
+            Some(1)
+        ).await.unwrap();
+        assert_eq!(historical_raffle.config().initiation_block(), 12345);
+        assert_eq!(historical_raffle.config().randomness_block(), 12355);
+        assert!(historical_raffle.result().is_some());
+
+        // Test raffle exclusions
+        let excluded_raffle_id = budget_system.import_predefined_raffle(
+            "Test Proposal",
+            vec!["Team 1".to_string()],
+            vec![],
+            1,
+            1
+        ).unwrap();
+        let excluded_raffle = budget_system.get_raffle(&excluded_raffle_id).unwrap();
+        assert_eq!(excluded_raffle.result().unwrap().counted(), &[team_id1]);
+        assert!(excluded_raffle.result().unwrap().uncounted().is_empty());
+
+        // Test invalid raffle creation (non-existent proposal)
+        assert!(budget_system.prepare_raffle(
+            "Non-existent Proposal",
+            None,
+            &config
+        ).is_err());
+
+        // Test invalid raffle finalization (non-existent raffle)
+        assert!(budget_system.finalize_raffle(
+            Uuid::new_v4(),
+            12345,
+            12355,
+            "mock_randomness".to_string()
+        ).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_vote_management() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+        let mut budget_system = create_test_budget_system(&state_file).await;
+
+        create_active_epoch(&mut budget_system).await;
+        let proposal_id = budget_system.add_proposal("Test Proposal".to_string(), None, None, None, None, None).unwrap();
+
+        // Create teams
+        let team_id1 = budget_system.create_team("Team 1".to_string(), "Rep 1".to_string(), Some(vec![1000])).unwrap();
+        let team_id2 = budget_system.create_team("Team 2".to_string(), "Rep 2".to_string(), Some(vec![2000])).unwrap();
+
+        // Prepare and finalize raffle
+        let config = budget_system.config().clone();
+        let (raffle_id, _) = budget_system.prepare_raffle("Test Proposal", None, &config).unwrap();
+        let mock_randomness = "mock_randomness".to_string();
+        budget_system.finalize_raffle(raffle_id, 12345, 12355, mock_randomness).await.unwrap();
+
+        // Create and process a formal vote
+        let formal_vote_id = budget_system.create_formal_vote(proposal_id, raffle_id, None).unwrap();
+        budget_system.cast_votes(formal_vote_id, vec![(team_id1, VoteChoice::Yes), (team_id2, VoteChoice::No)]).unwrap();
+
+        // Test closing a vote
+        let vote_result = budget_system.close_vote(formal_vote_id).unwrap();
+        let closed_vote = budget_system.get_vote(&formal_vote_id).unwrap();
+        assert!(closed_vote.is_closed());
+        assert!(matches!(closed_vote.result(), Some(VoteResult::Formal { .. })));
+
+        // Verify vote result
+        if let Some(VoteResult::Formal { counted, uncounted, passed }) = closed_vote.result() {
+            assert_eq!(counted.yes() + counted.no(), 2);
+            assert_eq!(uncounted.yes() + uncounted.no(), 0);
+            assert_eq!(*passed, vote_result);
+        } else {
+            panic!("Expected Formal vote result");
+        }
+
+        // Test error case: closing an already closed vote
+        assert!(budget_system.close_vote(formal_vote_id).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_reporting() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+        let mut budget_system = create_test_budget_system(&state_file).await;
+    
+        let epoch_id = create_active_epoch(&mut budget_system).await;
+        let team_id = budget_system.create_team("Test Team".to_string(), "Rep".to_string(), Some(vec![1000])).unwrap();
+        
+        // Create proposal and raffle
+        let proposal_id = budget_system.add_proposal("Test Proposal".to_string(), None, None, None, None, None).unwrap();
+        let config = budget_system.config().clone();
+        let (raffle_id, _) = budget_system.prepare_raffle("Test Proposal", None, &config).unwrap();
+        
+        // Finalize raffle with the team included
+        let mock_randomness = "mock_randomness".to_string();
+        budget_system.finalize_raffle(raffle_id, 12345, 12355, mock_randomness).await.unwrap();
+    
+        // Create and process a vote
+        let vote_id = budget_system.create_formal_vote(proposal_id, raffle_id, None).unwrap();
+        budget_system.cast_votes(vote_id, vec![(team_id, VoteChoice::Yes)]).unwrap();
+        budget_system.close_vote(vote_id).unwrap();
+    
+        // Generate reports
+        let team_report = budget_system.print_team_report();
+        assert!(team_report.contains("Test Team"));
+    
+        let epoch_state = budget_system.print_epoch_state().unwrap();
+        assert!(epoch_state.contains("Test Proposal"));
+    
+        let proposal_report = budget_system.generate_proposal_report(proposal_id).unwrap();
+        assert!(proposal_report.contains("Test Proposal"));
+    
+        let point_report = budget_system.generate_point_report(None).unwrap();
+        assert!(point_report.contains("Test Team"));
+    
+        // Close proposal before closing epoch
+        budget_system.close_with_reason(proposal_id, &Resolution::Approved).unwrap();
+    
+        budget_system.close_epoch(None).unwrap();
+        budget_system.generate_end_of_epoch_report(&budget_system.get_epoch(&epoch_id).unwrap().name()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_integration() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+        let mut budget_system = create_test_budget_system(&state_file).await;
+
+        // Create and activate an epoch
+        let epoch_id = create_active_epoch(&mut budget_system).await;
+        budget_system.set_epoch_reward("ETH", 1000.0).unwrap();
+
+        // Create teams
+        let team_id1 = budget_system.create_team("Team 1".to_string(), "Rep 1".to_string(), Some(vec![1000])).unwrap();
+        let team_id2 = budget_system.create_team("Team 2".to_string(), "Rep 2".to_string(), Some(vec![2000])).unwrap();
+        let team_id3 = budget_system.create_team("Team 3".to_string(), "Rep 3".to_string(), None).unwrap();
+
+        // Create a proposal
+        let proposal_id = budget_system.add_proposal(
+            "Test Proposal".to_string(),
+            Some("http://example.com".to_string()),
+            Some(BudgetRequestDetails::new(
+                Some(team_id1),
+                [("ETH".to_string(), 100.0)].iter().cloned().collect(),
+                Some(Utc::now().date_naive()),
+                Some((Utc::now() + Duration::days(30)).date_naive()),
+                None
+            ).unwrap()),
+            Some(Utc::now().date_naive()),
+            Some(Utc::now().date_naive()),
+            None
+        ).unwrap();
+
+        // Conduct a raffle
+        let config = budget_system.config().clone();
+        let (raffle_id, _) = budget_system.prepare_raffle("Test Proposal", None, &config).unwrap();
+        budget_system.finalize_raffle(raffle_id, 12345, 12355, "mock_randomness".to_string()).await.unwrap();
+        
+        // Generate epoch report
+        let epoch_state = budget_system.print_epoch_state().unwrap();
+        assert!(epoch_state.contains("Test Proposal"));
+
+        // Create and process a vote
+        let vote_id = budget_system.create_formal_vote(proposal_id, raffle_id, None).unwrap();
+        budget_system.cast_votes(vote_id, vec![
+            (team_id1, VoteChoice::Yes),
+            (team_id2, VoteChoice::Yes),
+            (team_id3, VoteChoice::No)
+        ]).unwrap();
+        let vote_result = budget_system.close_vote(vote_id).unwrap();
+        
+        // Verify the actual vote result
+        let vote = budget_system.get_vote(&vote_id).unwrap();
+        if let Some(VoteResult::Formal { passed, .. }) = vote.result() {
+            assert_eq!(*passed, vote_result);
+        } else {
+            panic!("Expected Formal vote result");
+        }
+
+        // Close the proposal
+        budget_system.close_with_reason(proposal_id, &Resolution::Approved).unwrap();
+        
+
+        // Close the epoch
+        budget_system.close_epoch(None).unwrap();
+
+        // Generate other report
+        let team_report = budget_system.print_team_report();
+        let proposal_report = budget_system.generate_proposal_report(proposal_id).unwrap();
+        let point_report = budget_system.generate_point_report(Some("Test Epoch")).unwrap();
+        budget_system.generate_end_of_epoch_report(&budget_system.get_epoch(&epoch_id).unwrap().name()).unwrap();
+
+        // Verify the integrations
+        assert!(team_report.contains("Team 1") && team_report.contains("Team 2") && team_report.contains("Team 3"));
+        assert!(proposal_report.contains("Approved"));
+        assert!(point_report.contains("Team 1") && point_report.contains("Team 2") && point_report.contains("Team 3"));
+
+        // Verify the final state
+        let closed_epoch = budget_system.get_epoch(&epoch_id).unwrap();
+        assert!(closed_epoch.is_closed());
+        let closed_proposal = budget_system.get_proposal(&proposal_id).unwrap();
+        assert!(closed_proposal.is_closed());
+        assert_eq!(closed_proposal.resolution(), Some(Resolution::Approved));
+    }
+
+    #[tokio::test]
+    async fn test_error_handling_and_edge_cases() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+        let mut budget_system = create_test_budget_system(&state_file).await;
+
+        // Test handling of non-existent entities
+        assert!(budget_system.get_team(&Uuid::new_v4()).is_none());
+        assert!(budget_system.get_proposal(&Uuid::new_v4()).is_none());
+        assert!(budget_system.get_epoch(&Uuid::new_v4()).is_none());
+        assert!(budget_system.get_raffle(&Uuid::new_v4()).is_none());
+        assert!(budget_system.get_vote(&Uuid::new_v4()).is_none());
+
+        // Test behavior with empty state
+        assert!(budget_system.print_epoch_state().is_err());
+        assert!(budget_system.generate_point_report(None).is_err());
+
+        // Test invalid inputs
+        assert!(budget_system.create_epoch("", Utc::now(), Utc::now()).is_err());
+        assert!(budget_system.create_team("".to_string(), "Rep".to_string(), None).is_err());
+        assert!(budget_system.set_epoch_reward("ETH", -100.0).is_err());
+
+        // Test overlapping epochs
+        let epoch1_id = budget_system.create_epoch("Epoch 1", Utc::now(), Utc::now() + Duration::days(30)).unwrap();
+        assert!(budget_system.create_epoch("Epoch 2", Utc::now() + Duration::days(15), Utc::now() + Duration::days(45)).is_err());
+
+        // Test activating multiple epochs
+        budget_system.activate_epoch(epoch1_id).unwrap();
+        let epoch2_id = budget_system.create_epoch("Epoch 2", Utc::now() + Duration::days(31), Utc::now() + Duration::days(61)).unwrap();
+        assert!(budget_system.activate_epoch(epoch2_id).is_err());
+
+        // Test closing an epoch with open proposals
+        let proposal_id = budget_system.add_proposal("Test Proposal".to_string(), None, None, None, None, None).unwrap();
+        assert!(budget_system.close_epoch(None).is_err());
+
+        // Test updating a non-existent proposal
+        let updates = UpdateProposalDetails {
+            title: Some("Updated Title".to_string()),
+            url: None,
+            budget_request_details: None,
+            announced_at: None,
+            published_at: None,
+            resolved_at: None,
+        };
+        assert!(budget_system.update_proposal("Non-existent Proposal", updates).is_err());
+
+        // Test creating a raffle for a non-existent proposal
+        let config = budget_system.config().clone();
+        assert!(budget_system.prepare_raffle("Non-existent Proposal", None, &config).is_err());
+
+        // Test casting votes for a non-existent vote
+        assert!(budget_system.cast_votes(Uuid::new_v4(), vec![(Uuid::new_v4(), VoteChoice::Yes)]).is_err());
+
+        // Test closing a non-existent vote
+        assert!(budget_system.close_vote(Uuid::new_v4()).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_ethereum_service_interaction() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+        
+        let mut budget_system = create_test_budget_system(&state_file).await;
+
+        // Test successful interactions
+        assert_eq!(budget_system.get_current_block().await.unwrap(), 12345);
+        assert_eq!(budget_system.get_randomness(12355).await.unwrap(), "mock_randomness_for_block_12355");
+        
+        let (init_block, rand_block, randomness) = budget_system.get_raffle_randomness().await.unwrap();
+        assert_eq!(init_block, 12345);
+        assert_eq!(rand_block, 12355);
+        assert_eq!(randomness, "mock_randomness");
+
+        // Test raffle creation with Ethereum service interaction
+        create_active_epoch(&mut budget_system).await;
+        budget_system.add_proposal("Test Proposal".to_string(), None, None, None, None, None).unwrap();
+        
+        let config = budget_system.config().clone();
+        let (raffle_id, _) = budget_system.prepare_raffle("Test Proposal", None, &config).unwrap();
+        
+        let raffle = budget_system.finalize_raffle(raffle_id, 12345, 12355, "mock_randomness".to_string()).await.unwrap();
+        
+        assert_eq!(raffle.config().initiation_block(), 12345);
+        assert_eq!(raffle.config().randomness_block(), 12355);
+        assert_eq!(raffle.config().block_randomness(), "mock_randomness");
+    }
+}

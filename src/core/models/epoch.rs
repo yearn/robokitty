@@ -42,6 +42,10 @@ impl Epoch {
             return Err("Start date must be before end date")
         }
 
+        if name.is_empty() {
+            return Err("The epoch must have a name")
+        }
+
         Ok(Self {
             id: Uuid::new_v4(),
             name,
