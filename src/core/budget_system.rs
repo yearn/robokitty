@@ -10,7 +10,8 @@ use crate::core::models::{
 use crate::services::ethereum::EthereumServiceTrait;
 use crate::UpdateProposalDetails;
 use crate::AppConfig;
-use crate::{escape_markdown, clean_file_name, sanitize_filename};
+use crate::core::file_system::FileSystem;
+use crate::{escape_markdown};
 
 use chrono::{DateTime, NaiveDate, Utc, TimeZone};
 use uuid::Uuid;
@@ -31,15 +32,16 @@ pub struct BudgetSystem {
 }
 
 impl BudgetSystem {
-    pub async fn new(config: AppConfig, ethereum_service: Arc<dyn EthereumServiceTrait>) -> Result<Self, Box<dyn Error>> {
-        if let Some(parent) = Path::new(&config.state_file).parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        
+    pub async fn new(
+        config: AppConfig, 
+        ethereum_service: Arc<dyn EthereumServiceTrait>,
+        state: Option<BudgetSystemState>
+    ) -> Result<Self, Box<dyn Error>> {
+        let state = state.unwrap_or_else(BudgetSystemState::new);
         Ok(Self {
-            state: BudgetSystemState::new(),
+            state,
             ethereum_service,
-            config
+            config,
         })
     }
 
@@ -112,71 +114,7 @@ impl BudgetSystem {
     }
 
     pub fn save_state(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let state_file = &self.config.state_file;
-        info!("Attempting to save state to file: {}", state_file);
-
-        // Ensure the directory for the state file exists
-        if let Some(parent) = Path::new(state_file).parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let json = serde_json::to_string_pretty(&self.state)?;
-        
-        // Write to a temporary file first
-        let temp_file = format!("{}.temp", state_file);
-        fs::write(&temp_file, &json).map_err(|e| {
-            error!("Failed to write to temporary file {}: {}", temp_file, e);
-            e
-        })?;
-
-        // Rename the temporary file to the actual state file
-        fs::rename(&temp_file, state_file).map_err(|e| {
-            error!("Failed to rename temporary file to {}: {}", state_file, e);
-            e
-        })?;
-
-        // Verify that the file was actually written
-        let written_contents = fs::read_to_string(state_file).map_err(|e| {
-            error!("Failed to read back the state file {}: {}", state_file, e);
-            e
-        })?;
-
-        if written_contents != json {
-            error!("State file contents do not match what was supposed to be written!");
-            return Err("State file verification failed".into());
-        }
-
-        info!("Successfully saved and verified state to file: {}", state_file);
-        Ok(())
-    }
-
-    pub fn load_state(path: &str) -> Result<BudgetSystemState, Box<dyn std::error::Error>> {
-        let json = fs::read_to_string(path)?;
-        let state: BudgetSystemState = serde_json::from_str(&json)?;
-        Ok(state)
-    }
-
-    pub async fn load_from_file(
-        path: &str,
-        config: AppConfig,
-        ethereum_service: Arc<dyn EthereumServiceTrait>
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        // Ensure the directory for the state file exists
-        if let Some(parent) = Path::new(path).parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let state = if Path::new(path).exists() {
-            Self::load_state(path)?
-        } else {
-            BudgetSystemState::new()
-        };
-        
-        Ok(Self {
-            state,
-            ethereum_service,
-            config,
-        })
+        FileSystem::save_state(&self.state, &self.config.state_file)
     }
 
     pub fn add_proposal(&mut self, title: String, url: Option<String>, budget_request_details: Option<BudgetRequestDetails>, announced_at: Option<NaiveDate>, published_at: Option<NaiveDate>, is_historical: Option<bool>) -> Result<Uuid, &'static str> {
@@ -211,6 +149,20 @@ impl BudgetSystem {
         } else {
             Err("Proposal not found")
         }
+    }
+
+    pub fn generate_and_save_proposal_report(&self, proposal_id: Uuid, epoch_name: &str) -> Result<PathBuf, Box<dyn Error>> {
+        let proposal = self.get_proposal(&proposal_id)
+            .ok_or_else(|| format!("Proposal not found: {:?}", proposal_id))?;
+
+        let report_content = self.generate_proposal_report(proposal_id)?;
+        
+        FileSystem::generate_and_save_proposal_report(
+            proposal,
+            &report_content,
+            epoch_name,
+            Path::new(&self.config.state_file)
+        )
     }
 
     pub fn create_formal_vote(&mut self, proposal_id: Uuid, raffle_id: Uuid, threshold: Option<f64>) -> Result<Uuid, &'static str> {
@@ -1504,70 +1456,6 @@ def hello_world():
         (end - start).num_days()
     }
 
-    pub fn generate_report_file_path(&self, proposal: &Proposal, epoch_name: &str) -> PathBuf {
-        debug!("Generating report file path for proposal: {:?}", proposal.id());
-    
-        let state_file_path = PathBuf::from(&self.config.state_file);
-        let state_file_dir = state_file_path.parent().unwrap_or_else(|| {
-            debug!("Failed to get parent directory of state file, using current directory");
-            Path::new(".")
-        });
-        let reports_dir = state_file_dir.join("reports").join(epoch_name);
-    
-        let date = proposal.published_at()
-            .or(proposal.announced_at())
-            .map(|date| date.format("%Y%m%d").to_string())
-            .unwrap_or_else(|| {
-                debug!("No published_at or announced_at date for proposal: {:?}", proposal.id());
-                "00000000".to_string()
-            });
-    
-        let team_part = proposal.budget_request_details()
-            .as_ref()
-            .and_then(|details| details.team())
-            .and_then(|team_id| self.state.current_state().teams().get(&team_id))
-            .map(|team| format!("-{}", clean_file_name(&team.name())))
-            .unwrap_or_default();
-    
-        let truncated_title = clean_file_name(proposal.title())
-            .chars()
-            .take(30)
-            .collect::<String>()
-            .replace(" ", "_");
-    
-        let file_name = format!("{}{}-{}.md", date, team_part, truncated_title);
-        debug!("Generated file name: {}", file_name);
-    
-        reports_dir.join(file_name)
-    }
-
-    pub fn save_report_to_file(&self, content: &str, file_path: &Path) -> Result<(), Box<dyn Error>> {
-        if let Some(parent) = file_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(file_path, content)?;
-        Ok(())
-    }
-
-    pub fn generate_and_save_proposal_report(&self, proposal_id: Uuid, epoch_name: &str) -> Result<PathBuf, Box<dyn Error>> {
-        debug!("Generating report for proposal: {:?}", proposal_id);
-    
-        let proposal = self.state.get_proposal(&proposal_id)
-            .ok_or_else(|| {
-                let err = format!("Proposal not found: {:?}", proposal_id);
-                error!("{}", err);
-                err
-            })?;
-    
-        let report_content = self.generate_proposal_report(proposal_id)?;
-        let file_path = self.generate_report_file_path(proposal, epoch_name);
-    
-        debug!("Saving report to file: {:?}", file_path);
-        self.save_report_to_file(&report_content, &file_path)?;
-    
-        Ok(file_path)
-    }
-
     pub fn get_current_or_specified_epoch(&self, epoch_name: Option<&str>) -> Result<(&Epoch, Uuid), &'static str> {
         match epoch_name {
             Some(name) => {
@@ -1790,7 +1678,7 @@ def hello_world():
 
         // Save the report
         let file_name = format!("{}-epoch_report.md", Utc::now().format("%Y%m%d"));
-        let sanitized_epoch_name = sanitize_filename(epoch_name);
+        let sanitized_epoch_name = FileSystem::sanitize_filename(epoch_name);
         let report_path = PathBuf::from(&self.config.state_file)
             .parent()
             .unwrap()
@@ -1983,7 +1871,7 @@ mod tests {
 
     // Helpers
 
-    async fn create_test_budget_system(state_file: &str) -> BudgetSystem {
+    async fn create_test_budget_system(state_file: &str, initial_state: Option<BudgetSystemState>) -> BudgetSystem {
         let config = AppConfig {
             state_file: state_file.to_string(),
             ipc_path: "/tmp/test_reth.ipc".to_string(),
@@ -2000,7 +1888,7 @@ mod tests {
             },
         };
         let ethereum_service = Arc::new(MockEthereumService);
-        BudgetSystem::new(config, ethereum_service).await.unwrap()
+        BudgetSystem::new(config, ethereum_service, initial_state).await.unwrap()
     }
 
     async fn create_active_epoch(budget_system: &mut BudgetSystem) -> Uuid {
@@ -2041,19 +1929,20 @@ mod tests {
         let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
 
         // Test creating a new BudgetSystem
-        let mut budget_system = create_test_budget_system(&state_file).await;
-        assert!(budget_system.state().epochs().is_empty());
-        assert!(budget_system.state().current_state().teams().is_empty());
-
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
+        
         // Modify state
         let epoch_id = budget_system.create_epoch("Test Epoch", Utc::now(), Utc::now() + Duration::days(30)).unwrap();
         let team_id = budget_system.create_team("Test Team".to_string(), "Representative".to_string(), Some(vec![1000, 2000, 3000])).unwrap();
 
-        // Test saving state
+        // Save state
         budget_system.save_state().unwrap();
 
-        // Test loading state
-        let loaded_system = BudgetSystem::load_from_file(&state_file, budget_system.config().clone(), Arc::new(MockEthereumService)).await.unwrap();
+        // Test loading existing state
+        let loaded_state = FileSystem::try_load_state(&state_file).unwrap();
+        let loaded_system = create_test_budget_system(&state_file, Some(loaded_state)).await;
+
+        // Verify loaded state
         assert_eq!(loaded_system.state().epochs().len(), 1);
         assert!(loaded_system.state().epochs().contains_key(&epoch_id));
         assert_eq!(loaded_system.state().current_state().teams().len(), 1);
@@ -2061,7 +1950,7 @@ mod tests {
 
         // Test loading from non-existent file (should create new system)
         let non_existent_file = temp_dir.path().join("non_existent.json").to_str().unwrap().to_string();
-        let new_system = BudgetSystem::load_from_file(&non_existent_file, budget_system.config().clone(), Arc::new(MockEthereumService)).await.unwrap();
+        let new_system = create_test_budget_system(&non_existent_file, None).await;
         assert!(new_system.state().epochs().is_empty());
         assert!(new_system.state().current_state().teams().is_empty());
     }
@@ -2070,7 +1959,7 @@ mod tests {
     async fn test_epoch_management() {
         let temp_dir = TempDir::new().unwrap();
         let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
-        let mut budget_system = create_test_budget_system(&state_file).await;
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
 
         // Test creating a new epoch
         let start_date = Utc::now();
@@ -2120,7 +2009,7 @@ mod tests {
     async fn test_team_management() {
         let temp_dir = TempDir::new().unwrap();
         let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
-        let mut budget_system = create_test_budget_system(&state_file).await;
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
 
         // Test creating a new team
         let team_id = budget_system.create_team(
@@ -2154,7 +2043,7 @@ mod tests {
     async fn test_proposal_management() {
         let temp_dir = TempDir::new().unwrap();
         let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
-        let mut budget_system = create_test_budget_system(&state_file).await;
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
 
         // Create an active epoch
         let epoch_id = create_active_epoch(&mut budget_system).await;
@@ -2218,7 +2107,7 @@ mod tests {
     async fn test_raffle_management() {
         let temp_dir = TempDir::new().unwrap();
         let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
-        let mut budget_system = create_test_budget_system(&state_file).await;
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
 
         // Create an active epoch and a proposal
         let epoch_id = create_active_epoch(&mut budget_system).await;
@@ -2311,7 +2200,7 @@ mod tests {
     async fn test_vote_management() {
         let temp_dir = TempDir::new().unwrap();
         let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
-        let mut budget_system = create_test_budget_system(&state_file).await;
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
 
         create_active_epoch(&mut budget_system).await;
         let proposal_id = budget_system.add_proposal("Test Proposal".to_string(), None, None, None, None, None).unwrap();
@@ -2353,7 +2242,7 @@ mod tests {
     async fn test_reporting() {
         let temp_dir = TempDir::new().unwrap();
         let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
-        let mut budget_system = create_test_budget_system(&state_file).await;
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
     
         let epoch_id = create_active_epoch(&mut budget_system).await;
         let team_id = budget_system.create_team("Test Team".to_string(), "Rep".to_string(), Some(vec![1000])).unwrap();
@@ -2396,7 +2285,7 @@ mod tests {
     async fn test_integration() {
         let temp_dir = TempDir::new().unwrap();
         let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
-        let mut budget_system = create_test_budget_system(&state_file).await;
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
 
         // Create and activate an epoch
         let epoch_id = create_active_epoch(&mut budget_system).await;
@@ -2479,7 +2368,7 @@ mod tests {
     async fn test_error_handling_and_edge_cases() {
         let temp_dir = TempDir::new().unwrap();
         let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
-        let mut budget_system = create_test_budget_system(&state_file).await;
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
 
         // Test handling of non-existent entities
         assert!(budget_system.get_team(&Uuid::new_v4()).is_none());
@@ -2537,7 +2426,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
         
-        let mut budget_system = create_test_budget_system(&state_file).await;
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
 
         // Test successful interactions
         assert_eq!(budget_system.get_current_block().await.unwrap(), 12345);

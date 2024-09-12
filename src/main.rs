@@ -4,12 +4,14 @@ pub mod core {
     pub mod models;
     pub mod state;
     pub mod budget_system;
+    pub mod file_system;
 }
 
 mod services;
 use services::ethereum::{EthereumService, EthereumServiceTrait};
 use services::telegram::{TelegramBot, spawn_command_executor};
 use crate::core::budget_system::BudgetSystem;
+use crate::core::file_system::FileSystem;
 use crate::core::models::{
     TeamStatus,
     Resolution,
@@ -667,24 +669,6 @@ fn escape_markdown(text: &str) -> String {
     escaped
 }
 
-fn clean_file_name(name: &str) -> String {
-    name.chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            _ => c
-        })
-        .collect()
-}
-
-fn sanitize_filename(name: &str) -> String {
-    name.chars()
-        .map(|c| match c {
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' => c,
-            _ => '_'
-        })
-        .collect()
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     pretty_env_logger::init();
@@ -700,18 +684,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Create the EthereumService
     let ethereum_service = Arc::new(EthereumService::new(&config.ipc_path, config.future_block_offset).await?);
 
-    // Initialize or load the BudgetSystem
-    let mut budget_system = match BudgetSystem::load_from_file(&config.state_file, config.clone(), ethereum_service.clone()).await {
-        Ok(system) => {
-            println!("Loaded existing state from {}", &config.state_file);
-            system
-        },
-        Err(e) => {
-            println!("Failed to load existing state from {}: {}", &config.state_file, e);
-            println!("Creating a new BudgetSystem.");
-            BudgetSystem::new(config.clone(), ethereum_service.clone()).await?
-        },
-    };
+    let state = FileSystem::try_load_state(&config.state_file);
+    let mut budget_system = BudgetSystem::new(config.clone(), ethereum_service.clone(), state).await?;
 
     // Read and execute the script
     if Path::new(&config.script_file).exists() {
@@ -755,6 +729,7 @@ mod tests {
     use tempfile::TempDir;
     use crate::app_config::{AppConfig, TelegramConfig};
     use uuid::Uuid;
+    use crate::core::state::BudgetSystemState;
 
     struct MockEthereumService;
 
@@ -774,7 +749,8 @@ mod tests {
     }
 
     // Helper function to create a test BudgetSystem
-    async fn create_test_budget_system(state_file: &str) -> BudgetSystem {
+
+    async fn create_test_budget_system(state_file: &str, initial_state: Option<BudgetSystemState>) -> BudgetSystem {
         let config = AppConfig {
             state_file: state_file.to_string(),
             ipc_path: "/tmp/test_reth.ipc".to_string(),
@@ -791,7 +767,7 @@ mod tests {
             },
         };
         let ethereum_service = Arc::new(MockEthereumService);
-        BudgetSystem::load_from_file(state_file, config, ethereum_service).await.unwrap()
+        BudgetSystem::new(config, ethereum_service, initial_state).await.unwrap()
     }
 
     // Helper function to create and activate an epoch
@@ -810,7 +786,7 @@ mod tests {
         let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
 
         // Create a BudgetSystem and modify its state
-        let mut budget_system = create_test_budget_system(&state_file).await;
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
 
         // Create an epoch
         let start_date = Utc::now();
@@ -823,8 +799,11 @@ mod tests {
         // Save the state
         budget_system.save_state().unwrap();
 
-        // Create a new BudgetSystem and load the state
-        let loaded_system = create_test_budget_system(&state_file).await;
+        // Load the saved state
+        let loaded_state = FileSystem::try_load_state(&state_file).expect("Failed to load state");
+
+        // Create a new BudgetSystem with the loaded state
+        let loaded_system = create_test_budget_system(&state_file, Some(loaded_state)).await;
 
         // Verify the loaded state
         assert_eq!(loaded_system.state().epochs().len(), 1);
@@ -853,7 +832,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
        
-        let mut budget_system = create_test_budget_system(&state_file).await;
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
         let _epoch_id = create_active_epoch(&mut budget_system, "Test Epoch", 30).await;
         
         let epoch = budget_system.get_current_epoch().unwrap();
