@@ -4,7 +4,7 @@ use crate::core::models::Proposal;
 use crate::core::state::BudgetSystemState;
 use crate::app_config::AppConfig;
 use crate::services::ethereum::EthereumServiceTrait;
-use crate::ScriptCommand;
+use crate::commands::cli::ScriptCommand;
 
 use serde_json;
 use std::fs;

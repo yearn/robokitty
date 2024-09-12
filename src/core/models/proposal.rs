@@ -2,8 +2,8 @@ use uuid::Uuid;
 use chrono::NaiveDate;
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
-use crate::UpdateProposalDetails;
-use crate::BudgetRequestDetailsScript;
+use crate::commands::cli::UpdateProposalDetails;
+use crate::commands::cli::BudgetRequestDetailsScript;
 use super::common::NameMatches;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

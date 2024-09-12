@@ -8,10 +8,10 @@ use crate::core::models::{
     Vote, VoteType, VoteStatus, VoteChoice, VoteCount, VoteParticipation, VoteResult, get_id_by_name
 };
 use crate::services::ethereum::EthereumServiceTrait;
-use crate::UpdateProposalDetails;
-use crate::AppConfig;
+use crate::commands::cli::UpdateProposalDetails;
+use crate::app_config::AppConfig;
 use crate::core::file_system::FileSystem;
-use crate::{escape_markdown};
+use crate::escape_markdown;
 
 use chrono::{DateTime, NaiveDate, Utc, TimeZone};
 use uuid::Uuid;
