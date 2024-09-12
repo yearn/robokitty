@@ -46,7 +46,7 @@ use tokio::{
 mod app_config;
 use app_config::AppConfig;
 
-#[derive(Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(tag = "type", content = "params")]
 enum ScriptCommand {
     CreateEpoch { name: String, start_date: DateTime<Utc>, end_date: DateTime<Utc> },
@@ -123,7 +123,7 @@ enum ScriptCommand {
     GenerateEndOfEpochReport { epoch_name: String },
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct UpdateProposalDetails {
     pub title: Option<String>,
     pub url: Option<String>,
@@ -133,7 +133,7 @@ pub struct UpdateProposalDetails {
     pub resolved_at: Option<NaiveDate>,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct BudgetRequestDetailsScript {
     pub team: Option<String>,
     pub request_amounts: Option<HashMap<String, f64>>,
@@ -689,8 +689,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Read and execute the script
     if Path::new(&config.script_file).exists() {
-        let script_content = fs::read_to_string(&config.script_file)?;
-        let script: Vec<ScriptCommand> = serde_json::from_str(&script_content)?;
+        let script = FileSystem::load_script(&config.script_file)?;
         
         for command in script {
             if let Err(e) = execute_command(&mut budget_system, command, &config).await {
@@ -730,23 +729,8 @@ mod tests {
     use crate::app_config::{AppConfig, TelegramConfig};
     use uuid::Uuid;
     use crate::core::state::BudgetSystemState;
+    use crate::services::ethereum::MockEthereumService;
 
-    struct MockEthereumService;
-
-    #[async_trait::async_trait]
-    impl EthereumServiceTrait for MockEthereumService {
-        async fn get_current_block(&self) -> Result<u64, Box<dyn std::error::Error>> {
-            Ok(12345)
-        }
-
-        async fn get_randomness(&self, block_number: u64) -> Result<String, Box<dyn std::error::Error>> {
-            Ok(format!("mock_randomness_for_block_{}", block_number))
-        }
-
-        async fn get_raffle_randomness(&self) -> Result<(u64, u64, String), Box<dyn std::error::Error>> {
-            Ok((12345, 12355, "mock_randomness".to_string()))
-        }
-    }
 
     // Helper function to create a test BudgetSystem
 

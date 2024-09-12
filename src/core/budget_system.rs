@@ -1851,23 +1851,7 @@ mod tests {
     use uuid::Uuid;
     use async_trait::async_trait;
     use crate::app_config::TelegramConfig;
-
-    struct MockEthereumService;
-
-    #[async_trait]
-    impl EthereumServiceTrait for MockEthereumService {
-        async fn get_current_block(&self) -> Result<u64, Box<dyn std::error::Error>> {
-            Ok(12345)
-        }
-
-        async fn get_randomness(&self, block_number: u64) -> Result<String, Box<dyn std::error::Error>> {
-            Ok(format!("mock_randomness_for_block_{}", block_number))
-        }
-
-        async fn get_raffle_randomness(&self) -> Result<(u64, u64, String), Box<dyn std::error::Error>> {
-            Ok((12345, 12355, "mock_randomness".to_string()))
-        }
-    }
+    use crate::services::ethereum::MockEthereumService;
 
     // Helpers
 
