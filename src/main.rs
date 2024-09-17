@@ -1,8 +1,9 @@
 //src/main.rs
 
+use crate::core::budget_system::BudgetSystem;
 use crate::services::ethereum::{EthereumService, EthereumServiceTrait};
 use crate::services::telegram::{TelegramBot, spawn_command_executor};
-use crate::core::budget_system::BudgetSystem;
+use crate::commands::telegram::TelegramCommand;
 use crate::commands::cli::{ScriptCommand, execute_command};
 use crate::core::file_system::FileSystem;
 use dotenvy::dotenv;
@@ -17,7 +18,7 @@ use std::{
 use teloxide::prelude::*;
 use tokio::{
     self,
-    sync::mpsc,
+    sync::{mpsc, oneshot},
 };
 
 use crate::app_config::AppConfig;
@@ -80,7 +81,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Err(e) => error!("Failed to save state to {}: {}", &config.state_file, e),
     }
 
-    let (command_sender, command_receiver) = mpsc::channel(100);
+    let (command_sender, command_receiver) = mpsc::channel::<(TelegramCommand, oneshot::Sender<String>)>(100);
     
     spawn_command_executor(budget_system, command_receiver);
 
