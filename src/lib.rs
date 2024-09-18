@@ -66,3 +66,52 @@ pub fn escape_markdown(text: &str) -> String {
     }
     escaped
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+    use tempfile::TempDir;
+
+    // TODO: Improve unit testing
+
+
+    fn setup_test_environment() -> TempDir {
+        let temp_dir = TempDir::new().unwrap();
+        env::set_var("TELEGRAM_BOT_TOKEN", "test_token");
+        env::set_var("APP_STATE_FILE", temp_dir.path().join("test_state.json").to_str().unwrap());
+        temp_dir
+    }
+
+    #[tokio::test]
+    async fn test_initialize_system_success() {
+        let _guard = setup_test_environment();
+        let result = initialize_system().await;
+        assert!(result.is_ok());
+        
+        let (_, config) = result.unwrap();
+        assert_eq!(config.telegram.token, "test_token");
+        // Add more assertions here to check other properties of config
+    }
+
+    #[test]
+    fn test_escape_markdown_with_special_characters() {
+        let input = "Hello_World! This is a *test* [link](https://example.com)";
+        let expected = "Hello\\_World\\! This is a \\*test\\* \\[link\\]\\(https://example\\.com\\)";
+        assert_eq!(escape_markdown(input), expected);
+    }
+
+    #[test]
+    fn test_escape_markdown_without_special_characters() {
+        let input = "Hello World This is a test";
+        let expected = "Hello World This is a test";
+        assert_eq!(escape_markdown(input), expected);
+    }
+
+    #[test]
+    fn test_escape_markdown_with_mixed_content() {
+        let input = "Normal text _italic_ **bold** `code` > quote";
+        let expected = "Normal text \\_italic\\_ \\*\\*bold\\*\\* \\`code\\` \\> quote";
+        assert_eq!(escape_markdown(input), expected);
+    }
+}
