@@ -3,6 +3,14 @@ name = "robokitty"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "robokitty_script"
+path = "src/bin/robokitty_script.rs"
+
+[[bin]]
+name = "robokitty_bot"
+path = "src/bin/robokitty_bot.rs"
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
