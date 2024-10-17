@@ -8,7 +8,7 @@ use crate::core::models::{
     Vote, VoteType, VoteStatus, VoteChoice, VoteCount, VoteParticipation, VoteResult, get_id_by_name
 };
 use crate::services::ethereum::EthereumServiceTrait;
-use crate::commands::cli::UpdateProposalDetails;
+use crate::commands::cli::{UpdateProposalDetails, UpdateTeamDetails};
 use crate::app_config::AppConfig;
 use crate::core::file_system::FileSystem;
 use crate::escape_markdown;
@@ -90,9 +90,37 @@ impl BudgetSystem {
         Ok(())
     }
 
-    pub fn update_team_status(&mut self, team_id: Uuid, new_status: &TeamStatus) -> Result<(), Box<dyn Error>> {
+    pub fn update_team(&mut self, team_id: Uuid, updates: UpdateTeamDetails) -> Result<(), Box<dyn Error>> {
         let team = self.state.get_team_mut(&team_id).ok_or("Team not found")?;
-        team.set_status(new_status.clone())?;
+        
+        if let Some(name) = updates.name {
+            team.set_name(name);
+        }
+        
+        if let Some(representative) = updates.representative {
+            team.set_representative(representative);
+        }
+        
+        if let Some(status) = updates.status {
+            let new_status = match status.to_lowercase().as_str() {
+                "earner" => {
+                    let revenue = updates.trailing_monthly_revenue
+                        .ok_or("Trailing monthly revenue is required for Earner status")?;
+                    TeamStatus::Earner { trailing_monthly_revenue: revenue }
+                },
+                "supporter" => TeamStatus::Supporter,
+                "inactive" => TeamStatus::Inactive,
+                _ => return Err(format!("Invalid status: {}", status).into()),
+            };
+            team.set_status(new_status)?;
+        } else if let Some(revenue) = updates.trailing_monthly_revenue {
+            if let TeamStatus::Earner { .. } = team.status() {
+                team.set_status(TeamStatus::Earner { trailing_monthly_revenue: revenue })?;
+            } else {
+                return Err("Cannot update trailing monthly revenue for non-Earner status".into());
+            }
+        }
+        
         self.save_state()?;
         Ok(())
     }
@@ -2006,11 +2034,6 @@ mod tests {
         assert_eq!(team.representative(), "Representative");
         assert!(matches!(team.status(), TeamStatus::Earner { .. }));
 
-        // Test updating team status
-        budget_system.update_team_status(team_id, &TeamStatus::Supporter).unwrap();
-        let updated_team = budget_system.get_team(&team_id).unwrap();
-        assert!(matches!(updated_team.status(), TeamStatus::Supporter));
-
         // Test getting team by name
         let team_id_by_name = budget_system.get_team_id_by_name("Test Team").unwrap();
         assert_eq!(team_id_by_name, team_id);
@@ -2021,6 +2044,72 @@ mod tests {
 
         // Test creating a team with invalid data (should fail)
         assert!(budget_system.create_team("".to_string(), "Representative".to_string(), None).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_update_team() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
+
+        let team_id = budget_system.create_team("Test Team".to_string(), "John Doe".to_string(), Some(vec![1000])).unwrap();
+
+        let updates = UpdateTeamDetails {
+            name: Some("Updated Team".to_string()),
+            representative: Some("Jane Doe".to_string()),
+            status: Some("Supporter".to_string()),
+            trailing_monthly_revenue: None,
+        };
+
+        budget_system.update_team(team_id, updates).unwrap();
+
+        let updated_team = budget_system.get_team(&team_id).unwrap();
+        assert_eq!(updated_team.name(), "Updated Team");
+        assert_eq!(updated_team.representative(), "Jane Doe");
+        assert!(matches!(updated_team.status(), TeamStatus::Supporter));
+    }
+
+    #[tokio::test]
+    async fn test_update_team_earner_status() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
+
+        let team_id = budget_system.create_team("Test Team".to_string(), "John Doe".to_string(), Some(vec![1000])).unwrap();
+
+        let updates = UpdateTeamDetails {
+            name: None,
+            representative: None,
+            status: Some("Earner".to_string()),
+            trailing_monthly_revenue: Some(vec![2000, 3000, 4000]),
+        };
+
+        budget_system.update_team(team_id, updates).unwrap();
+
+        let updated_team = budget_system.get_team(&team_id).unwrap();
+        if let TeamStatus::Earner { trailing_monthly_revenue } = updated_team.status() {
+            assert_eq!(trailing_monthly_revenue, &[2000, 3000, 4000]);
+        } else {
+            panic!("Expected Earner status");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_team_invalid_status() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
+
+        let team_id = budget_system.create_team("Test Team".to_string(), "John Doe".to_string(), Some(vec![1000])).unwrap();
+
+        let updates = UpdateTeamDetails {
+            name: None,
+            representative: None,
+            status: Some("InvalidStatus".to_string()),
+            trailing_monthly_revenue: None,
+        };
+
+        assert!(budget_system.update_team(team_id, updates).is_err());
     }
 
     #[tokio::test]

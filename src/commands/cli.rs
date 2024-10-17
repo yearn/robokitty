@@ -20,6 +20,10 @@ pub enum ScriptCommand {
     ActivateEpoch { name: String },
     SetEpochReward { token: String, amount: f64 },
     AddTeam { name: String, representative: String, trailing_monthly_revenue: Option<Vec<u64>> },
+    UpdateTeam {
+        team_name: String,
+        updates: UpdateTeamDetails,
+    },
     AddProposal {
         title: String,
         url: Option<String>,
@@ -55,11 +59,6 @@ pub enum ScriptCommand {
         excluded_teams: Option<Vec<String>>,
         total_counted_seats: Option<usize>,
         max_earner_seats: Option<usize>,
-    },
-    ChangeTeamStatus {
-        team_name: String,
-        new_status: String,
-        trailing_monthly_revenue: Option<Vec<u64>>,
     },
     PrintTeamReport,
     PrintEpochState,
@@ -107,6 +106,14 @@ pub struct BudgetRequestDetailsScript {
     pub start_date: Option<NaiveDate>,
     pub end_date: Option<NaiveDate>,
     pub payment_status: Option<PaymentStatus>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct UpdateTeamDetails {
+    pub name: Option<String>,
+    pub representative: Option<String>,
+    pub status: Option<String>,
+    pub trailing_monthly_revenue: Option<Vec<u64>>,
 }
 
 pub async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptCommand, config: &AppConfig) -> Result<(), Box<dyn Error>> {
@@ -349,24 +356,13 @@ pub async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptCo
                 println!("Raffle result not available");
             }
         },
-        ScriptCommand::ChangeTeamStatus { team_name, new_status, trailing_monthly_revenue } => {
+        ScriptCommand::UpdateTeam { team_name, updates } => {
             let team_id = budget_system.get_team_id_by_name(&team_name)
                 .ok_or_else(|| format!("Team not found: {}", team_name))?;
             
-            let new_status = match new_status.to_lowercase().as_str() {
-                "earner" => {
-                    let revenue = trailing_monthly_revenue
-                        .ok_or("Trailing monthly revenue is required for Earner status")?;
-                    TeamStatus::Earner { trailing_monthly_revenue: revenue }
-                },
-                "supporter" => TeamStatus::Supporter,
-                "inactive" => TeamStatus::Inactive,
-                _ => return Err(format!("Invalid status: {}", new_status).into()),
-            };
-
-            budget_system.update_team_status(team_id, &new_status)?;
+            budget_system.update_team(team_id, updates)?;
             
-            println!("Changed status of team '{}' to {:?}", team_name, new_status);
+            println!("Updated team '{}'", team_name);
         },
         ScriptCommand::PrintTeamReport => {
             let report = budget_system.print_team_report();
@@ -762,24 +758,33 @@ mod tests {
     }
     
     #[tokio::test]
-    async fn test_change_team_status_command() {
+    async fn test_update_team_command() {
+        let temp_dir = TempDir::new().unwrap();
         let (mut budget_system, config) = create_test_budget_system().await;
-    
-        budget_system.create_team("Test Team".to_string(), "John Doe".to_string(), Some(vec![1000, 2000, 3000])).unwrap();
-    
-        let command = ScriptCommand::ChangeTeamStatus {
+        
+        // Create a team
+        budget_system.create_team("Test Team".to_string(), "John Doe".to_string(), Some(vec![1000])).unwrap();
+
+        let command = ScriptCommand::UpdateTeam {
             team_name: "Test Team".to_string(),
-            new_status: "Supporter".to_string(),
-            trailing_monthly_revenue: None,
+            updates: UpdateTeamDetails {
+                name: Some("Updated Team".to_string()),
+                representative: Some("Jane Doe".to_string()),
+                status: Some("Supporter".to_string()),
+                trailing_monthly_revenue: None,
+            },
         };
-    
+
         let result = execute_command(&mut budget_system, command, &config).await;
         assert!(result.is_ok());
-    
-        let team = budget_system.state().current_state().teams().values().next().unwrap();
-        assert!(matches!(team.status(), TeamStatus::Supporter));
+
+        let team_id = budget_system.get_team_id_by_name("Updated Team").unwrap();
+        let updated_team = budget_system.get_team(&team_id).unwrap();
+        assert_eq!(updated_team.name(), "Updated Team");
+        assert_eq!(updated_team.representative(), "Jane Doe");
+        assert!(matches!(updated_team.status(), TeamStatus::Supporter));
     }
-    
+
     #[tokio::test]
     async fn test_invalid_command_execution() {
         let (mut budget_system, config) = create_test_budget_system().await;
@@ -1115,14 +1120,6 @@ mod tests {
         let result = execute_command(&mut budget_system, command, &config).await;
         assert!(result.is_err());
 
-        // Test changing status of non-existent team
-        let command = ScriptCommand::ChangeTeamStatus {
-            team_name: "Non-existent Team".to_string(),
-            new_status: "Supporter".to_string(),
-            trailing_monthly_revenue: None,
-        };
-        let result = execute_command(&mut budget_system, command, &config).await;
-        assert!(result.is_err());
     }
 
     #[tokio::test]
