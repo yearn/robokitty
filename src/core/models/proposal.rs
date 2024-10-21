@@ -2,8 +2,7 @@ use uuid::Uuid;
 use chrono::NaiveDate;
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
-use crate::commands::cli::UpdateProposalDetails;
-use crate::commands::cli::BudgetRequestDetailsScript;
+use crate::commands::common::{UpdateProposalDetails, BudgetRequestDetailsCommand};
 use super::common::NameMatches;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -271,7 +270,7 @@ impl Proposal {
         Ok(())
     }
 
-    fn update_budget_request_details(&mut self, updates: &BudgetRequestDetailsScript, team_id: Option<Uuid>) -> Result<(), &'static str> {
+    fn update_budget_request_details(&mut self, updates: &BudgetRequestDetailsCommand, team_id: Option<Uuid>) -> Result<(), &'static str> {
         let details = self.budget_request_details.get_or_insert_with(BudgetRequestDetails::default);
 
         if updates.team.is_some() {
@@ -522,7 +521,7 @@ mod tests {
         let updates = UpdateProposalDetails {
             title: Some("Updated Title".to_string()),
             url: Some("http://updated.com".to_string()),
-            budget_request_details: Some(BudgetRequestDetailsScript {
+            budget_request_details: Some(BudgetRequestDetailsCommand {
                 team: Some("New Team".to_string()),
                 request_amounts: Some([("ETH".to_string(), 200.0)].iter().cloned().collect()),
                 start_date: Some(NaiveDate::from_ymd_opt(2023, 4, 1).unwrap()),

@@ -11,132 +11,29 @@ use crate::core::models::{
 };
 use crate::core::budget_system::BudgetSystem;
 use crate::app_config::AppConfig;
+use super::common::{Command, CommandExecutor, UpdateTeamDetails, UpdateProposalDetails};
 
-
-#[derive(Debug, Deserialize, Clone)]
-#[serde(tag = "type", content = "params")]
-pub enum ScriptCommand {
-    CreateEpoch { name: String, start_date: DateTime<Utc>, end_date: DateTime<Utc> },
-    ActivateEpoch { name: String },
-    SetEpochReward { token: String, amount: f64 },
-    AddTeam { name: String, representative: String, trailing_monthly_revenue: Option<Vec<u64>> },
-    UpdateTeam {
-        team_name: String,
-        updates: UpdateTeamDetails,
-    },
-    AddProposal {
-        title: String,
-        url: Option<String>,
-        budget_request_details: Option<BudgetRequestDetailsScript>,
-        announced_at: Option<NaiveDate>,
-        published_at: Option<NaiveDate>,
-        is_historical: Option<bool>,
-    },
-    UpdateProposal {
-        proposal_name: String,
-        updates: UpdateProposalDetails,
-    },
-    ImportPredefinedRaffle {
-        proposal_name: String,
-        counted_teams: Vec<String>,
-        uncounted_teams: Vec<String>,
-        total_counted_seats: usize,
-        max_earner_seats: usize,
-    },
-    ImportHistoricalVote {
-        proposal_name: String,
-        passed: bool,
-        participating_teams: Vec<String>,
-        non_participating_teams: Vec<String>,
-        counted_points: Option<u32>,
-        uncounted_points: Option<u32>,
-    },
-    ImportHistoricalRaffle {
-        proposal_name: String,
-        initiation_block: u64,
-        randomness_block: u64,
-        team_order: Option<Vec<String>>,
-        excluded_teams: Option<Vec<String>>,
-        total_counted_seats: Option<usize>,
-        max_earner_seats: Option<usize>,
-    },
-    PrintTeamReport,
-    PrintEpochState,
-    PrintTeamVoteParticipation {
-        team_name: String,
-        epoch_name: Option<String> 
-    },
-    CloseProposal {
-        proposal_name: String,
-        resolution: String,
-    },
-    CreateRaffle {
-        proposal_name: String,
-        block_offset: Option<u64>,
-        excluded_teams: Option<Vec<String>>,
-    },
-    CreateAndProcessVote {
-        proposal_name: String,
-        counted_votes: HashMap<String, VoteChoice>,
-        uncounted_votes: HashMap<String, VoteChoice>,
-        vote_opened: Option<NaiveDate>,
-        vote_closed: Option<NaiveDate>,
-    },
-    GenerateReportsForClosedProposals { epoch_name: String },
-    GenerateReportForProposal { proposal_name: String },
-    PrintPointReport { epoch_name: Option<String> },
-    CloseEpoch { epoch_name: Option<String> },
-    GenerateEndOfEpochReport { epoch_name: String },
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct UpdateProposalDetails {
-    pub title: Option<String>,
-    pub url: Option<String>,
-    pub budget_request_details: Option<BudgetRequestDetailsScript>,
-    pub announced_at: Option<NaiveDate>,
-    pub published_at: Option<NaiveDate>,
-    pub resolved_at: Option<NaiveDate>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct BudgetRequestDetailsScript {
-    pub team: Option<String>,
-    pub request_amounts: Option<HashMap<String, f64>>,
-    pub start_date: Option<NaiveDate>,
-    pub end_date: Option<NaiveDate>,
-    pub payment_status: Option<PaymentStatus>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct UpdateTeamDetails {
-    pub name: Option<String>,
-    pub representative: Option<String>,
-    pub status: Option<String>,
-    pub trailing_monthly_revenue: Option<Vec<u64>>,
-}
-
-pub async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptCommand, config: &AppConfig) -> Result<(), Box<dyn Error>> {
+pub async fn execute_command(budget_system: &mut BudgetSystem, command: Command, config: &AppConfig) -> Result<(), Box<dyn Error>> {
     match command {
-        ScriptCommand::CreateEpoch { name, start_date, end_date } => {
+        Command::CreateEpoch { name, start_date, end_date } => {
             let epoch_id = budget_system.create_epoch(&name, start_date, end_date)?;
             println!("Created epoch: {} ({})", name, epoch_id);
         },
-        ScriptCommand::ActivateEpoch { name } => {
+        Command::ActivateEpoch { name } => {
             let epoch_id = budget_system.get_epoch_id_by_name(&name)
                 .ok_or_else(|| format!("Epoch not found: {}", name))?;
             budget_system.activate_epoch(epoch_id)?;
             println!("Activated epoch: {} ({})", name, epoch_id);
         },
-        ScriptCommand::SetEpochReward { token, amount } => {
+        Command::SetEpochReward { token, amount } => {
             budget_system.set_epoch_reward(&token, amount)?;
             println!("Set epoch reward: {} {}", amount, token);
         },
-        ScriptCommand::AddTeam { name, representative, trailing_monthly_revenue } => {
+        Command::AddTeam { name, representative, trailing_monthly_revenue } => {
             let team_id = budget_system.create_team(name.clone(), representative, trailing_monthly_revenue)?;
             println!("Added team: {} ({})", name, team_id);
         },
-        ScriptCommand::AddProposal { title, url, budget_request_details, announced_at, published_at, is_historical } => {
+        Command::AddProposal { title, url, budget_request_details, announced_at, published_at, is_historical } => {
             let budget_request_details = if let Some(details) = budget_request_details {
                 let team_id = details.team.as_ref()
                     .and_then(|name| budget_system.get_team_id_by_name(name));
@@ -155,11 +52,11 @@ pub async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptCo
             let proposal_id = budget_system.add_proposal(title.clone(), url, budget_request_details, announced_at, published_at, is_historical)?;
             println!("Added proposal: {} ({})", title, proposal_id);
         },
-        ScriptCommand::UpdateProposal { proposal_name, updates } => {
+        Command::UpdateProposal { proposal_name, updates } => {
             budget_system.update_proposal(&proposal_name, updates)?;
             println!("Updated proposal: {}", proposal_name);
         },
-        ScriptCommand::ImportPredefinedRaffle { 
+        Command::ImportPredefinedRaffle { 
             proposal_name, 
             counted_teams, 
             uncounted_teams, 
@@ -197,7 +94,7 @@ pub async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptCo
                 println!("\nRaffle result not available");
             }
         },
-        ScriptCommand::ImportHistoricalVote { 
+        Command::ImportHistoricalVote { 
             proposal_name, 
             passed, 
             participating_teams,
@@ -251,7 +148,7 @@ pub async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptCo
 
             println!("\nNote: Detailed vote counts are not available for historical votes.");
         },
-        ScriptCommand::ImportHistoricalRaffle { 
+        Command::ImportHistoricalRaffle { 
             proposal_name, 
             initiation_block, 
             randomness_block, 
@@ -356,7 +253,7 @@ pub async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptCo
                 println!("Raffle result not available");
             }
         },
-        ScriptCommand::UpdateTeam { team_name, updates } => {
+        Command::UpdateTeam { team_name, updates } => {
             let team_id = budget_system.get_team_id_by_name(&team_name)
                 .ok_or_else(|| format!("Team not found: {}", team_name))?;
             
@@ -364,23 +261,23 @@ pub async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptCo
             
             println!("Updated team '{}'", team_name);
         },
-        ScriptCommand::PrintTeamReport => {
+        Command::PrintTeamReport => {
             let report = budget_system.print_team_report();
             println!("{}", report);
         },
-        ScriptCommand::PrintEpochState => {
+        Command::PrintEpochState => {
             match budget_system.print_epoch_state() {
                 Ok(report) => println!("{}", report),
                 Err(e) => println!("Error printing epoch state: {}", e),
             }
         },
-        ScriptCommand::PrintTeamVoteParticipation { team_name, epoch_name } => {
+        Command::PrintTeamVoteParticipation { team_name, epoch_name } => {
             match budget_system.print_team_vote_participation(&team_name, epoch_name.as_deref()) {
                 Ok(report) => println!("{}", report),
                 Err(e) => println!("Error printing team vote participation: {}", e),
             }
         },
-        ScriptCommand::CloseProposal { proposal_name, resolution } => {
+        Command::CloseProposal { proposal_name, resolution } => {
             let proposal_id = budget_system.get_proposal_id_by_name(&proposal_name)
                 .ok_or_else(|| format!("Proposal not found: {}", proposal_name))?;
             
@@ -396,7 +293,7 @@ pub async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptCo
             budget_system.close_with_reason(proposal_id, &resolution)?;
             println!("Closed proposal '{}' with resolution: {:?}", proposal_name, resolution);
         },
-        ScriptCommand::CreateRaffle { proposal_name, block_offset, excluded_teams } => {
+        Command::CreateRaffle { proposal_name, block_offset, excluded_teams } => {
             println!("Preparing raffle for proposal: {}", proposal_name);
 
             // PREPARATION PHASE
@@ -506,7 +403,7 @@ pub async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptCo
                 println!("Raffle result not available");
             }
         },
-        ScriptCommand::CreateAndProcessVote { proposal_name, counted_votes, uncounted_votes, vote_opened, vote_closed } => {
+        Command::CreateAndProcessVote { proposal_name, counted_votes, uncounted_votes, vote_opened, vote_closed } => {
             println!("Executing CreateAndProcessVote command for proposal: {}", proposal_name);
             match budget_system.create_and_process_vote(
                 &proposal_name,
@@ -548,7 +445,7 @@ pub async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptCo
                 }
             }
         },
-        ScriptCommand::GenerateReportsForClosedProposals { epoch_name } => {
+        Command::GenerateReportsForClosedProposals { epoch_name } => {
             let epoch_id = budget_system.get_epoch_id_by_name(&epoch_name)
                 .ok_or_else(|| format!("Epoch not found: {}", epoch_name))?;
             
@@ -564,7 +461,7 @@ pub async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptCo
                 }
             }
         },
-        ScriptCommand::GenerateReportForProposal { proposal_name } => {
+        Command::GenerateReportForProposal { proposal_name } => {
             let current_epoch = budget_system.get_current_epoch()
                 .ok_or("No active epoch")?;
             
@@ -578,7 +475,7 @@ pub async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptCo
                 Err(e) => println!("Failed to generate report for proposal '{}': {}", proposal.title(), e),
             }
         },
-        ScriptCommand::PrintPointReport { epoch_name } => {
+        Command::PrintPointReport { epoch_name } => {
             match budget_system.generate_point_report(epoch_name.as_deref()) {
                 Ok(report) => {
                     println!("Point Report:");
@@ -587,7 +484,7 @@ pub async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptCo
                 Err(e) => println!("Error generating point report: {}", e),
             }
         },
-        ScriptCommand::CloseEpoch { epoch_name } => {
+        Command::CloseEpoch { epoch_name } => {
             let epoch_name_clone = epoch_name.clone(); // Clone here
             match budget_system.close_epoch(epoch_name.as_deref()) {
                 Ok(_) => {
@@ -609,7 +506,7 @@ pub async fn execute_command(budget_system: &mut BudgetSystem, command: ScriptCo
                 Err(e) => println!("Failed to close epoch: {}", e),
             }
         },
-        ScriptCommand::GenerateEndOfEpochReport { epoch_name } => {
+        Command::GenerateEndOfEpochReport { epoch_name } => {
             budget_system.generate_end_of_epoch_report(&epoch_name)?;
             println!("Generated End of Epoch Report for epoch: {}", epoch_name);
         },
@@ -684,7 +581,7 @@ mod tests {
         let start_date = Utc::now();
         let end_date = start_date + chrono::Duration::days(30);
     
-        let command = ScriptCommand::CreateEpoch {
+        let command = Command::CreateEpoch {
             name: "Test Epoch".to_string(),
             start_date,
             end_date,
@@ -704,7 +601,7 @@ mod tests {
     
         let epoch_id = budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
     
-        let command = ScriptCommand::ActivateEpoch {
+        let command = Command::ActivateEpoch {
             name: "Test Epoch".to_string(),
         };
     
@@ -724,7 +621,7 @@ mod tests {
         let epoch_id = budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
         budget_system.activate_epoch(epoch_id).unwrap();
     
-        let command = ScriptCommand::SetEpochReward {
+        let command = Command::SetEpochReward {
             token: "ETH".to_string(),
             amount: 100.0,
         };
@@ -741,7 +638,7 @@ mod tests {
     async fn test_add_team_command() {
         let (mut budget_system, config) = create_test_budget_system().await;
     
-        let command = ScriptCommand::AddTeam {
+        let command = Command::AddTeam {
             name: "Test Team".to_string(),
             representative: "John Doe".to_string(),
             trailing_monthly_revenue: Some(vec![1000, 2000, 3000]),
@@ -765,7 +662,7 @@ mod tests {
         // Create a team
         budget_system.create_team("Test Team".to_string(), "John Doe".to_string(), Some(vec![1000])).unwrap();
 
-        let command = ScriptCommand::UpdateTeam {
+        let command = Command::UpdateTeam {
             team_name: "Test Team".to_string(),
             updates: UpdateTeamDetails {
                 name: Some("Updated Team".to_string()),
@@ -789,7 +686,7 @@ mod tests {
     async fn test_invalid_command_execution() {
         let (mut budget_system, config) = create_test_budget_system().await;
     
-        let command = ScriptCommand::ActivateEpoch {
+        let command = Command::ActivateEpoch {
             name: "Non-existent Epoch".to_string(),
         };
     
@@ -808,7 +705,7 @@ mod tests {
         let epoch_id = budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
         budget_system.activate_epoch(epoch_id).unwrap();
 
-        let command = ScriptCommand::AddProposal {
+        let command = Command::AddProposal {
             title: "New Proposal".to_string(),
             url: Some("http://example.com".to_string()),
             budget_request_details: None,
@@ -829,7 +726,7 @@ mod tests {
     async fn test_update_proposal_command() {
         let (mut budget_system, config, proposal_id) = create_test_budget_system_with_proposal().await;
 
-        let command = ScriptCommand::UpdateProposal {
+        let command = Command::UpdateProposal {
             proposal_name: "Test Proposal".to_string(),
             updates: UpdateProposalDetails {
                 title: Some("Updated Proposal".to_string()),
@@ -852,7 +749,7 @@ mod tests {
     async fn test_close_proposal_command() {
         let (mut budget_system, config, proposal_id) = create_test_budget_system_with_proposal().await;
 
-        let command = ScriptCommand::CloseProposal {
+        let command = Command::CloseProposal {
             proposal_name: "Test Proposal".to_string(),
             resolution: "Approved".to_string(),
         };
@@ -869,7 +766,7 @@ mod tests {
     async fn test_create_raffle_command() {
         let (mut budget_system, config, _) = create_test_budget_system_with_proposal().await;
 
-        let command = ScriptCommand::CreateRaffle {
+        let command = Command::CreateRaffle {
             proposal_name: "Test Proposal".to_string(),
             block_offset: None,  // Remove block offset
             excluded_teams: None,
@@ -892,7 +789,7 @@ mod tests {
         budget_system.create_team("Team 1".to_string(), "Rep 1".to_string(), Some(vec![1000])).unwrap();
         budget_system.create_team("Team 2".to_string(), "Rep 2".to_string(), Some(vec![2000])).unwrap();
 
-        let command = ScriptCommand::ImportPredefinedRaffle {
+        let command = Command::ImportPredefinedRaffle {
             proposal_name: "Test Proposal".to_string(),
             counted_teams: vec!["Team 1".to_string()],
             uncounted_teams: vec!["Team 2".to_string()],
@@ -915,7 +812,7 @@ mod tests {
         let (mut budget_system, config, _) = create_test_budget_system_with_proposal().await;
 
         // Create a raffle first
-        let create_raffle_command = ScriptCommand::CreateRaffle {
+        let create_raffle_command = Command::CreateRaffle {
             proposal_name: "Test Proposal".to_string(),
             block_offset: None,
             excluded_teams: None,
@@ -941,7 +838,7 @@ mod tests {
         println!("Counted teams: {:?}", counted_teams);
         println!("Uncounted teams: {:?}", uncounted_teams);
 
-        let command = ScriptCommand::CreateAndProcessVote {
+        let command = Command::CreateAndProcessVote {
             proposal_name: "Test Proposal".to_string(),
             counted_votes: counted_teams.into_iter().map(|name| (name, VoteChoice::Yes)).collect(),
             uncounted_votes: uncounted_teams.into_iter().map(|name| (name, VoteChoice::No)).collect(),
@@ -964,14 +861,14 @@ mod tests {
         // 1. Create and activate an epoch
         let start_date = Utc::now();
         let end_date = start_date + chrono::Duration::days(30);
-        let create_epoch_command = ScriptCommand::CreateEpoch {
+        let create_epoch_command = Command::CreateEpoch {
             name: "Test Epoch".to_string(),
             start_date,
             end_date,
         };
         execute_command(&mut budget_system, create_epoch_command, &config).await.unwrap();
 
-        let activate_epoch_command = ScriptCommand::ActivateEpoch {
+        let activate_epoch_command = Command::ActivateEpoch {
             name: "Test Epoch".to_string(),
         };
         execute_command(&mut budget_system, activate_epoch_command, &config).await.unwrap();
@@ -979,7 +876,7 @@ mod tests {
         // 2. Add teams (5 earners and 5 supporters)
         for i in 1..=10 {
             let team_type = if i <= 5 { "Earner" } else { "Supporter" };
-            let add_team_command = ScriptCommand::AddTeam {
+            let add_team_command = Command::AddTeam {
                 name: format!("Team {}", i),
                 representative: format!("Rep {}", i),
                 trailing_monthly_revenue: if i <= 5 { Some(vec![1000 * i, 2000 * i, 3000 * i]) } else { None },
@@ -988,7 +885,7 @@ mod tests {
         }
 
         // 3. Create a proposal
-        let add_proposal_command = ScriptCommand::AddProposal {
+        let add_proposal_command = Command::AddProposal {
             title: "Test Proposal".to_string(),
             url: Some("http://example.com".to_string()),
             budget_request_details: None,
@@ -999,7 +896,7 @@ mod tests {
         execute_command(&mut budget_system, add_proposal_command, &config).await.unwrap();
 
         // 4. Create a raffle
-        let create_raffle_command = ScriptCommand::CreateRaffle {
+        let create_raffle_command = Command::CreateRaffle {
             proposal_name: "Test Proposal".to_string(),
             block_offset: None,
             excluded_teams: None,
@@ -1022,7 +919,7 @@ mod tests {
         println!("Uncounted teams: {:?}", uncounted_teams);
 
         // 5. Create and process a vote
-        let vote_command = ScriptCommand::CreateAndProcessVote {
+        let vote_command = Command::CreateAndProcessVote {
             proposal_name: "Test Proposal".to_string(),
             counted_votes: counted_teams.into_iter().map(|name| (name, VoteChoice::Yes)).collect(),
             uncounted_votes: uncounted_teams.into_iter().map(|name| (name, VoteChoice::No)).collect(),
@@ -1032,12 +929,12 @@ mod tests {
         execute_command(&mut budget_system, vote_command, &config).await.unwrap();
 
         // 6. Generate reports
-        let generate_report_command = ScriptCommand::GenerateReportForProposal {
+        let generate_report_command = Command::GenerateReportForProposal {
             proposal_name: "Test Proposal".to_string(),
         };
         execute_command(&mut budget_system, generate_report_command, &config).await.unwrap();
 
-        let print_point_report_command = ScriptCommand::PrintPointReport { epoch_name: None };
+        let print_point_report_command = Command::PrintPointReport { epoch_name: None };
         execute_command(&mut budget_system, print_point_report_command, &config).await.unwrap();
 
         // Verify final state
@@ -1087,7 +984,7 @@ mod tests {
     async fn test_print_point_report_command() {
         let (mut budget_system, config, _) = create_test_budget_system_with_proposal().await;
 
-        let command = ScriptCommand::PrintPointReport { epoch_name: None };
+        let command = Command::PrintPointReport { epoch_name: None };
 
         let result = execute_command(&mut budget_system, command, &config).await;
         assert!(result.is_ok());
@@ -1099,14 +996,14 @@ mod tests {
         let (mut budget_system, config) = create_test_budget_system().await;
 
         // Test activating non-existent epoch
-        let command = ScriptCommand::ActivateEpoch {
+        let command = Command::ActivateEpoch {
             name: "Non-existent Epoch".to_string(),
         };
         let result = execute_command(&mut budget_system, command, &config).await;
         assert!(result.is_err());
 
         // Test updating non-existent proposal
-        let command = ScriptCommand::UpdateProposal {
+        let command = Command::UpdateProposal {
             proposal_name: "Non-existent Proposal".to_string(),
             updates: UpdateProposalDetails {
                 title: Some("Updated Title".to_string()),
@@ -1129,7 +1026,7 @@ mod tests {
         // Test creating epoch with end date before start date
         let end_date = Utc::now();
         let start_date = end_date + chrono::Duration::days(1);
-        let command = ScriptCommand::CreateEpoch {
+        let command = Command::CreateEpoch {
             name: "Invalid Epoch".to_string(),
             start_date,
             end_date,
@@ -1138,7 +1035,7 @@ mod tests {
         assert!(result.is_err());
 
         // Test creating team with invalid status
-        let command = ScriptCommand::AddTeam {
+        let command = Command::AddTeam {
             name: "Invalid Team".to_string(),
             representative: "John Doe".to_string(),
             trailing_monthly_revenue: Some(vec![]),  // Empty revenue for Earner status
@@ -1152,7 +1049,7 @@ mod tests {
         let (mut budget_system, config) = create_test_budget_system().await;
 
         // Try to create a proposal before creating and activating an epoch
-        let command = ScriptCommand::AddProposal {
+        let command = Command::AddProposal {
             title: "Invalid Proposal".to_string(),
             url: None,
             budget_request_details: None,
@@ -1164,7 +1061,7 @@ mod tests {
         assert!(result.is_err());
 
         // Try to create a raffle before creating a proposal
-        let command = ScriptCommand::CreateRaffle {
+        let command = Command::CreateRaffle {
             proposal_name: "Non-existent Proposal".to_string(),
             block_offset: None,
             excluded_teams: None,

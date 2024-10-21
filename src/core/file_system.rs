@@ -4,7 +4,7 @@ use crate::core::models::Proposal;
 use crate::core::state::BudgetSystemState;
 use crate::app_config::AppConfig;
 use crate::services::ethereum::EthereumServiceTrait;
-use crate::commands::cli::ScriptCommand;
+use crate::commands::common::Command;
 
 use serde_json;
 use std::fs;
@@ -109,9 +109,9 @@ impl FileSystem {
         Ok(file_path)
     }
 
-    pub fn load_script(script_file: &str) -> Result<Vec<ScriptCommand>, Box<dyn Error>> {
+    pub fn load_script(script_file: &str) -> Result<Vec<Command>, Box<dyn Error>> {
         let script_content = fs::read_to_string(script_file)?;
-        let script: Vec<ScriptCommand> = serde_json::from_str(&script_content)?;
+        let script: Vec<Command> = serde_json::from_str(&script_content)?;
         Ok(script)
     }
 
@@ -425,7 +425,7 @@ mod tests {
 
             assert_eq!(loaded_script.len(), 2);
             match &loaded_script[0] {
-                ScriptCommand::CreateEpoch { name, .. } => assert_eq!(name, "Test Epoch"),
+                Command::CreateEpoch { name, .. } => assert_eq!(name, "Test Epoch"),
                 _ => panic!("Unexpected command type"),
             }
         }
