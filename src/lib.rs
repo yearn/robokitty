@@ -28,7 +28,8 @@ pub async fn run_script_commands(command: Command) -> Result<(), Box<dyn std::er
     let (mut budget_system, config) = initialize_system().await?;
     lock::create_lock_file()?;
     
-    let result = crate::commands::cli::execute_command(&mut budget_system, command, &config).await;
+    let mut stdout = std::io::stdout();
+    let result = commands::cli::execute_command(&mut budget_system, command, &config, &mut stdout).await;
     
     budget_system.save_state()?;
     lock::remove_lock_file()?;

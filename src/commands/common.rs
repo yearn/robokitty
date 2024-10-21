@@ -1,6 +1,6 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, io::Write};
 use uuid::Uuid;
 use async_trait::async_trait;
 
@@ -139,4 +139,10 @@ pub struct UpdateProposalDetails {
 #[async_trait]
 pub trait CommandExecutor {
     async fn execute_command(&mut self, command: Command) -> Result<String, Box<dyn std::error::Error>>;
+    
+    async fn execute_command_with_streaming<W: Write + Send + 'static>(
+        &mut self, 
+        command: Command, 
+        output: &mut W
+    ) -> Result<(), Box<dyn std::error::Error>>;
 }

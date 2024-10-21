@@ -22,6 +22,7 @@ use std::{
     collections::{HashMap, HashSet},
     error::Error, fmt,
     fs,
+    io::Write,
     path::{Path, PathBuf},
     str,
     sync::Arc,
@@ -1886,6 +1887,124 @@ def hello_world():
 
         (counted, uncounted)
     }
+
+    async fn handle_create_raffle<W: Write + Send + 'static>(
+        &mut self,
+        proposal_name: String,
+        block_offset: Option<u64>,
+        excluded_teams: Option<Vec<String>>,
+        output: &mut W,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Preparation phase
+        writeln!(output, "Preparing raffle for proposal: {}", proposal_name)?;
+        let config = self.config.clone();
+        let (raffle_id, tickets) = self.prepare_raffle(&proposal_name, excluded_teams.clone(), &config)?;
+
+        for (team_name, start, end) in self.group_tickets_by_team(&tickets) {
+            writeln!(output, "  {} ballot range [{}..{}]", team_name, start, end)?;
+        }
+
+        if let Some(excluded) = &excluded_teams {
+            writeln!(output, "Excluded teams: {:?}", excluded)?;
+        }
+
+        // Waiting phase
+        let current_block = self.ethereum_service().get_current_block().await?;
+        writeln!(output, "Current block number: {}", current_block)?;
+
+        let initiation_block = current_block;
+        let target_block = current_block + block_offset.unwrap_or(self.config.future_block_offset);
+        writeln!(output, "Target block for randomness: {}", target_block)?;
+        writeln!(output, "Waiting for target block...")?;
+        output.flush()?;
+
+        let mut last_observed_block = current_block;
+        while self.ethereum_service().get_current_block().await? < target_block {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let new_block = self.ethereum_service().get_current_block().await?;
+            if new_block != last_observed_block {
+                writeln!(output, "Latest observed block: {}", new_block)?;
+                output.flush()?;
+                last_observed_block = new_block;
+            }
+        }
+
+        // Finalization phase
+        let randomness = self.ethereum_service().get_randomness(target_block).await?;
+        writeln!(output, "Block randomness: {}", randomness)?;
+        writeln!(output, "Etherscan URL: https://etherscan.io/block/{}#consensusinfo", target_block)?;
+
+        let raffle = self.finalize_raffle(raffle_id, initiation_block, target_block, randomness).await?;
+
+        writeln!(output, "Raffle results for proposal '{}' (Raffle ID: {})", proposal_name, raffle_id)?;
+
+        if let Some(result) = raffle.result() {
+            writeln!(output, "**Counted voters:**")?;
+            writeln!(output, "Earner teams:")?;
+            let mut earner_count = 0;
+            for &team_id in result.counted() {
+                if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
+                    if let TeamStatus::Earner { .. } = snapshot.status() {
+                        earner_count += 1;
+                        let best_score = raffle.tickets().iter()
+                            .filter(|t| t.team_id() == team_id)
+                            .map(|t| t.score())
+                            .max_by(|a, b| a.partial_cmp(b).unwrap())
+                            .unwrap_or(0.0);
+                        writeln!(output, "  {} (score: {})", snapshot.name(), best_score)?;
+                    }
+                }
+            }
+            writeln!(output, "Supporter teams:")?;
+            for &team_id in result.counted() {
+                if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
+                    if let TeamStatus::Supporter = snapshot.status() {
+                        let best_score = raffle.tickets().iter()
+                            .filter(|t| t.team_id() == team_id)
+                            .map(|t| t.score())
+                            .max_by(|a, b| a.partial_cmp(b).unwrap())
+                            .unwrap_or(0.0);
+                        writeln!(output, "  {} (score: {})", snapshot.name(), best_score)?;
+                    }
+                }
+            }
+            writeln!(output, "Total counted voters: {} (Earners: {}, Supporters: {})", 
+                        result.counted().len(), earner_count, result.counted().len() - earner_count)?;
+
+            writeln!(output, "**Uncounted voters:**")?;
+            writeln!(output, "Earner teams:")?;
+            for &team_id in result.uncounted() {
+                if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
+                    if let TeamStatus::Earner { .. } = snapshot.status() {
+                        let best_score = raffle.tickets().iter()
+                            .filter(|t| t.team_id() == team_id)
+                            .map(|t| t.score())
+                            .max_by(|a, b| a.partial_cmp(b).unwrap())
+                            .unwrap_or(0.0);
+                        writeln!(output, "  {} (score: {})", snapshot.name(), best_score)?;
+                    }
+                }
+            }
+            writeln!(output, "Supporter teams:")?;
+            for &team_id in result.uncounted() {
+                if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
+                    if let TeamStatus::Supporter = snapshot.status() {
+                        let best_score = raffle.tickets().iter()
+                            .filter(|t| t.team_id() == team_id)
+                            .map(|t| t.score())
+                            .max_by(|a, b| a.partial_cmp(b).unwrap())
+                            .unwrap_or(0.0);
+                        writeln!(output, "  {} (score: {})", snapshot.name(), best_score)?;
+                    }
+                }
+            }
+        } else {
+            writeln!(output, "Raffle result not available")?;
+        }
+
+        output.flush()?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -2156,116 +2275,9 @@ impl CommandExecutor for BudgetSystem {
                 Ok(format!("Closed proposal '{}' with resolution: {:?}", proposal_name, resolution))
             },
             Command::CreateRaffle { proposal_name, block_offset, excluded_teams } => {
-                let mut output = format!("Preparing raffle for proposal: {}\n", proposal_name);
-                let config = self.config.clone();
-                // PREPARATION PHASE
-                let (raffle_id, tickets) = self.prepare_raffle(&proposal_name, excluded_teams.clone(), &config)?;
-
-                output += "Generated RaffleTickets:\n";
-                for (team_name, start, end) in self.group_tickets_by_team(&tickets) {
-                    output += &format!("  {} ballot range [{}..{}]\n", team_name, start, end);
-                }
-
-                if let Some(excluded) = &excluded_teams {
-                    output += &format!("Excluded teams: {:?}\n", excluded);
-                }
-
-                let current_block = self.ethereum_service().get_current_block().await?;
-                output += &format!("Current block number: {}\n", current_block);
-
-                let initiation_block = current_block;
-
-                let target_block = current_block + block_offset.unwrap_or(self.config.future_block_offset);
-                output += &format!("Target block for randomness: {}\n", target_block);
-
-                // Wait for target block
-                output += "Waiting for target block...\n";
-                let mut last_observed_block = current_block;
-                while self.ethereum_service().get_current_block().await? < target_block {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    let new_block = self.ethereum_service().get_current_block().await?;
-                    if new_block != last_observed_block {
-                        output += &format!("Latest observed block: {}\n", new_block);
-                        last_observed_block = new_block;
-                    }
-                }
-
-                // FINALIZATION PHASE
-                let randomness = self.ethereum_service().get_randomness(target_block).await?;
-                output += &format!("Block randomness: {}\n", randomness);
-                output += &format!("Etherscan URL: https://etherscan.io/block/{}#consensusinfo\n", target_block);
-
-                let raffle = self.finalize_raffle(raffle_id, initiation_block, target_block, randomness).await?;
-
-                // Print results (similar to ImportHistoricalRaffle)
-                output += &format!("Raffle results for proposal '{}' (Raffle ID: {})\n", proposal_name, raffle_id);
-
-                // Print raffle results
-                if let Some(result) = raffle.result() {
-                    output += "**Counted voters:**\n";
-                    output += "Earner teams:\n";
-                    let mut earner_count = 0;
-                    for &team_id in result.counted() {
-                        if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
-                            if let TeamStatus::Earner { .. } = snapshot.status() {
-                                earner_count += 1;
-                                let best_score = raffle.tickets().iter()
-                                    .filter(|t| t.team_id() == team_id)
-                                    .map(|t| t.score())
-                                    .max_by(|a, b| a.partial_cmp(b).unwrap())
-                                    .unwrap_or(0.0);
-                                output += &format!("  {} (score: {})\n", snapshot.name(), best_score);
-                            }
-                        }
-                    }
-                    output += "Supporter teams:\n";
-                    for &team_id in result.counted() {
-                        if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
-                            if let TeamStatus::Supporter = snapshot.status() {
-                                let best_score = raffle.tickets().iter()
-                                    .filter(|t| t.team_id() == team_id)
-                                    .map(|t| t.score())
-                                    .max_by(|a, b| a.partial_cmp(b).unwrap())
-                                    .unwrap_or(0.0);
-                                output += &format!("  {} (score: {})\n", snapshot.name(), best_score);
-                            }
-                        }
-                    }
-                    output += &format!("Total counted voters: {} (Earners: {}, Supporters: {})\n", 
-                                result.counted().len(), earner_count, result.counted().len() - earner_count);
-
-                    output += "**Uncounted voters:**\n";
-                    output += "Earner teams:\n";
-                    for &team_id in result.uncounted() {
-                        if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
-                            if let TeamStatus::Earner { .. } = snapshot.status() {
-                                let best_score = raffle.tickets().iter()
-                                    .filter(|t| t.team_id() == team_id)
-                                    .map(|t| t.score())
-                                    .max_by(|a, b| a.partial_cmp(b).unwrap())
-                                    .unwrap_or(0.0);
-                                output += &format!("  {} (score: {})\n", snapshot.name(), best_score);
-                            }
-                        }
-                    }
-                    output += "Supporter teams:\n";
-                    for &team_id in result.uncounted() {
-                        if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
-                            if let TeamStatus::Supporter = snapshot.status() {
-                                let best_score = raffle.tickets().iter()
-                                    .filter(|t| t.team_id() == team_id)
-                                    .map(|t| t.score())
-                                    .max_by(|a, b| a.partial_cmp(b).unwrap())
-                                    .unwrap_or(0.0);
-                                output += &format!("  {} (score: {})\n", snapshot.name(), best_score);
-                            }
-                        }
-                    }
-                } else {
-                    output += "Raffle result not available\n";
-                }
-
-                Ok(output)
+                let mut output = Vec::new();
+                self.handle_create_raffle(proposal_name, block_offset, excluded_teams, &mut output).await?;
+                Ok(String::from_utf8(output)?)
             },
             Command::CreateAndProcessVote { proposal_name, counted_votes, uncounted_votes, vote_opened, vote_closed } => {
                 let mut output = format!("Executing CreateAndProcessVote command for proposal: {}\n", proposal_name);
@@ -2359,6 +2371,24 @@ impl CommandExecutor for BudgetSystem {
             Command::RunScript { .. } => {
                 Err("RunScript command should be handled by the CLI, not the BudgetSystem".into())
             },
+        }
+    }
+
+    async fn execute_command_with_streaming<W: Write + Send + 'static>(
+        &mut self, 
+        command: Command, 
+        output: &mut W
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match command {
+            Command::CreateRaffle { proposal_name, block_offset, excluded_teams } => {
+                self.handle_create_raffle(proposal_name, block_offset, excluded_teams, output).await
+            },
+            // For commands that don't support streaming, we can fall back to the original implementation
+            _ => {
+                let result = self.execute_command(command).await?;
+                write!(output, "{}", result)?;
+                Ok(())
+            }
         }
     }
 }
