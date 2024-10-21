@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "robokitty_script"
-path = "src/bin/robokitty_script.rs"
+name = "robokitty_cli"
+path = "src/bin/robokitty_cli.rs"
 
 [[bin]]
 name = "robokitty_bot"
