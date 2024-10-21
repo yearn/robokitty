@@ -2,7 +2,7 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::error::Error;
+use std::{fs, error::Error};
 use uuid::Uuid;
 use tokio::time::Duration;
 
@@ -11,508 +11,326 @@ use crate::core::models::{
 };
 use crate::core::budget_system::BudgetSystem;
 use crate::app_config::AppConfig;
-use super::common::{Command, CommandExecutor, UpdateTeamDetails, UpdateProposalDetails};
+use super::common::{BudgetRequestDetailsCommand, Command, CommandExecutor, UpdateTeamDetails, UpdateProposalDetails};
 
 pub async fn execute_command(budget_system: &mut BudgetSystem, command: Command, config: &AppConfig) -> Result<(), Box<dyn Error>> {
     match command {
-        Command::CreateEpoch { name, start_date, end_date } => {
-            let epoch_id = budget_system.create_epoch(&name, start_date, end_date)?;
-            println!("Created epoch: {} ({})", name, epoch_id);
+        Command::RunScript { script_file_path } => {
+            let script_path = script_file_path.unwrap_or_else(|| config.script_file.clone());
+            let script_commands = read_script_commands(&script_path)?;
+            for cmd in script_commands {
+                let result = budget_system.execute_command(cmd).await?;
+                println!("{}", result);
+            }
+            Ok(())
         },
-        Command::ActivateEpoch { name } => {
-            let epoch_id = budget_system.get_epoch_id_by_name(&name)
-                .ok_or_else(|| format!("Epoch not found: {}", name))?;
-            budget_system.activate_epoch(epoch_id)?;
-            println!("Activated epoch: {} ({})", name, epoch_id);
+        _ => {
+            let result = budget_system.execute_command(command).await?;
+            println!("{}", result);
+            Ok(())
+        }
+    }
+}
+
+pub fn parse_cli_args(args: &[String]) -> Result<Command, Box<dyn Error>> {
+    if args.len() < 2 {
+        return Err("Not enough arguments. Usage: robokitty_script <command> [args...]".into());
+    }
+
+    let command = &args[1];
+    let args = &args[2..];
+
+    match command.as_str() {
+        "create-epoch" => {
+            if args.len() != 3 {
+                return Err("Usage: create-epoch <name> <start_date> <end_date>".into());
+            }
+            let name = args[0].clone();
+            let start_date = DateTime::parse_from_rfc3339(&args[1])?.with_timezone(&Utc);
+            let end_date = DateTime::parse_from_rfc3339(&args[2])?.with_timezone(&Utc);
+            Ok(Command::CreateEpoch { name, start_date, end_date })
         },
-        Command::SetEpochReward { token, amount } => {
-            budget_system.set_epoch_reward(&token, amount)?;
-            println!("Set epoch reward: {} {}", amount, token);
+        "activate-epoch" => {
+            if args.len() != 1 {
+                return Err("Usage: activate-epoch <name>".into());
+            }
+            Ok(Command::ActivateEpoch { name: args[0].clone() })
         },
-        Command::AddTeam { name, representative, trailing_monthly_revenue } => {
-            let team_id = budget_system.create_team(name.clone(), representative, trailing_monthly_revenue)?;
-            println!("Added team: {} ({})", name, team_id);
+        "set-epoch-reward" => {
+            if args.len() != 2 {
+                return Err("Usage: set-epoch-reward <token> <amount>".into());
+            }
+            let token = args[0].clone();
+            let amount = args[1].parse()?;
+            Ok(Command::SetEpochReward { token, amount })
         },
-        Command::AddProposal { title, url, budget_request_details, announced_at, published_at, is_historical } => {
-            let budget_request_details = if let Some(details) = budget_request_details {
-                let team_id = details.team.as_ref()
-                    .and_then(|name| budget_system.get_team_id_by_name(name));
-                
-                Some(BudgetRequestDetails::new(
-                    team_id,
-                    details.request_amounts.unwrap_or_default(),
-                    details.start_date,
-                    details.end_date,
-                    details.payment_status
-                )?)
+        "add-team" => {
+            if args.len() < 2 {
+                return Err("Usage: add-team <name> <representative> [revenue1 revenue2 revenue3]".into());
+            }
+            let name = args[0].clone();
+            let representative = args[1].clone();
+            let trailing_monthly_revenue = if args.len() > 2 {
+                Some(args[2..].iter().map(|s| s.parse().unwrap()).collect())
             } else {
                 None
             };
-            
-            let proposal_id = budget_system.add_proposal(title.clone(), url, budget_request_details, announced_at, published_at, is_historical)?;
-            println!("Added proposal: {} ({})", title, proposal_id);
+            Ok(Command::AddTeam { name, representative, trailing_monthly_revenue })
         },
-        Command::UpdateProposal { proposal_name, updates } => {
-            budget_system.update_proposal(&proposal_name, updates)?;
-            println!("Updated proposal: {}", proposal_name);
-        },
-        Command::ImportPredefinedRaffle { 
-            proposal_name, 
-            counted_teams, 
-            uncounted_teams, 
-            total_counted_seats, 
-            max_earner_seats 
-        } => {
-            let raffle_id = budget_system.import_predefined_raffle(
-                &proposal_name, 
-                counted_teams.clone(), 
-                uncounted_teams.clone(), 
-                total_counted_seats, 
-                max_earner_seats
-            )?;
-            
-            let raffle = budget_system.state().raffles().get(&raffle_id).unwrap();
-
-            println!("Imported predefined raffle for proposal '{}' (Raffle ID: {})", proposal_name, raffle_id);
-            println!("  Counted teams: {:?}", counted_teams);
-            println!("  Uncounted teams: {:?}", uncounted_teams);
-            println!("  Total counted seats: {}", total_counted_seats);
-            println!("  Max earner seats: {}", max_earner_seats);
-
-            // Print team snapshots
-            println!("\nTeam Snapshots:");
-            for snapshot in raffle.team_snapshots() {
-                println!("  {} ({}): {:?}", snapshot.name(), snapshot.id(), snapshot.status());
+        "update-team" => {
+            if args.len() < 2 {
+                return Err("Usage: update-team <name> [--new-name <name>] [--representative <name>] [--status <status>] [--revenue <rev1> <rev2> <rev3>]".into());
             }
-
-            // Print raffle result
-            if let Some(result) = raffle.result() {
-                println!("\nRaffle Result:");
-                println!("  Counted teams: {:?}", result.counted());
-                println!("  Uncounted teams: {:?}", result.uncounted());
-            } else {
-                println!("\nRaffle result not available");
-            }
-        },
-        Command::ImportHistoricalVote { 
-            proposal_name, 
-            passed, 
-            participating_teams,
-            non_participating_teams,
-            counted_points,
-            uncounted_points,
-        } => {
-            let vote_id = budget_system.import_historical_vote(
-                &proposal_name,
-                passed,
-                participating_teams.clone(),
-                non_participating_teams.clone(),
-                counted_points,
-                uncounted_points
-            )?;
-
-            let vote = budget_system.state().votes().get(&vote_id).unwrap();
-            let proposal = budget_system.state().proposals().get(&vote.proposal_id()).unwrap();
-
-            println!("Imported historical vote for proposal '{}' (Vote ID: {})", proposal_name, vote_id);
-            println!("Vote passed: {}", passed);
-
-            println!("\nNon-participating teams:");
-            for team_name in &non_participating_teams {
-                println!("  {}", team_name);
-            }
-
-            if let VoteType::Formal { raffle_id, .. } = vote.vote_type() {
-                if let Some(raffle) = budget_system.state().raffles().get(&raffle_id) {
-                    if let VoteParticipation::Formal { counted, uncounted } = vote.participation() {
-                        println!("\nCounted seats:");
-                        for &team_id in counted {
-                            if let Some(team) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
-                                println!("  {} (+{} points)", team.name(), config.counted_vote_points);
-                            }
-                        }
-
-                        println!("\nUncounted seats:");
-                        for &team_id in uncounted {
-                            if let Some(team) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
-                                println!("  {} (+{} points)", team.name(), config.uncounted_vote_points);
-                            }
-                        }
-                    }
-                } else {
-                    println!("\nAssociated raffle not found. Cannot display seat breakdowns.");
-                }
-            } else {
-                println!("\nThis is an informal vote, no counted/uncounted breakdown available.");
-            }
-
-            println!("\nNote: Detailed vote counts are not available for historical votes.");
-        },
-        Command::ImportHistoricalRaffle { 
-            proposal_name, 
-            initiation_block, 
-            randomness_block, 
-            team_order, 
-            excluded_teams,
-            total_counted_seats, 
-            max_earner_seats 
-        } => {
-            let (raffle_id, raffle) = budget_system.import_historical_raffle(
-                &proposal_name,
-                initiation_block,
-                randomness_block,
-                team_order.clone(),
-                excluded_teams.clone(),
-                total_counted_seats.or(Some(budget_system.config().default_total_counted_seats)),
-                max_earner_seats.or(Some(budget_system.config().default_max_earner_seats)),
-            ).await?;
-
-            println!("Imported historical raffle for proposal '{}' (Raffle ID: {})", proposal_name, raffle_id);
-            println!("Randomness: {}", raffle.config().block_randomness());
-
-            // Print excluded teams
-            if let Some(excluded) = excluded_teams {
-                println!("Excluded teams: {:?}", excluded);
-            }
-
-            // Print ballot ID ranges for each team
-            for snapshot in raffle.team_snapshots() {
-                let tickets: Vec<_> = raffle.tickets().iter()
-                    .filter(|t| t.team_id() == snapshot.id())
-                    .collect();
-                
-                if !tickets.is_empty() {
-                    let start = tickets.first().unwrap().index();
-                    let end = tickets.last().unwrap().index();
-                    println!("Team '{}' ballot range: {} - {}", snapshot.name(), start, end);
-                }
-            }
-
-            // Print raffle results
-            if let Some(result) = raffle.result() {
-                println!("Counted seats:");
-                println!("Earner seats:");
-                let mut earner_count = 0;
-                for &team_id in result.counted() {
-                    if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
-                        if let TeamStatus::Earner { .. } = snapshot.status() {
-                            earner_count += 1;
-                            let best_score = raffle.tickets().iter()
-                                .filter(|t| t.team_id() == team_id)
-                                .map(|t| t.score())
-                                .max_by(|a, b| a.partial_cmp(b).unwrap())
-                                .unwrap_or(0.0);
-                            println!("  {} (score: {})", snapshot.name(), best_score);
-                        }
-                    }
-                }
-                println!("Supporter seats:");
-                for &team_id in result.counted() {
-                    if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
-                        if let TeamStatus::Supporter = snapshot.status() {
-                            let best_score = raffle.tickets().iter()
-                                .filter(|t| t.team_id() == team_id)
-                                .map(|t| t.score())
-                                .max_by(|a, b| a.partial_cmp(b).unwrap())
-                                .unwrap_or(0.0);
-                            println!("  {} (score: {})", snapshot.name(), best_score);
-                        }
-                    }
-                }
-                println!("Total counted seats: {} (Earners: {}, Supporters: {})", 
-                         result.counted().len(), earner_count, result.counted().len() - earner_count);
-
-                println!("Uncounted seats:");
-                println!("Earner seats:");
-                for &team_id in result.uncounted() {
-                    if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
-                        if let TeamStatus::Earner { .. } = snapshot.status() {
-                            let best_score = raffle.tickets().iter()
-                                .filter(|t| t.team_id() == team_id)
-                                .map(|t| t.score())
-                                .max_by(|a, b| a.partial_cmp(b).unwrap())
-                                .unwrap_or(0.0);
-                            println!("  {} (score: {})", snapshot.name(), best_score);
-                        }
-                    }
-                }
-                println!("Supporter seats:");
-                for &team_id in result.uncounted() {
-                    if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
-                        if let TeamStatus::Supporter = snapshot.status() {
-                            let best_score = raffle.tickets().iter()
-                                .filter(|t| t.team_id() == team_id)
-                                .map(|t| t.score())
-                                .max_by(|a, b| a.partial_cmp(b).unwrap())
-                                .unwrap_or(0.0);
-                            println!("  {} (score: {})", snapshot.name(), best_score);
-                        }
-                    }
-                }
-            } else {
-                println!("Raffle result not available");
-            }
-        },
-        Command::UpdateTeam { team_name, updates } => {
-            let team_id = budget_system.get_team_id_by_name(&team_name)
-                .ok_or_else(|| format!("Team not found: {}", team_name))?;
-            
-            budget_system.update_team(team_id, updates)?;
-            
-            println!("Updated team '{}'", team_name);
-        },
-        Command::PrintTeamReport => {
-            let report = budget_system.print_team_report();
-            println!("{}", report);
-        },
-        Command::PrintEpochState => {
-            match budget_system.print_epoch_state() {
-                Ok(report) => println!("{}", report),
-                Err(e) => println!("Error printing epoch state: {}", e),
-            }
-        },
-        Command::PrintTeamVoteParticipation { team_name, epoch_name } => {
-            match budget_system.print_team_vote_participation(&team_name, epoch_name.as_deref()) {
-                Ok(report) => println!("{}", report),
-                Err(e) => println!("Error printing team vote participation: {}", e),
-            }
-        },
-        Command::CloseProposal { proposal_name, resolution } => {
-            let proposal_id = budget_system.get_proposal_id_by_name(&proposal_name)
-                .ok_or_else(|| format!("Proposal not found: {}", proposal_name))?;
-            
-            let resolution = match resolution.to_lowercase().as_str() {
-                "approved" => Resolution::Approved,
-                "rejected" => Resolution::Rejected,
-                "invalid" => Resolution::Invalid,
-                "duplicate" => Resolution::Duplicate,
-                "retracted" => Resolution::Retracted,
-                _ => return Err(format!("Invalid resolution type: {}", resolution).into()),
+            let team_name = args[0].clone();
+            let mut updates = UpdateTeamDetails {
+                name: None,
+                representative: None,
+                status: None,
+                trailing_monthly_revenue: None,
             };
-        
-            budget_system.close_with_reason(proposal_id, &resolution)?;
-            println!("Closed proposal '{}' with resolution: {:?}", proposal_name, resolution);
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--new-name" => {
+                        updates.name = Some(args[i+1].clone());
+                        i += 2;
+                    },
+                    "--representative" => {
+                        updates.representative = Some(args[i+1].clone());
+                        i += 2;
+                    },
+                    "--status" => {
+                        updates.status = Some(args[i+1].clone());
+                        i += 2;
+                    },
+                    "--revenue" => {
+                        updates.trailing_monthly_revenue = Some(vec![
+                            args[i+1].parse()?,
+                            args[i+2].parse()?,
+                            args[i+3].parse()?
+                        ]);
+                        i += 4;
+                    },
+                    _ => return Err(format!("Unknown option: {}", args[i]).into()),
+                }
+            }
+            Ok(Command::UpdateTeam { team_name, updates })
         },
-        Command::CreateRaffle { proposal_name, block_offset, excluded_teams } => {
-            println!("Preparing raffle for proposal: {}", proposal_name);
-
-            // PREPARATION PHASE
-            let (raffle_id, tickets) = budget_system.prepare_raffle(&proposal_name, excluded_teams.clone(), &config)?;
-
-            println!("Generated RaffleTickets:");
-            for (team_name, start, end) in budget_system.group_tickets_by_team(&tickets) {
-                println!("  {} ballot range [{}..{}]", team_name, start, end);
+        "add-proposal" => {
+            if args.len() < 2 {
+                return Err("Usage: add-proposal <title> <url> [--budget-request <team> <amount> <token> <start_date> <end_date>] [--announced <date>] [--published <date>] [--historical]".into());
             }
-
-            if let Some(excluded) = excluded_teams {
-                println!("Excluded teams: {:?}", excluded);
-            }
-
-            let current_block = budget_system.ethereum_service().get_current_block().await?;
-            println!("Current block number: {}", current_block);
-
-            let initiation_block = current_block;
-
-            let target_block = current_block + block_offset.unwrap_or(config.future_block_offset);
-            println!("Target block for randomness: {}", target_block);
-
-            // Wait for target block
-            println!("Waiting for target block...");
-            let mut last_observed_block = current_block;
-            while budget_system.ethereum_service().get_current_block().await? < target_block {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                let new_block = budget_system.ethereum_service().get_current_block().await?;
-                if new_block != last_observed_block {
-                    println!("Latest observed block: {}", new_block);
-                    last_observed_block = new_block;
+            let title = args[0].clone();
+            let url = Some(args[1].clone());
+            let mut budget_request_details = None;
+            let mut announced_at = None;
+            let mut published_at = None;
+            let mut is_historical = None;
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--budget-request" => {
+                        budget_request_details = Some(BudgetRequestDetailsCommand {
+                            team: Some(args[i+1].clone()),
+                            request_amounts: Some(HashMap::from([(args[i+3].clone(), args[i+2].parse()?)])),
+                            start_date: Some(NaiveDate::parse_from_str(&args[i+4], "%Y-%m-%d")?),
+                            end_date: Some(NaiveDate::parse_from_str(&args[i+5], "%Y-%m-%d")?),
+                            payment_status: None,
+                        });
+                        i += 6;
+                    },
+                    "--announced" => {
+                        announced_at = Some(NaiveDate::parse_from_str(&args[i+1], "%Y-%m-%d")?);
+                        i += 2;
+                    },
+                    "--published" => {
+                        published_at = Some(NaiveDate::parse_from_str(&args[i+1], "%Y-%m-%d")?);
+                        i += 2;
+                    },
+                    "--historical" => {
+                        is_historical = Some(true);
+                        i += 1;
+                    },
+                    _ => return Err(format!("Unknown option: {}", args[i]).into()),
                 }
             }
-
-            // FINALIZATION PHASE
-            let randomness = budget_system.ethereum_service().get_randomness(target_block).await?;
-            println!("Block randomness: {}", randomness);
-            println!("Etherscan URL: https://etherscan.io/block/{}#consensusinfo", target_block);
-
-            let raffle = budget_system.finalize_raffle(raffle_id, initiation_block, target_block, randomness).await?;
-
-            // Print results (similar to ImportHistoricalRaffle)
-            println!("Raffle results for proposal '{}' (Raffle ID: {})", proposal_name, raffle_id);
-
-            // Print raffle results
-            if let Some(result) = raffle.result() {
-                println!("**Counted voters:**");
-                println!("Earner teams:");
-                let mut earner_count = 0;
-                for &team_id in result.counted() {
-                    if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
-                        if let TeamStatus::Earner { .. } = snapshot.status() {
-                            earner_count += 1;
-                            let best_score = raffle.tickets().iter()
-                                .filter(|t| t.team_id() == team_id)
-                                .map(|t| t.score())
-                                .max_by(|a, b| a.partial_cmp(b).unwrap())
-                                .unwrap_or(0.0);
-                            println!("  {} (score: {})", snapshot.name(), best_score);
-                        }
-                    }
-                }
-                println!("Supporter teams:");
-                for &team_id in result.counted() {
-                    if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
-                        if let TeamStatus::Supporter = snapshot.status() {
-                            let best_score = raffle.tickets().iter()
-                                .filter(|t| t.team_id() == team_id)
-                                .map(|t| t.score())
-                                .max_by(|a, b| a.partial_cmp(b).unwrap())
-                                .unwrap_or(0.0);
-                            println!("  {} (score: {})", snapshot.name(), best_score);
-                        }
-                    }
-                }
-                println!("Total counted voters: {} (Earners: {}, Supporters: {})", 
-                         result.counted().len(), earner_count, result.counted().len() - earner_count);
-
-                println!("**Uncounted voters:**");
-                println!("Earner teams:");
-                for &team_id in result.uncounted() {
-                    if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
-                        if let TeamStatus::Earner { .. } = snapshot.status() {
-                            let best_score = raffle.tickets().iter()
-                                .filter(|t| t.team_id() == team_id)
-                                .map(|t| t.score())
-                                .max_by(|a, b| a.partial_cmp(b).unwrap())
-                                .unwrap_or(0.0);
-                            println!("  {} (score: {})", snapshot.name(), best_score);
-                        }
-                    }
-                }
-                println!("Supporter teams:");
-                for &team_id in result.uncounted() {
-                    if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
-                        if let TeamStatus::Supporter = snapshot.status() {
-                            let best_score = raffle.tickets().iter()
-                                .filter(|t| t.team_id() == team_id)
-                                .map(|t| t.score())
-                                .max_by(|a, b| a.partial_cmp(b).unwrap())
-                                .unwrap_or(0.0);
-                            println!("  {} (score: {})", snapshot.name(), best_score);
-                        }
-                    }
-                }
-            } else {
-                println!("Raffle result not available");
-            }
+            Ok(Command::AddProposal { title, url, budget_request_details, announced_at, published_at, is_historical })
         },
-        Command::CreateAndProcessVote { proposal_name, counted_votes, uncounted_votes, vote_opened, vote_closed } => {
-            println!("Executing CreateAndProcessVote command for proposal: {}", proposal_name);
-            match budget_system.create_and_process_vote(
-                &proposal_name,
-                counted_votes,
-                uncounted_votes,
-                vote_opened,
-                vote_closed
-            ) {
-                Ok(report) => {
-                    println!("Vote processed successfully for proposal: {}", proposal_name);
-                    println!("Vote report:\n{}", report);
-                
-                    // Print point credits
-                    if let Some(vote_id) = budget_system.state().votes().values()
-                        .find(|v| v.proposal_id() == budget_system.get_proposal_id_by_name(&proposal_name).unwrap())
-                        .map(|v| v.id())
-                    {
-                        let vote = budget_system.state().votes().get(&vote_id).unwrap();
-                        
-                        println!("\nPoints credited:");
-                        if let VoteParticipation::Formal { counted, uncounted } = &vote.participation() {
-                            for &team_id in counted {
-                                if let Some(team) = budget_system.state().current_state().teams().get(&team_id) {
-                                    println!("  {} (+{} points)", team.name(), config.counted_vote_points);
-                                }
-                            }
-                            for &team_id in uncounted {
-                                if let Some(team) = budget_system.state().current_state().teams().get(&team_id) {
-                                    println!("  {} (+{} points)", team.name(), config.uncounted_vote_points);
-                                }
-                            }
-                        }
-                    } else {
-                        println!("Warning: Vote not found after processing");
-                    }
-                },
-                Err(e) => {
-                    println!("Error: Failed to process vote for proposal '{}'. Reason: {}", proposal_name, e);
+        "update-proposal" => {
+            if args.len() < 2 {
+                return Err("Usage: update-proposal <name> [--title <title>] [--url <url>] [--budget-request <team> <amount> <token> <start_date> <end_date>] [--announced <date>] [--published <date>] [--resolved <date>]".into());
+            }
+            let proposal_name = args[0].clone();
+            let mut updates = UpdateProposalDetails {
+                title: None,
+                url: None,
+                budget_request_details: None,
+                announced_at: None,
+                published_at: None,
+                resolved_at: None,
+            };
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--title" => {
+                        updates.title = Some(args[i+1].clone());
+                        i += 2;
+                    },
+                    "--url" => {
+                        updates.url = Some(args[i+1].clone());
+                        i += 2;
+                    },
+                    "--budget-request" => {
+                        updates.budget_request_details = Some(BudgetRequestDetailsCommand {
+                            team: Some(args[i+1].clone()),
+                            request_amounts: Some(HashMap::from([(args[i+3].clone(), args[i+2].parse()?)])),
+                            start_date: Some(NaiveDate::parse_from_str(&args[i+4], "%Y-%m-%d")?),
+                            end_date: Some(NaiveDate::parse_from_str(&args[i+5], "%Y-%m-%d")?),
+                            payment_status: None,
+                        });
+                        i += 6;
+                    },
+                    "--announced" => {
+                        updates.announced_at = Some(NaiveDate::parse_from_str(&args[i+1], "%Y-%m-%d")?);
+                        i += 2;
+                    },
+                    "--published" => {
+                        updates.published_at = Some(NaiveDate::parse_from_str(&args[i+1], "%Y-%m-%d")?);
+                        i += 2;
+                    },
+                    "--resolved" => {
+                        updates.resolved_at = Some(NaiveDate::parse_from_str(&args[i+1], "%Y-%m-%d")?);
+                        i += 2;
+                    },
+                    _ => return Err(format!("Unknown option: {}", args[i]).into()),
                 }
             }
+            Ok(Command::UpdateProposal { proposal_name, updates })
         },
-        Command::GenerateReportsForClosedProposals { epoch_name } => {
-            let epoch_id = budget_system.get_epoch_id_by_name(&epoch_name)
-                .ok_or_else(|| format!("Epoch not found: {}", epoch_name))?;
-            
-            let closed_proposals: Vec<_> = budget_system.get_proposals_for_epoch(epoch_id)
-                .into_iter()
-                .filter(|p| p.is_closed())
+        "import-predefined-raffle" => {
+            if args.len() < 5 {
+                return Err("Usage: import-predefined-raffle <proposal_name> <counted_teams> <uncounted_teams> <total_counted_seats> <max_earner_seats>".into());
+            }
+            let proposal_name = args[0].clone();
+            let counted_teams: Vec<String> = args[1].split(',').map(String::from).collect();
+            let uncounted_teams: Vec<String> = args[2].split(',').map(String::from).collect();
+            let total_counted_seats = args[3].parse()?;
+            let max_earner_seats = args[4].parse()?;
+            Ok(Command::ImportPredefinedRaffle { proposal_name, counted_teams, uncounted_teams, total_counted_seats, max_earner_seats })
+        },
+        "import-historical-vote" => {
+            if args.len() < 5 {
+                return Err("Usage: import-historical-vote <proposal_name> <passed> <participating_teams> <non_participating_teams> [<counted_points> <uncounted_points>]".into());
+            }
+            let proposal_name = args[0].clone();
+            let passed = args[1].parse()?;
+            let participating_teams: Vec<String> = args[2].split(',').map(String::from).collect();
+            let non_participating_teams: Vec<String> = args[3].split(',').map(String::from).collect();
+            let counted_points = args.get(4).map(|s| s.parse()).transpose()?;
+            let uncounted_points = args.get(5).map(|s| s.parse()).transpose()?;
+            Ok(Command::ImportHistoricalVote { proposal_name, passed, participating_teams, non_participating_teams, counted_points, uncounted_points })
+        },
+        "import-historical-raffle" => {
+            if args.len() < 4 {
+                return Err("Usage: import-historical-raffle <proposal_name> <initiation_block> <randomness_block> [<team_order>] [<excluded_teams>] [<total_counted_seats>] [<max_earner_seats>]".into());
+            }
+            let proposal_name = args[0].clone();
+            let initiation_block = args[1].parse()?;
+            let randomness_block = args[2].parse()?;
+            let team_order = args.get(3).map(|s| s.split(',').map(String::from).collect());
+            let excluded_teams = args.get(4).map(|s| s.split(',').map(String::from).collect());
+            let total_counted_seats = args.get(5).map(|s| s.parse()).transpose()?;
+            let max_earner_seats = args.get(6).map(|s| s.parse()).transpose()?;
+            Ok(Command::ImportHistoricalRaffle { proposal_name, initiation_block, randomness_block, team_order, excluded_teams, total_counted_seats, max_earner_seats })
+        },
+        "print-team-report" => Ok(Command::PrintTeamReport),
+        "print-epoch-state" => Ok(Command::PrintEpochState),
+        "print-team-vote-participation" => {
+            if args.len() < 1 || args.len() > 2 {
+                return Err("Usage: print-team-vote-participation <team_name> [epoch_name]".into());
+            }
+            let team_name = args[0].clone();
+            let epoch_name = args.get(1).cloned();
+            Ok(Command::PrintTeamVoteParticipation { team_name, epoch_name })
+        },
+        "close-proposal" => {
+            if args.len() != 2 {
+                return Err("Usage: close-proposal <proposal_name> <resolution>".into());
+            }
+            let proposal_name = args[0].clone();
+            let resolution = args[1].clone();
+            Ok(Command::CloseProposal { proposal_name, resolution })
+        },
+        "create-raffle" => {
+            if args.len() < 1 || args.len() > 3 {
+                return Err("Usage: create-raffle <proposal_name> [block_offset] [excluded_teams]".into());
+            }
+            let proposal_name = args[0].clone();
+            let block_offset = args.get(1).map(|s| s.parse()).transpose()?;
+            let excluded_teams = args.get(2).map(|s| s.split(',').map(String::from).collect());
+            Ok(Command::CreateRaffle { proposal_name, block_offset, excluded_teams })
+        },
+        "create-and-process-vote" => {
+            if args.len() < 3 {
+                return Err("Usage: create-and-process-vote <proposal_name> <counted_votes> <uncounted_votes> [vote_opened] [vote_closed]".into());
+            }
+            let proposal_name = args[0].clone();
+            let counted_votes: HashMap<String, VoteChoice> = args[1].split(',')
+                .map(|s| {
+                    let parts: Vec<&str> = s.split(':').collect();
+                    (parts[0].to_string(), if parts[1] == "Yes" { VoteChoice::Yes } else { VoteChoice::No })
+                })
                 .collect();
-
-            for proposal in closed_proposals {
-                match budget_system.generate_and_save_proposal_report(proposal.id(), &epoch_name) {
-                    Ok(file_path) => println!("Report generated for proposal '{}' at {:?}", proposal.title(), file_path),
-                    Err(e) => println!("Failed to generate report for proposal '{}': {}", proposal.title(), e),
-                }
+            let uncounted_votes: HashMap<String, VoteChoice> = args[2].split(',')
+                .map(|s| {
+                    let parts: Vec<&str> = s.split(':').collect();
+                    (parts[0].to_string(), if parts[1] == "Yes" { VoteChoice::Yes } else { VoteChoice::No })
+                })
+                .collect();
+            let vote_opened = args.get(3).map(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d")).transpose()?;
+            let vote_closed = args.get(4).map(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d")).transpose()?;
+            Ok(Command::CreateAndProcessVote { proposal_name, counted_votes, uncounted_votes, vote_opened, vote_closed })
+        },
+        "generate-reports-for-closed-proposals" => {
+            if args.len() != 1 {
+                return Err("Usage: generate-reports-for-closed-proposals <epoch_name>".into());
             }
-        },
-        Command::GenerateReportForProposal { proposal_name } => {
-            let current_epoch = budget_system.get_current_epoch()
-                .ok_or("No active epoch")?;
-            
-            let proposal = budget_system.get_proposals_for_epoch(current_epoch.id())
-                .into_iter()
-                .find(|p| p.name_matches(&proposal_name))
-                .ok_or_else(|| format!("Proposal not found in current epoch: {}", proposal_name))?;
-
-            match budget_system.generate_and_save_proposal_report(proposal.id(), &current_epoch.name()) {
-                Ok(file_path) => println!("Report generated for proposal '{}' at {:?}", proposal.title(), file_path),
-                Err(e) => println!("Failed to generate report for proposal '{}': {}", proposal.title(), e),
+            let epoch_name = args[0].clone();
+            Ok(Command::GenerateReportsForClosedProposals { epoch_name })
+        },"generate-report-for-proposal" => {
+            if args.len() != 1 {
+                return Err("Usage: generate-report-for-proposal <proposal_name>".into());
             }
+            let proposal_name = args[0].clone();
+            Ok(Command::GenerateReportForProposal { proposal_name })
         },
-        Command::PrintPointReport { epoch_name } => {
-            match budget_system.generate_point_report(epoch_name.as_deref()) {
-                Ok(report) => {
-                    println!("Point Report:");
-                    println!("{}", report);
-                },
-                Err(e) => println!("Error generating point report: {}", e),
+        "print-point-report" => {
+            let epoch_name = args.get(0).cloned();
+            Ok(Command::PrintPointReport { epoch_name })
+        },
+        "close-epoch" => {
+            let epoch_name = args.get(0).cloned();
+            Ok(Command::CloseEpoch { epoch_name })
+        },
+        "generate-end-of-epoch-report" => {
+            if args.len() != 1 {
+                return Err("Usage: generate-end-of-epoch-report <epoch_name>".into());
             }
+            let epoch_name = args[0].clone();
+            Ok(Command::GenerateEndOfEpochReport { epoch_name })
         },
-        Command::CloseEpoch { epoch_name } => {
-            let epoch_name_clone = epoch_name.clone(); // Clone here
-            match budget_system.close_epoch(epoch_name.as_deref()) {
-                Ok(_) => {
-                    let epoch_info = epoch_name_clone.clone().unwrap_or("Active epoch".to_string());
-                    println!("Successfully closed epoch: {}", epoch_info);
-                    if let Some(epoch) = budget_system.state().epochs().values().find(|e| e.name() == epoch_name_clone.as_deref().unwrap_or("")) {
-                        if let Some(reward) = epoch.reward() {
-                            println!("Rewards allocated:");
-                            for (team_id, team_reward) in epoch.team_rewards() {
-                                if let Some(team) = budget_system.state().current_state().teams().get(team_id) {
-                                    println!("  {}: {} {} ({:.2}%)", team.name(), team_reward.amount(), reward.token(), team_reward.percentage() * 100.0);
-                                }
-                            }
-                        } else {
-                            println!("No rewards were set for this epoch.");
-                        }
-                    }
-                },
-                Err(e) => println!("Failed to close epoch: {}", e),
-            }
+        "run-script" => {
+            let script_file_path = args.get(0).cloned();
+            Ok(Command::RunScript { script_file_path })
         },
-        Command::GenerateEndOfEpochReport { epoch_name } => {
-            budget_system.generate_end_of_epoch_report(&epoch_name)?;
-            println!("Generated End of Epoch Report for epoch: {}", epoch_name);
-        },
-
+        _ => Err(format!("Unknown command: {}", command).into()),
     }
-    Ok(())
+}
+
+pub fn read_script_commands(script_file_path: &str) -> Result<Vec<Command>, Box<dyn Error>> {
+    let script_content = fs::read_to_string(script_file_path)?;
+    let commands: Vec<Command> = serde_json::from_str(&script_content)?;
+    Ok(commands)
 }
 
 #[cfg(test)]

@@ -7,8 +7,11 @@ use crate::core::models::{
     Raffle, RaffleConfig, RaffleResult, RaffleTicket,
     Vote, VoteType, VoteStatus, VoteChoice, VoteCount, VoteParticipation, VoteResult, get_id_by_name
 };
+use crate::core::models::common::NameMatches;
 use crate::services::ethereum::EthereumServiceTrait;
-use crate::commands::common::{UpdateProposalDetails, UpdateTeamDetails};
+use crate::commands::common::{ 
+    UpdateProposalDetails, UpdateTeamDetails, Command, CommandExecutor
+};
 use crate::app_config::AppConfig;
 use crate::core::file_system::FileSystem;
 use crate::escape_markdown;
@@ -17,19 +20,34 @@ use chrono::{DateTime, NaiveDate, Utc, TimeZone};
 use uuid::Uuid;
 use std::{
     collections::{HashMap, HashSet},
-    error::Error,
+    error::Error, fmt,
     fs,
     path::{Path, PathBuf},
     str,
     sync::Arc,
 };
 use log::{info, debug, error};
+use async_trait::async_trait;
+use tokio::time::Duration;
 
 pub struct BudgetSystem {
     state: BudgetSystemState,
     ethereum_service: Arc<dyn EthereumServiceTrait>,
     config: AppConfig,
 }
+
+
+// TODO: fix this when we tackle errors - it's a hack for the sake of Command::PrintPointReport
+#[derive(Debug)]
+struct BudgetSystemError(String);
+
+impl fmt::Display for BudgetSystemError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Error for BudgetSystemError {}
 
 impl BudgetSystem {
     pub async fn new(
@@ -1867,6 +1885,481 @@ def hello_world():
         }
 
         (counted, uncounted)
+    }
+}
+
+#[async_trait]
+impl CommandExecutor for BudgetSystem {
+    async fn execute_command(&mut self, command: Command) -> Result<String, Box<dyn std::error::Error>> {
+        match command {
+            Command::CreateEpoch { name, start_date, end_date } => {
+                let epoch_id = self.create_epoch(&name, start_date, end_date)?;
+                Ok(format!("Created epoch: {} ({})", name, epoch_id))
+            },
+            Command::ActivateEpoch { name } => {
+                let epoch_id = self.get_epoch_id_by_name(&name)
+                    .ok_or_else(|| format!("Epoch not found: {}", name))?;
+                self.activate_epoch(epoch_id)?;
+                Ok(format!("Activated epoch: {} ({})", name, epoch_id))
+            },
+            Command::SetEpochReward { token, amount } => {
+                self.set_epoch_reward(&token, amount)?;
+                Ok(format!("Set epoch reward: {} {}", amount, token))
+            },
+            Command::AddTeam { name, representative, trailing_monthly_revenue } => {
+                let team_id = self.create_team(name.clone(), representative, trailing_monthly_revenue)?;
+                Ok(format!("Added team: {} ({})", name, team_id))
+            },
+            Command::UpdateTeam { team_name, updates } => {
+                let team_id = self.get_team_id_by_name(&team_name)
+                    .ok_or_else(|| format!("Team not found: {}", team_name))?;
+                self.update_team(team_id, updates)?;
+                Ok(format!("Updated team: {}", team_name))
+            },
+            Command::AddProposal { title, url, budget_request_details, announced_at, published_at, is_historical } => {
+                let budget_request_details = budget_request_details.map(|details| {
+                    BudgetRequestDetails::new(
+                        details.team.and_then(|name| self.get_team_id_by_name(&name)),
+                        details.request_amounts.unwrap_or_default(),
+                        details.start_date,
+                        details.end_date,
+                        details.payment_status,
+                    )
+                }).transpose()?;
+
+                let proposal_id = self.add_proposal(title.clone(), url, budget_request_details, announced_at, published_at, is_historical)?;
+                Ok(format!("Added proposal: {} ({})", title, proposal_id))
+            },
+            Command::UpdateProposal { proposal_name, updates } => {
+                self.update_proposal(&proposal_name, updates)?;
+                Ok(format!("Updated proposal: {}", proposal_name))
+            },
+            Command::ImportPredefinedRaffle { 
+                proposal_name, 
+                counted_teams, 
+                uncounted_teams, 
+                total_counted_seats, 
+                max_earner_seats 
+            } => {
+                let raffle_id = self.import_predefined_raffle(
+                    &proposal_name, 
+                    counted_teams.clone(), 
+                    uncounted_teams.clone(), 
+                    total_counted_seats, 
+                    max_earner_seats
+                )?;
+                
+                let raffle = self.state().raffles().get(&raffle_id).unwrap();
+            
+                let mut output = format!("Imported predefined raffle for proposal '{}' (Raffle ID: {})\n", proposal_name, raffle_id);
+                output += &format!("  Counted teams: {:?}\n", counted_teams);
+                output += &format!("  Uncounted teams: {:?}\n", uncounted_teams);
+                output += &format!("  Total counted seats: {}\n", total_counted_seats);
+                output += &format!("  Max earner seats: {}\n", max_earner_seats);
+            
+                output += "\nTeam Snapshots:\n";
+                for snapshot in raffle.team_snapshots() {
+                    output += &format!("  {} ({}): {:?}\n", snapshot.name(), snapshot.id(), snapshot.status());
+                }
+            
+                if let Some(result) = raffle.result() {
+                    output += "\nRaffle Result:\n";
+                    output += &format!("  Counted teams: {:?}\n", result.counted());
+                    output += &format!("  Uncounted teams: {:?}\n", result.uncounted());
+                } else {
+                    output += "\nRaffle result not available\n";
+                }
+            
+                Ok(output)
+            },
+            Command::ImportHistoricalVote { 
+                proposal_name, 
+                passed, 
+                participating_teams,
+                non_participating_teams,
+                counted_points,
+                uncounted_points,
+            } => {
+                let vote_id = self.import_historical_vote(
+                    &proposal_name,
+                    passed,
+                    participating_teams.clone(),
+                    non_participating_teams.clone(),
+                    counted_points,
+                    uncounted_points
+                )?;
+            
+                let vote = self.state().votes().get(&vote_id).unwrap();
+                let proposal = self.state().proposals().get(&vote.proposal_id()).unwrap();
+            
+                let mut output = format!("Imported historical vote for proposal '{}' (Vote ID: {})\n", proposal_name, vote_id);
+                output += &format!("Vote passed: {}\n", passed);
+            
+                output += "\nNon-participating teams:\n";
+                for team_name in &non_participating_teams {
+                    output += &format!("  {}\n", team_name);
+                }
+            
+                if let VoteType::Formal { raffle_id, .. } = vote.vote_type() {
+                    if let Some(raffle) = self.state().raffles().get(&raffle_id) {
+                        if let VoteParticipation::Formal { counted, uncounted } = vote.participation() {
+                            output += "\nCounted seats:\n";
+                            for &team_id in counted {
+                                if let Some(team) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
+                                    output += &format!("  {} (+{} points)\n", team.name(), self.config.counted_vote_points);
+                                }
+                            }
+            
+                            output += "\nUncounted seats:\n";
+                            for &team_id in uncounted {
+                                if let Some(team) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
+                                    output += &format!("  {} (+{} points)\n", team.name(), self.config.uncounted_vote_points);
+                                }
+                            }
+                        }
+                    } else {
+                        output += "\nAssociated raffle not found. Cannot display seat breakdowns.\n";
+                    }
+                } else {
+                    output += "\nThis is an informal vote, no counted/uncounted breakdown available.\n";
+                }
+            
+                output += "\nNote: Detailed vote counts are not available for historical votes.\n";
+            
+                Ok(output)
+            },
+            Command::ImportHistoricalRaffle { 
+                proposal_name, 
+                initiation_block, 
+                randomness_block, 
+                team_order, 
+                excluded_teams,
+                total_counted_seats, 
+                max_earner_seats 
+            } => {
+                let (raffle_id, raffle) = self.import_historical_raffle(
+                    &proposal_name,
+                    initiation_block,
+                    randomness_block,
+                    team_order.clone(),
+                    excluded_teams.clone(),
+                    total_counted_seats.or(Some(self.config.default_total_counted_seats)),
+                    max_earner_seats.or(Some(self.config.default_max_earner_seats)),
+                ).await?;
+            
+                let mut output = format!("Imported historical raffle for proposal '{}' (Raffle ID: {})\n", proposal_name, raffle_id);
+                output += &format!("Randomness: {}\n", raffle.config().block_randomness());
+            
+                if let Some(excluded) = excluded_teams {
+                    output += &format!("Excluded teams: {:?}\n", excluded);
+                }
+            
+                for snapshot in raffle.team_snapshots() {
+                    let tickets: Vec<_> = raffle.tickets().iter()
+                        .filter(|t| t.team_id() == snapshot.id())
+                        .collect();
+                    
+                    if !tickets.is_empty() {
+                        let start = tickets.first().unwrap().index();
+                        let end = tickets.last().unwrap().index();
+                        output += &format!("Team '{}' ballot range: {} - {}\n", snapshot.name(), start, end);
+                    }
+                }
+            
+                if let Some(result) = raffle.result() {
+                    output += "Counted seats:\n";
+                    output += "Earner seats:\n";
+                    let mut earner_count = 0;
+                    for &team_id in result.counted() {
+                        if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
+                            if let TeamStatus::Earner { .. } = snapshot.status() {
+                                earner_count += 1;
+                                let best_score = raffle.tickets().iter()
+                                    .filter(|t| t.team_id() == team_id)
+                                    .map(|t| t.score())
+                                    .max_by(|a, b| a.partial_cmp(b).unwrap())
+                                    .unwrap_or(0.0);
+                                output += &format!("  {} (score: {})\n", snapshot.name(), best_score);
+                            }
+                        }
+                    }
+                    output += "Supporter seats:\n";
+                    for &team_id in result.counted() {
+                        if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
+                            if let TeamStatus::Supporter = snapshot.status() {
+                                let best_score = raffle.tickets().iter()
+                                    .filter(|t| t.team_id() == team_id)
+                                    .map(|t| t.score())
+                                    .max_by(|a, b| a.partial_cmp(b).unwrap())
+                                    .unwrap_or(0.0);
+                                output += &format!("  {} (score: {})\n", snapshot.name(), best_score);
+                            }
+                        }
+                    }
+                    output += &format!("Total counted seats: {} (Earners: {}, Supporters: {})\n", 
+                                result.counted().len(), earner_count, result.counted().len() - earner_count);
+            
+                    output += "Uncounted seats:\n";
+                    output += "Earner seats:\n";
+                    for &team_id in result.uncounted() {
+                        if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
+                            if let TeamStatus::Earner { .. } = snapshot.status() {
+                                let best_score = raffle.tickets().iter()
+                                    .filter(|t| t.team_id() == team_id)
+                                    .map(|t| t.score())
+                                    .max_by(|a, b| a.partial_cmp(b).unwrap())
+                                    .unwrap_or(0.0);
+                                output += &format!("  {} (score: {})\n", snapshot.name(), best_score);
+                            }
+                        }
+                    }
+                    output += "Supporter seats:\n";
+                    for &team_id in result.uncounted() {
+                        if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
+                            if let TeamStatus::Supporter = snapshot.status() {
+                                let best_score = raffle.tickets().iter()
+                                    .filter(|t| t.team_id() == team_id)
+                                    .map(|t| t.score())
+                                    .max_by(|a, b| a.partial_cmp(b).unwrap())
+                                    .unwrap_or(0.0);
+                                output += &format!("  {} (score: {})\n", snapshot.name(), best_score);
+                            }
+                        }
+                    }
+                } else {
+                    output += "Raffle result not available\n";
+                }
+            
+                Ok(output)
+            },
+            Command::PrintTeamReport => {
+                Ok(self.print_team_report())
+            },
+            Command::PrintEpochState => {
+                self.print_epoch_state()
+            },
+            Command::PrintTeamVoteParticipation { team_name, epoch_name } => {
+                self.print_team_vote_participation(&team_name, epoch_name.as_deref())
+            },
+            Command::CloseProposal { proposal_name, resolution } => {
+                let proposal_id = self.get_proposal_id_by_name(&proposal_name)
+                    .ok_or_else(|| format!("Proposal not found: {}", proposal_name))?;
+                let resolution = match resolution.to_lowercase().as_str() {
+                    "approved" => Resolution::Approved,
+                    "rejected" => Resolution::Rejected,
+                    "invalid" => Resolution::Invalid,
+                    "duplicate" => Resolution::Duplicate,
+                    "retracted" => Resolution::Retracted,
+                    _ => return Err(format!("Invalid resolution type: {}", resolution).into()),
+                };
+                self.close_with_reason(proposal_id, &resolution)?;
+                Ok(format!("Closed proposal '{}' with resolution: {:?}", proposal_name, resolution))
+            },
+            Command::CreateRaffle { proposal_name, block_offset, excluded_teams } => {
+                let mut output = format!("Preparing raffle for proposal: {}\n", proposal_name);
+                let config = self.config.clone();
+                // PREPARATION PHASE
+                let (raffle_id, tickets) = self.prepare_raffle(&proposal_name, excluded_teams.clone(), &config)?;
+
+                output += "Generated RaffleTickets:\n";
+                for (team_name, start, end) in self.group_tickets_by_team(&tickets) {
+                    output += &format!("  {} ballot range [{}..{}]\n", team_name, start, end);
+                }
+
+                if let Some(excluded) = &excluded_teams {
+                    output += &format!("Excluded teams: {:?}\n", excluded);
+                }
+
+                let current_block = self.ethereum_service().get_current_block().await?;
+                output += &format!("Current block number: {}\n", current_block);
+
+                let initiation_block = current_block;
+
+                let target_block = current_block + block_offset.unwrap_or(self.config.future_block_offset);
+                output += &format!("Target block for randomness: {}\n", target_block);
+
+                // Wait for target block
+                output += "Waiting for target block...\n";
+                let mut last_observed_block = current_block;
+                while self.ethereum_service().get_current_block().await? < target_block {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    let new_block = self.ethereum_service().get_current_block().await?;
+                    if new_block != last_observed_block {
+                        output += &format!("Latest observed block: {}\n", new_block);
+                        last_observed_block = new_block;
+                    }
+                }
+
+                // FINALIZATION PHASE
+                let randomness = self.ethereum_service().get_randomness(target_block).await?;
+                output += &format!("Block randomness: {}\n", randomness);
+                output += &format!("Etherscan URL: https://etherscan.io/block/{}#consensusinfo\n", target_block);
+
+                let raffle = self.finalize_raffle(raffle_id, initiation_block, target_block, randomness).await?;
+
+                // Print results (similar to ImportHistoricalRaffle)
+                output += &format!("Raffle results for proposal '{}' (Raffle ID: {})\n", proposal_name, raffle_id);
+
+                // Print raffle results
+                if let Some(result) = raffle.result() {
+                    output += "**Counted voters:**\n";
+                    output += "Earner teams:\n";
+                    let mut earner_count = 0;
+                    for &team_id in result.counted() {
+                        if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
+                            if let TeamStatus::Earner { .. } = snapshot.status() {
+                                earner_count += 1;
+                                let best_score = raffle.tickets().iter()
+                                    .filter(|t| t.team_id() == team_id)
+                                    .map(|t| t.score())
+                                    .max_by(|a, b| a.partial_cmp(b).unwrap())
+                                    .unwrap_or(0.0);
+                                output += &format!("  {} (score: {})\n", snapshot.name(), best_score);
+                            }
+                        }
+                    }
+                    output += "Supporter teams:\n";
+                    for &team_id in result.counted() {
+                        if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
+                            if let TeamStatus::Supporter = snapshot.status() {
+                                let best_score = raffle.tickets().iter()
+                                    .filter(|t| t.team_id() == team_id)
+                                    .map(|t| t.score())
+                                    .max_by(|a, b| a.partial_cmp(b).unwrap())
+                                    .unwrap_or(0.0);
+                                output += &format!("  {} (score: {})\n", snapshot.name(), best_score);
+                            }
+                        }
+                    }
+                    output += &format!("Total counted voters: {} (Earners: {}, Supporters: {})\n", 
+                                result.counted().len(), earner_count, result.counted().len() - earner_count);
+
+                    output += "**Uncounted voters:**\n";
+                    output += "Earner teams:\n";
+                    for &team_id in result.uncounted() {
+                        if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
+                            if let TeamStatus::Earner { .. } = snapshot.status() {
+                                let best_score = raffle.tickets().iter()
+                                    .filter(|t| t.team_id() == team_id)
+                                    .map(|t| t.score())
+                                    .max_by(|a, b| a.partial_cmp(b).unwrap())
+                                    .unwrap_or(0.0);
+                                output += &format!("  {} (score: {})\n", snapshot.name(), best_score);
+                            }
+                        }
+                    }
+                    output += "Supporter teams:\n";
+                    for &team_id in result.uncounted() {
+                        if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
+                            if let TeamStatus::Supporter = snapshot.status() {
+                                let best_score = raffle.tickets().iter()
+                                    .filter(|t| t.team_id() == team_id)
+                                    .map(|t| t.score())
+                                    .max_by(|a, b| a.partial_cmp(b).unwrap())
+                                    .unwrap_or(0.0);
+                                output += &format!("  {} (score: {})\n", snapshot.name(), best_score);
+                            }
+                        }
+                    }
+                } else {
+                    output += "Raffle result not available\n";
+                }
+
+                Ok(output)
+            },
+            Command::CreateAndProcessVote { proposal_name, counted_votes, uncounted_votes, vote_opened, vote_closed } => {
+                let mut output = format!("Executing CreateAndProcessVote command for proposal: {}\n", proposal_name);
+                
+                match self.create_and_process_vote(
+                    &proposal_name,
+                    counted_votes,
+                    uncounted_votes,
+                    vote_opened,
+                    vote_closed
+                ) {
+                    Ok(report) => {
+                        output += &format!("Vote processed successfully for proposal: {}\n", proposal_name);
+                        output += &format!("Vote report:\n{}\n", report);
+                    
+                        // Print point credits
+                        if let Some(vote_id) = self.state().votes().values()
+                            .find(|v| v.proposal_id() == self.get_proposal_id_by_name(&proposal_name).unwrap())
+                            .map(|v| v.id())
+                        {
+                            let vote = self.state().votes().get(&vote_id).unwrap();
+                            
+                            output += "\nPoints credited:\n";
+                            if let VoteParticipation::Formal { counted, uncounted } = &vote.participation() {
+                                for &team_id in counted {
+                                    if let Some(team) = self.state().current_state().teams().get(&team_id) {
+                                        output += &format!("  {} (+{} points)\n", team.name(), self.config.counted_vote_points);
+                                    }
+                                }
+                                for &team_id in uncounted {
+                                    if let Some(team) = self.state().current_state().teams().get(&team_id) {
+                                        output += &format!("  {} (+{} points)\n", team.name(), self.config.uncounted_vote_points);
+                                    }
+                                }
+                            }
+                        } else {
+                            output += "Warning: Vote not found after processing\n";
+                        }
+                    },
+                    Err(e) => {
+                        output += &format!("Error: Failed to process vote for proposal '{}'. Reason: {}\n", proposal_name, e);
+                    }
+                }
+
+                Ok(output)
+            },
+            Command::GenerateReportsForClosedProposals { epoch_name } => {
+                let epoch_id = self.get_epoch_id_by_name(&epoch_name)
+                    .ok_or_else(|| format!("Epoch not found: {}", epoch_name))?;
+                
+                let closed_proposals: Vec<_> = self.get_proposals_for_epoch(epoch_id)
+                    .into_iter()
+                    .filter(|p| p.is_closed())
+                    .collect();
+
+                let mut report = String::new();
+                for proposal in closed_proposals {
+                    match self.generate_and_save_proposal_report(proposal.id(), &epoch_name) {
+                        Ok(file_path) => report.push_str(&format!("Report generated for proposal '{}' at {:?}\n", proposal.title(), file_path)),
+                        Err(e) => report.push_str(&format!("Failed to generate report for proposal '{}': {}\n", proposal.title(), e)),
+                    }
+                }
+                Ok(report)
+            },
+            Command::GenerateReportForProposal { proposal_name } => {
+                let current_epoch = self.get_current_epoch()
+                    .ok_or("No active epoch")?;
+                
+                let proposal = self.get_proposals_for_epoch(current_epoch.id())
+                    .into_iter()
+                    .find(|p| p.name_matches(&proposal_name))
+                    .ok_or_else(|| format!("Proposal not found in current epoch: {}", proposal_name))?;
+
+                match self.generate_and_save_proposal_report(proposal.id(), &current_epoch.name()) {
+                    Ok(file_path) => Ok(format!("Report generated for proposal '{}' at {:?}", proposal.title(), file_path)),
+                    Err(e) => Err(format!("Failed to generate report for proposal '{}': {}", proposal.title(), e).into()),
+                }
+            },
+            Command::PrintPointReport { epoch_name } => {
+                self.generate_point_report(epoch_name.as_deref())
+                    .map_err(|e| Box::new(BudgetSystemError(e.to_string())) as Box<dyn Error>)
+            },
+            Command::CloseEpoch { epoch_name } => {
+                self.close_epoch(epoch_name.as_deref())?;
+                Ok(format!("Successfully closed epoch: {}", epoch_name.unwrap_or_else(|| "Active epoch".to_string())))
+            },
+            Command::GenerateEndOfEpochReport { epoch_name } => {
+                self.generate_end_of_epoch_report(&epoch_name)?;
+                Ok(format!("Generated End of Epoch Report for epoch: {}", epoch_name))
+            },
+            Command::RunScript { .. } => {
+                Err("RunScript command should be handled by the CLI, not the BudgetSystem".into())
+            },
+        }
     }
 }
 

@@ -1,46 +1,25 @@
-use robokitty::{run_script_commands, initialize_environment};
+// src/bin/robokitty_script.rs
+
+use robokitty::{initialize_environment, initialize_system};
+use robokitty::commands::cli::{parse_cli_args, execute_command};
+use robokitty::lock;
+use std::env;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     initialize_environment();
-    run_script_commands().await
-}
+    
+    let args: Vec<String> = env::args().collect();
+    let command = parse_cli_args(&args)?;
 
-#[cfg(test)]
-mod tests {
-    use std::sync::Once;
-    use tokio::runtime::Runtime;
-
-    // TODO: Improve unit testing
-
-    // Mock environment initialization
-    static INIT: Once = Once::new();
-    fn initialize_environment() {
-        INIT.call_once(|| {
-            // Set up any necessary test environment variables
-            std::env::set_var("TELEGRAM_BOT_TOKEN", "test_token");
-        });
-    }
-
-    #[test]
-    fn test_main_function_success() {
-        initialize_environment();
-
-        // Create a runtime for running async code in the test
-        let rt = Runtime::new().unwrap();
-
-        // Mock the run_script_commands function
-        fn mock_run_script_commands() -> Result<(), Box<dyn std::error::Error>> {
-            Ok(())
-        }
-
-        // Run the main function with the mocked run_script_commands
-        let result = rt.block_on(async {
-            robokitty::initialize_environment();
-            mock_run_script_commands()
-        });
-
-        assert!(result.is_ok());
-    }
-
+    let (mut budget_system, config) = initialize_system().await?;
+    
+    lock::create_lock_file()?;
+    
+    let result = execute_command(&mut budget_system, command, &config).await;
+    
+    budget_system.save_state()?;
+    lock::remove_lock_file()?;
+    
+    result
 }

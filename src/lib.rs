@@ -1,6 +1,7 @@
 use crate::core::budget_system::BudgetSystem;
 use crate::services::ethereum::EthereumService;
 use crate::app_config::AppConfig;
+use crate::commands::common::Command;
 use std::sync::Arc;
 use dotenvy::dotenv;
 
@@ -23,23 +24,16 @@ pub async fn initialize_system() -> Result<(BudgetSystem, AppConfig), Box<dyn st
     Ok((budget_system, config))
 }
 
-pub async fn run_script_commands() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run_script_commands(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     let (mut budget_system, config) = initialize_system().await?;
     lock::create_lock_file()?;
     
-    // Execute script commands
-    if std::path::Path::new(&config.script_file).exists() {
-        let script = crate::core::file_system::FileSystem::load_script(&config.script_file)?;
-        for command in script {
-            if let Err(e) = crate::commands::cli::execute_command(&mut budget_system, command, &config).await {
-                log::error!("Error executing command: {}", e);
-            }
-        }
-    }
+    let result = crate::commands::cli::execute_command(&mut budget_system, command, &config).await;
     
     budget_system.save_state()?;
     lock::remove_lock_file()?;
-    Ok(())
+    
+    result
 }
 
 pub async fn run_telegram_bot() -> Result<(), Box<dyn std::error::Error>> {

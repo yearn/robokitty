@@ -2,15 +2,9 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
+use async_trait::async_trait;
 
 use crate::core::models::{ PaymentStatus, VoteChoice };
-
-// #[derive(Debug, Deserialize)]
-// struct RawCommand {
-//     #[serde(rename = "type")]
-//     command_type: String,
-//     params: serde_json::Value,
-// }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "params")]
@@ -110,6 +104,9 @@ pub enum Command {
     GenerateEndOfEpochReport {
         epoch_name: String
     },
+    RunScript {
+        script_file_path: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,6 +136,7 @@ pub struct UpdateProposalDetails {
     pub resolved_at: Option<NaiveDate>,
 }
 
+#[async_trait]
 pub trait CommandExecutor {
-    fn execute_command(&mut self, command: Command) -> Result<String, Box<dyn std::error::Error>>;
+    async fn execute_command(&mut self, command: Command) -> Result<String, Box<dyn std::error::Error>>;
 }
