@@ -1,15 +1,9 @@
-use crate::BudgetSystem;
+use crate::core::budget_system::BudgetSystem;
+use crate::commands::telegram::{TelegramCommand, parse_command, handle_command};
 use teloxide::prelude::*;
 use teloxide::types::ParseMode;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-
-#[derive(Debug, PartialEq, Clone)]
-pub enum TelegramCommand {
-    PrintEpochState,
-    MarkdownTest,
-    // Add other commands here as needed
-}
 
 pub struct TelegramBot {
     bot: Bot,
@@ -61,15 +55,6 @@ impl TelegramBot {
             }
         })
         .await;
-    }
-}
-
-fn parse_command(text: &str) -> Option<TelegramCommand> {
-    match text {
-        "/print_epoch_state" => Some(TelegramCommand::PrintEpochState),
-        "/markdown_test" => Some(TelegramCommand::MarkdownTest),
-        // Add other command mappings here
-        _ => None,
     }
 }
 
