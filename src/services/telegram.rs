@@ -1,11 +1,10 @@
 use crate::core::budget_system::BudgetSystem;
-use crate::commands::telegram::{TelegramCommand, parse_command};
-use crate::commands::common::Command;
+use crate::commands::telegram::{TelegramCommand, execute_command};
 use teloxide::prelude::*;
+use teloxide::utils::command::BotCommands;
 use teloxide::types::ParseMode;
-use tokio::sync::mpsc;
-use tokio::sync::oneshot;
-use std::io::Cursor;
+use core::marker::PhantomData;
+use tokio::sync::{mpsc, oneshot};
 
 pub struct TelegramBot {
     bot: Bot,
@@ -19,53 +18,47 @@ impl TelegramBot {
 
     pub async fn run(self) {
         let command_sender = self.command_sender;
-        teloxide::repl(self.bot, move |bot: Bot, msg: Message| {
-            let command_sender = command_sender.clone();
-            async move {
-                if let Some(text) = msg.text() {
-                    if let Some(command) = parse_command(text) {
-                        let (response_sender, response_receiver) = oneshot::channel();
-                        
-                        // Determine parse mode based on command type
-                        let parse_mode = match &command {
-                            TelegramCommand::PrintEpochState | TelegramCommand::MarkdownTest => {
-                                Some(ParseMode::MarkdownV2)
-                            },
-                            _ => None,
-                        };
-                        
-                        match command_sender.send((command, response_sender)).await {
-                            Ok(_) => {
-                                match response_receiver.await {
-                                    Ok(response) => {
-                                        let mut message = bot.send_message(msg.chat.id, response);
-                                        if let Some(mode) = parse_mode {
-                                            message = message.parse_mode(mode);
-                                        }
-                                        message.disable_web_page_preview(true).await?;
-                                    }
-                                    Err(e) => {
-                                        bot.send_message(
-                                            msg.chat.id, 
-                                            format!("Error processing command: {}", e)
-                                        ).await?;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                bot.send_message(
-                                    msg.chat.id,
-                                    format!("Error sending command: {}", e)
-                                ).await?;
-                            }
-                        }
-                    } else {
-                        bot.send_message(msg.chat.id, "Unknown command. Type /help for available commands.").await?;
+        
+        teloxide::commands_repl(
+            self.bot,
+            move |bot: Bot, msg: Message, cmd: TelegramCommand| {
+                let command_sender = command_sender.clone();
+                async move {
+                    let (response_sender, response_receiver) = oneshot::channel();
+                    
+                    if let Err(e) = command_sender.send((cmd, response_sender)).await {
+                        bot.send_message(
+                            msg.chat.id,
+                            format!("Error sending command: {}", e)
+                        ).await?;
+                        return Ok(());
                     }
+
+                    match response_receiver.await {
+                        Ok(response) => {
+                            bot.send_message(msg.chat.id, response)
+                                .parse_mode(ParseMode::MarkdownV2)
+                                .disable_web_page_preview(true)
+                                .await?;
+                        },
+                        Err(e) => {
+                            bot.send_message(
+                                msg.chat.id,
+                                format!("Error processing command: {}", e)
+                            ).await?;
+                        }
+                    }
+
+                    Ok(())
                 }
-                Ok(())
-            }
-        }).await;
+            },
+            PhantomData::<TelegramCommand>,
+        ).await;
+    }
+
+    pub async fn register_commands(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.bot.set_my_commands(TelegramCommand::bot_commands()).await?;
+        Ok(())
     }
 }
 
@@ -73,25 +66,25 @@ pub fn spawn_command_executor(
     mut budget_system: BudgetSystem,
     mut command_receiver: mpsc::Receiver<(TelegramCommand, oneshot::Sender<String>)>,
 ) {
-    std::thread::spawn(move || {
-        while let Some((telegram_command, response_sender)) = command_receiver.blocking_recv() {
-            let rt = tokio::runtime::Runtime::new().unwrap();
+    tokio::spawn(async move {
+        while let Some((telegram_command, response_sender)) = command_receiver.recv().await {
+            let result = execute_command(telegram_command, &mut budget_system).await;
             
-            let result = rt.block_on(async {
-                // Execute command
-                match crate::commands::telegram::handle_command(telegram_command, &mut budget_system).await {
-                    Ok(output) => Ok(output),
-                    Err(e) => Err(format!("Error executing command: {}", e)),
-                }
-            });
-
             let response = match result {
-                Ok(output) => output,
-                Err(e) => format!("Command execution failed: {}", e),
+                Ok(output) => {
+                    // Escape markdown special characters in the output
+                    crate::escape_markdown(&output)
+                },
+                Err(e) => format!("Error: {}", crate::escape_markdown(&e.to_string())),
             };
 
             if let Err(e) = response_sender.send(response) {
                 eprintln!("Error sending response: {}", e);
+            }
+
+            // Save state after each command
+            if let Err(e) = budget_system.save_state() {
+                eprintln!("Error saving state: {}", e);
             }
         }
     });
@@ -100,12 +93,9 @@ pub fn spawn_command_executor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::telegram::TelegramCommand;
-    use crate::core::budget_system::BudgetSystem;
     use crate::app_config::AppConfig;
     use crate::services::ethereum::MockEthereumService;
     use std::sync::Arc;
-    use tokio::sync::mpsc;
 
     async fn create_test_budget_system() -> BudgetSystem {
         let config = AppConfig::default();
@@ -114,74 +104,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_command_processing() {
-        // Create channels
+    async fn test_command_execution() {
         let (tx, rx) = mpsc::channel(100);
-        
-        // Create and spawn budget system
         let budget_system = create_test_budget_system().await;
+        
         spawn_command_executor(budget_system, rx);
 
-        // Test command execution
+        // Test help command
         let (response_tx, response_rx) = oneshot::channel();
-        tx.send((TelegramCommand::PrintEpochState, response_tx)).await.unwrap();
-        
-        // Wait for response
-        match response_rx.await {
-            Ok(response) => {
-                assert!(!response.is_empty());
-                // We could add more specific assertions about the response content
-            },
-            Err(e) => panic!("Failed to receive response: {}", e),
-        }
-    }
+        tx.send((TelegramCommand::Help, response_tx)).await.unwrap();
+        let response = response_rx.await.unwrap();
+        assert!(response.contains("show available commands"));
 
-    #[tokio::test]
-    async fn test_multiple_commands() {
-        let (tx, rx) = mpsc::channel(100);
-        let budget_system = create_test_budget_system().await;
-        spawn_command_executor(budget_system, rx);
-
-        // Test multiple commands in sequence
-        for command in vec![
-            TelegramCommand::PrintEpochState,
-            TelegramCommand::PrintTeamReport,
-            TelegramCommand::MarkdownTest,
-        ] {
-            let (response_tx, response_rx) = oneshot::channel();
-            tx.send((command.clone(), response_tx)).await.unwrap();
-            
-            match response_rx.await {
-                Ok(response) => {
-                    assert!(!response.is_empty());
-                    // Command-specific assertions could be added here
-                },
-                Err(e) => panic!("Failed to receive response for {:?}: {}", command, e),
-            }
-        }
+        // Test print team report
+        let (response_tx, response_rx) = oneshot::channel();
+        tx.send((TelegramCommand::PrintTeamReport, response_tx)).await.unwrap();
+        let response = response_rx.await.unwrap();
+        assert!(response.contains("Team Report"));
     }
 
     #[tokio::test]
     async fn test_error_handling() {
         let (tx, rx) = mpsc::channel(100);
         let budget_system = create_test_budget_system().await;
+        
         spawn_command_executor(budget_system, rx);
 
-        // Test command with arguments
+        // Test command with non-existent team
         let (response_tx, response_rx) = oneshot::channel();
         tx.send((
-            TelegramCommand::PrintPointReport { 
-                epoch_name: Some("NonExistentEpoch".to_string()) 
-            },
+            TelegramCommand::PrintTeamParticipation(
+                "NonExistentTeam".to_string(),
+                "NonExistentEpoch".to_string()
+            ),
             response_tx
         )).await.unwrap();
-        
-        // Should receive error response rather than panicking
-        match response_rx.await {
-            Ok(response) => {
-                assert!(response.contains("error") || response.contains("Error"));
-            },
-            Err(e) => panic!("Failed to receive response: {}", e),
-        }
+
+        let response = response_rx.await.unwrap();
+        assert!(response.contains("Error"));
     }
 }
