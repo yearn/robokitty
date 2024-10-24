@@ -1,10 +1,16 @@
 use crate::core::budget_system::BudgetSystem;
 use crate::commands::telegram::{TelegramCommand, execute_command};
-use teloxide::prelude::*;
-use teloxide::utils::command::BotCommands;
-use teloxide::types::ParseMode;
-use core::marker::PhantomData;
+use teloxide::{
+    prelude::*,
+    utils::command::BotCommands,
+    types::{LinkPreviewOptions, ParseMode},
+    dispatching::{
+        UpdateFilterExt,
+        dialogue::{InMemStorage, Storage},
+    },
+};
 use tokio::sync::{mpsc, oneshot};
+use std::error::Error;
 
 pub struct TelegramBot {
     bot: Bot,
@@ -17,46 +23,57 @@ impl TelegramBot {
     }
 
     pub async fn run(self) {
-        let command_sender = self.command_sender;
-        
-        teloxide::commands_repl(
-            self.bot,
-            move |bot: Bot, msg: Message, cmd: TelegramCommand| {
-                let command_sender = command_sender.clone();
-                async move {
-                    let (response_sender, response_receiver) = oneshot::channel();
-                    
-                    if let Err(e) = command_sender.send((cmd, response_sender)).await {
-                        bot.send_message(
-                            msg.chat.id,
-                            format!("Error sending command: {}", e)
-                        ).await?;
-                        return Ok(());
-                    }
-
-                    match response_receiver.await {
-                        Ok(response) => {
-                            bot.send_message(msg.chat.id, response)
-                                .parse_mode(ParseMode::MarkdownV2)
-                                .disable_web_page_preview(true)
-                                .await?;
-                        },
-                        Err(e) => {
+        let handler = Update::filter_message()
+            .filter_command::<TelegramCommand>()
+            .chain(dptree::endpoint(
+                move |bot: Bot, msg: Message, cmd: TelegramCommand| {
+                    let command_sender = self.command_sender.clone();
+                    async move {
+                        let (response_sender, response_receiver) = oneshot::channel();
+                        
+                        if let Err(e) = command_sender.send((cmd, response_sender)).await {
                             bot.send_message(
                                 msg.chat.id,
-                                format!("Error processing command: {}", e)
+                                format!("Error sending command: {}", e)
                             ).await?;
+                            return Ok(()) as Result<(), Box<dyn Error + Send + Sync>>;
                         }
+    
+                        match response_receiver.await {
+                            Ok(response) => {
+                                bot.send_message(msg.chat.id, response)
+                                    .parse_mode(ParseMode::MarkdownV2)
+                                    .link_preview_options(LinkPreviewOptions { 
+                                        is_disabled: true, 
+                                        url: None, 
+                                        prefer_small_media: false, 
+                                        prefer_large_media: false, 
+                                        show_above_text: false 
+                                    })
+                                    .await?;
+                            },
+                            Err(e) => {
+                                bot.send_message(
+                                    msg.chat.id,
+                                    format!("Error processing command: {}", e)
+                                ).await?;
+                            }
+                        }
+    
+                        Ok(()) as Result<(), Box<dyn Error + Send + Sync>>
                     }
-
-                    Ok(())
                 }
-            },
-            PhantomData::<TelegramCommand>,
-        ).await;
+            ));
+    
+        Dispatcher::builder(self.bot, handler)
+            .dependencies(dptree::deps![InMemStorage::<()>::new()])
+            .enable_ctrlc_handler()
+            .build()
+            .dispatch()
+            .await;
     }
 
-    pub async fn register_commands(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn register_commands(&self) -> Result<(), Box<dyn Error>> {
         self.bot.set_my_commands(TelegramCommand::bot_commands()).await?;
         Ok(())
     }
@@ -71,20 +88,16 @@ pub fn spawn_command_executor(
             let result = execute_command(telegram_command, &mut budget_system).await;
             
             let response = match result {
-                Ok(output) => {
-                    // Escape markdown special characters in the output
-                    crate::escape_markdown(&output)
-                },
+                Ok(output) => crate::escape_markdown(&output),
                 Err(e) => format!("Error: {}", crate::escape_markdown(&e.to_string())),
             };
 
             if let Err(e) = response_sender.send(response) {
-                eprintln!("Error sending response: {}", e);
+                log::error!("Error sending response: {}", e);
             }
 
-            // Save state after each command
             if let Err(e) = budget_system.save_state() {
-                eprintln!("Error saving state: {}", e);
+                log::error!("Error saving state: {}", e);
             }
         }
     });
@@ -133,10 +146,10 @@ mod tests {
         // Test command with non-existent team
         let (response_tx, response_rx) = oneshot::channel();
         tx.send((
-            TelegramCommand::PrintTeamParticipation(
-                "NonExistentTeam".to_string(),
-                "NonExistentEpoch".to_string()
-            ),
+            TelegramCommand::PrintTeamParticipation {
+                team_name: "NonExistentTeam".to_string(),
+                epoch_name: "NonExistentEpoch".to_string()
+            },
             response_tx
         )).await.unwrap();
 
