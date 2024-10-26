@@ -127,7 +127,7 @@ mod tests {
         let (response_tx, response_rx) = oneshot::channel();
         tx.send((TelegramCommand::Help, response_tx)).await.unwrap();
         let response = response_rx.await.unwrap();
-        assert!(response.contains("show available commands"));
+        assert!(response.contains("Display this text"));
 
         // Test print team report
         let (response_tx, response_rx) = oneshot::channel();
