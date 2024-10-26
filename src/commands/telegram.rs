@@ -1,6 +1,6 @@
 use teloxide::utils::command::BotCommands;
 use crate::core::budget_system::BudgetSystem;
-use crate::commands::common::{Command, CommandExecutor, BudgetRequestDetailsCommand, UpdateTeamDetails};
+use crate::commands::common::{Command, CommandExecutor, BudgetRequestDetailsCommand, UpdateProposalDetails, UpdateTeamDetails};
 use chrono::{NaiveDate, DateTime, Utc, TimeZone};
 use std::collections::HashMap;
 
@@ -59,6 +59,11 @@ pub enum TelegramCommand {
 
     /// Add a new proposal. Usage: /add_proposal "<title>" <url> [team:<name>] [amounts:<token>:<amount>,...] [start:<YYYY-MM-DD>] [end:<YYYY-MM-DD>] [ann:<YYYY-MM-DD>] [pub:<YYYY-MM-DD>]
     AddProposal {
+        args: String,
+    },
+
+    /// Update a proposal's details. Usage: /update_proposal "Proposal Title" [--title "New Title"] [--url "New URL"] [--budget-request <team> <amount> <token> <start_date> <end_date>] [--announced <date>] [--published <date>] [--resolved <date>]
+    UpdateProposal {
         args: String,
     },
 
@@ -255,6 +260,65 @@ impl TelegramCommand {
         }
         Ok(amounts)
     }
+
+    fn parse_update_proposal_args(args: &[String]) -> Result<(String, UpdateProposalDetails), String> {
+        if args.is_empty() {
+            return Err("Usage: /update_proposal \"<title>\" [title:\"New Title\"] [url:\"new-url\"] [team:\"name\"] [amounts:\"token:amount\"] [start:\"YYYY-MM-DD\"] [end:\"YYYY-MM-DD\"] [ann:\"YYYY-MM-DD\"] [pub:\"YYYY-MM-DD\"] [res:\"YYYY-MM-DD\"]".to_string());
+        }
+
+        let proposal_name = args[0].clone();
+        let mut updates = UpdateProposalDetails {
+            title: None,
+            url: None,
+            budget_request_details: None,
+            announced_at: None,
+            published_at: None,
+            resolved_at: None,
+        };
+        
+        let mut team_name = None;
+        let mut amounts = None;
+        let mut start_date = None;
+        let mut end_date = None;
+
+        for arg in args.iter().skip(1) {
+            if let Some((key, value)) = arg.split_once(':') {
+                match key {
+                    "title" => updates.title = Some(value.trim_matches('"').to_string()),
+                    "url" => updates.url = Some(value.trim_matches('"').to_string()),
+                    "team" => team_name = Some(value.trim_matches('"').to_string()),
+                    "amounts" => amounts = Some(Self::parse_amounts(value)?),
+                    "start" => start_date = Some(NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                        .map_err(|e| format!("Invalid start date: {}", e))?),
+                    "end" => end_date = Some(NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                        .map_err(|e| format!("Invalid end date: {}", e))?),
+                    "ann" => updates.announced_at = Some(NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                        .map_err(|e| format!("Invalid announcement date: {}", e))?),
+                    "pub" => updates.published_at = Some(NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                        .map_err(|e| format!("Invalid publication date: {}", e))?),
+                    "res" => updates.resolved_at = Some(NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                        .map_err(|e| format!("Invalid resolution date: {}", e))?),
+                    _ => return Err(format!("Unknown parameter: {}", key)),
+                }
+            } else {
+                return Err(format!("Invalid parameter format: {}. Expected key:value", arg));
+            }
+        }
+
+        // If we have any budget-related details, create BudgetRequestDetailsCommand
+        if team_name.is_some() || amounts.is_some() || start_date.is_some() || end_date.is_some() {
+            updates.budget_request_details = Some(BudgetRequestDetailsCommand {
+                team: team_name,
+                request_amounts: amounts,
+                start_date,
+                end_date,
+                payment_status: None,
+            });
+        }
+
+        Ok((proposal_name, updates))
+    }
+    
 }
 
 pub async fn execute_command(
@@ -354,6 +418,53 @@ pub async fn execute_command(
                 published_at,
                 is_historical: Some(false),
             }).await
+        },
+        TelegramCommand::UpdateProposal { args } => {
+            let args = TelegramCommand::parse_command_args(&args)
+                .map_err(|e| format!("Failed to parse proposal arguments: {}", e))?;
+                
+            let (proposal_name, updates) = TelegramCommand::parse_update_proposal_args(&args)
+                .map_err(|e| format!("Failed to parse update proposal command: {}", e))?;
+
+            budget_system.update_proposal(&proposal_name, updates.clone())?;
+
+            let mut feedback = format!("Updated proposal '{}'", proposal_name);
+            
+            if let Some(title) = updates.title {
+                feedback.push_str(&format!("\nNew title: {}", title));
+            }
+            if let Some(url) = updates.url {
+                feedback.push_str(&format!("\nNew URL: {}", url));
+            }
+            if let Some(announced_at) = updates.announced_at {
+                feedback.push_str(&format!("\nNew announcement date: {}", announced_at));
+            }
+            if let Some(published_at) = updates.published_at {
+                feedback.push_str(&format!("\nNew publication date: {}", published_at));
+            }
+            if let Some(resolved_at) = updates.resolved_at {
+                feedback.push_str(&format!("\nNew resolution date: {}", resolved_at));
+            }
+            if let Some(budget_details) = updates.budget_request_details {
+                feedback.push_str("\nBudget request details updated:");
+                if let Some(team) = budget_details.team {
+                    feedback.push_str(&format!("\n  Team: {}", team));
+                }
+                if let Some(amounts) = budget_details.request_amounts {
+                    feedback.push_str("\n  Amounts:");
+                    for (token, amount) in amounts {
+                        feedback.push_str(&format!("\n    {}: {}", token, amount));
+                    }
+                }
+                if let Some(start_date) = budget_details.start_date {
+                    feedback.push_str(&format!("\n  Start date: {}", start_date));
+                }
+                if let Some(end_date) = budget_details.end_date {
+                    feedback.push_str(&format!("\n  End date: {}", end_date));
+                }
+            }
+
+            Ok(feedback)
         },
 
     }
@@ -746,6 +857,65 @@ mod tests {
         let (_, _, budget_details, _, _) = result.unwrap();
         assert!(budget_details.is_some());
         assert_eq!(budget_details.unwrap().team, Some("MyTeam".to_string()));
+    }
+
+    #[test]
+    fn test_parse_update_proposal_args() {
+        // Test basic update
+        let args = vec![
+            "Original Title".to_string(),
+            "title:\"New Title\"".to_string(),
+            "url:http://new-url.com".to_string(),
+        ];
+        let result = TelegramCommand::parse_update_proposal_args(&args);
+        assert!(result.is_ok());
+        let (name, updates) = result.unwrap();
+        assert_eq!(name, "Original Title");
+        assert_eq!(updates.title, Some("New Title".to_string()));
+        assert_eq!(updates.url, Some("http://new-url.com".to_string()));
+
+        // Test budget request update
+        let args = vec![
+            "Original Title".to_string(),
+            "team:Team1".to_string(),
+            "amounts:ETH:100".to_string(),
+            "start:2024-01-01".to_string(),
+            "end:2024-12-31".to_string(),
+        ];
+        let result = TelegramCommand::parse_update_proposal_args(&args);
+        assert!(result.is_ok());
+        let (_, updates) = result.unwrap();
+        assert!(updates.budget_request_details.is_some());
+
+        // Test date updates
+        let args = vec![
+            "Original Title".to_string(),
+            "ann:2024-01-01".to_string(),
+            "pub:2024-01-02".to_string(),
+            "res:2024-01-03".to_string(),
+        ];
+        let result = TelegramCommand::parse_update_proposal_args(&args);
+        assert!(result.is_ok());
+        let (_, updates) = result.unwrap();
+        assert!(updates.announced_at.is_some());
+        assert!(updates.published_at.is_some());
+        assert!(updates.resolved_at.is_some());
+
+        // Test invalid formats
+        let args = vec![];
+        assert!(TelegramCommand::parse_update_proposal_args(&args).is_err());
+
+        let args = vec![
+            "Original Title".to_string(),
+            "invalid_param".to_string(),
+        ];
+        assert!(TelegramCommand::parse_update_proposal_args(&args).is_err());
+
+        let args = vec![
+            "Original Title".to_string(),
+            "ann:invalid-date".to_string(),
+        ];
+        assert!(TelegramCommand::parse_update_proposal_args(&args).is_err());
     }
 
 }
