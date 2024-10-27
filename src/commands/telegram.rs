@@ -1,5 +1,6 @@
 use teloxide::utils::command::BotCommands;
 use crate::core::budget_system::BudgetSystem;
+use crate::core::models::VoteChoice;
 use crate::commands::common::{Command, CommandExecutor, BudgetRequestDetailsCommand, UpdateProposalDetails, UpdateTeamDetails};
 use chrono::{NaiveDate, DateTime, Utc, TimeZone};
 use std::collections::HashMap;
@@ -11,21 +12,26 @@ use std::collections::HashMap;
 )]
 pub enum TelegramCommand {
     /// Display this text.
+    /// 
     Help,
     
     /// Display team information.
+    /// 
     PrintTeamReport,
     
     /// Show current epoch status.
+    /// 
     PrintEpochState,
     
     /// Activate an epoch. Usage: /activate_epoch <name>
+    /// 
     #[command(parse_with = "split")]
     ActivateEpoch {
         name: String
     },
 
     /// Set epoch reward. Usage: /set_epoch_reward <token> <amount>
+    /// 
     #[command(parse_with = "split")]
     SetEpochReward {
         token: String,
@@ -33,6 +39,7 @@ pub enum TelegramCommand {
     },
 
     /// Display a team's vote participation. Usage: /print_team_participation <team_name> <epoch_name>
+    /// 
     #[command(parse_with = "split")]
     PrintTeamParticipation{
         team_name: String,
@@ -40,6 +47,7 @@ pub enum TelegramCommand {
     },
 
     /// Create a new epoch. Usage: /create_epoch <name> <start_date YYYY-MM-DD> <end_date YYYY-MM-DD>
+    /// 
     #[command(parse_with = "split")]
     CreateEpoch{
         name: String,
@@ -58,19 +66,36 @@ pub enum TelegramCommand {
     /// Update a team's details. 
     /// Usage: /update_team team:TeamName [name:NewName] [rep:NewRep] [status:Earner|Supporter|Inactive] [rev:1000,2000,3000]
     /// Note: Earner status requires revenue data
+    /// 
         UpdateTeam {
         args: String,
     },
 
     /// Add a new proposal. 
     /// Usage: /add_proposal title:ProposalTitle url:https://example.com [team:TeamName] [amounts:ETH:100.5,USD:1000] [start:2024-01-01] [end:2024-12-31] [announced:2024-01-01] [published:2024-01-01]
+    /// 
     AddProposal {
         args: String,
     },
 
     /// Update a proposal's details. 
     /// Usage: /update_proposal proposal:ExistingTitle [title:NewTitle] [url:NewURL] [team:TeamName] [amounts:ETH:200.5,USD:2000] [start:2024-02-01] [end:2024-12-31] [announced:2024-01-01] [published:2024-01-01] [resolved:2024-12-31]
+    /// 
     UpdateProposal {
+        args: String,
+    },
+
+    /// Close a proposal with resolution. 
+    /// Usage: /close_proposal name:ProposalName res:Resolution
+    /// 
+    CloseProposal {
+        args: String,
+    },
+
+    /// Process a vote for a proposal.
+    /// Usage: /process_vote name:ProposalName counted:Team1:Yes,Team2:No uncounted:Team3:Yes,Team4:No opened:2024-01-01 closed:2024-01-01
+    /// 
+    ProcessVote {
         args: String,
     },
 
@@ -116,6 +141,21 @@ struct UpdateProposalArgs {
     announced_date: Option<String>,
     published_date: Option<String>,
     resolved_date: Option<String>,
+}
+
+#[derive(Debug)]
+struct CloseProposalArgs {
+    name: String,
+    resolution: String,
+}
+
+#[derive(Debug)]
+struct ProcessVoteArgs {
+    name: String,
+    counted_votes: HashMap<String, VoteChoice>,
+    uncounted_votes: HashMap<String, VoteChoice>,
+    vote_opened: Option<NaiveDate>,
+    vote_closed: Option<NaiveDate>,
 }
 
 impl TelegramCommand {
@@ -339,6 +379,84 @@ impl TelegramCommand {
             resolved_date,
         })
     }
+
+    fn parse_close_proposal(args: &[String]) -> Result<CloseProposalArgs, String> {
+        let mut name = None;
+        let mut resolution = None;
+
+        for arg in args {
+            if let Some((key, value)) = arg.split_once(':') {
+                match key.to_lowercase().as_str() {
+                    "name" => name = Some(value.to_string()),
+                    "res" => {
+                        // Case-insensitive match for resolution
+                        let res = match value.to_lowercase().as_str() {
+                            "approved" => "Approved",
+                            "rejected" => "Rejected",
+                            "invalid" => "Invalid",
+                            "duplicate" => "Duplicate",
+                            "retracted" => "Retracted",
+                            _ => return Err(format!("Invalid resolution: {}. Must be one of: Approved, Rejected, Invalid, Duplicate, Retracted", value)),
+                        };
+                        resolution = Some(res.to_string());
+                    },
+                    _ => return Err(format!("Unknown parameter: {}", key)),
+                }
+            }
+        }
+
+        Ok(CloseProposalArgs {
+            name: name.ok_or("Missing name parameter")?,
+            resolution: resolution.ok_or("Missing resolution parameter")?,
+        })
+    }
+
+    fn parse_process_vote(args: &[String]) -> Result<ProcessVoteArgs, String> {
+        let mut name = None;
+        let mut counted_votes = HashMap::new();
+        let mut uncounted_votes = HashMap::new();
+        let mut vote_opened = None;
+        let mut vote_closed = None;
+
+        fn parse_votes(votes_str: &str) -> Result<HashMap<String, VoteChoice>, String> {
+            votes_str
+                .split(',')
+                .map(|vote| {
+                    let parts: Vec<&str> = vote.split(':').collect();
+                    if parts.len() != 2 {
+                        return Err(format!("Invalid vote format: {}. Expected Team:Choice", vote));
+                    }
+                    let choice = match parts[1].to_lowercase().as_str() {
+                        "yes" => VoteChoice::Yes,
+                        "no" => VoteChoice::No,
+                        _ => return Err(format!("Invalid vote choice: {}. Must be Yes or No", parts[1])),
+                    };
+                    Ok((parts[0].to_string(), choice))
+                })
+                .collect()
+        }
+
+        for arg in args {
+            if let Some((key, value)) = arg.split_once(':') {
+                match key.to_lowercase().as_str() {
+                    "name" => name = Some(value.to_string()),
+                    "counted" => counted_votes = parse_votes(value)?,
+                    "uncounted" => uncounted_votes = parse_votes(value)?,
+                    "opened" => vote_opened = Some(Self::parse_date(value)?),
+                    "closed" => vote_closed = Some(Self::parse_date(value)?),
+                    _ => return Err(format!("Unknown parameter: {}", key)),
+                }
+            }
+        }
+
+        Ok(ProcessVoteArgs {
+            name: name.ok_or("Missing name parameter")?,
+            counted_votes,
+            uncounted_votes,
+            vote_opened,
+            vote_closed,
+        })
+    }
     
 }
 
@@ -463,7 +581,6 @@ pub async fn execute_command(
                 is_historical: None,
             }).await
         },
-
         
         TelegramCommand::UpdateProposal { args } => {
             let args = TelegramCommand::parse_command(&args)
@@ -502,6 +619,34 @@ pub async fn execute_command(
             }).await
         },
 
+        TelegramCommand::CloseProposal { args } => {
+            let args = TelegramCommand::parse_command(&args)
+                .map_err(|e| format!("Failed to parse arguments: {}", e))?;
+            
+            let parsed_args = TelegramCommand::parse_close_proposal(&args)
+                .map_err(|e| format!("Failed to parse close proposal arguments: {}", e))?;
+            
+            budget_system.execute_command(Command::CloseProposal { 
+                proposal_name: parsed_args.name, 
+                resolution: parsed_args.resolution 
+            }).await
+        },
+
+        TelegramCommand::ProcessVote { args } => {
+            let args = TelegramCommand::parse_command(&args)
+                .map_err(|e| format!("Failed to parse arguments: {}", e))?;
+            
+            let parsed_args = TelegramCommand::parse_process_vote(&args)
+                .map_err(|e| format!("Failed to parse vote arguments: {}", e))?;
+            
+            budget_system.execute_command(Command::CreateAndProcessVote {
+                proposal_name: parsed_args.name,
+                counted_votes: parsed_args.counted_votes,
+                uncounted_votes: parsed_args.uncounted_votes,
+                vote_opened: parsed_args.vote_opened,
+                vote_closed: parsed_args.vote_closed,
+            }).await
+        }
     }
 }
 
@@ -975,6 +1120,55 @@ mod tests {
             args: "team:Test Team status:Earner".to_string()
         };
         let result = execute_command(invalid_earner, &mut budget_system).await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_close_proposal() {
+        let input = "name:Test Proposal res:approved";
+        let args = TelegramCommand::parse_command(input).unwrap();
+        let result = TelegramCommand::parse_close_proposal(&args).unwrap();
+        
+        assert_eq!(result.name, "Test Proposal");
+        assert_eq!(result.resolution, "Approved");
+
+        // Test case insensitivity
+        let input = "name:Test Proposal res:APPROVED";
+        let args = TelegramCommand::parse_command(input).unwrap();
+        let result = TelegramCommand::parse_close_proposal(&args).unwrap();
+        assert_eq!(result.resolution, "Approved");
+    }
+
+    #[test]
+    fn test_parse_process_vote() {
+        let input = "name:Test Proposal counted:TeamA:yes,TeamB:NO uncounted:TeamC:Yes,TeamD:no opened:2024-10-11 closed:2024-10-16";
+        let args = TelegramCommand::parse_command(input).unwrap();
+        let result = TelegramCommand::parse_process_vote(&args).unwrap();
+        
+        assert_eq!(result.name, "Test Proposal");
+        assert_eq!(result.counted_votes.len(), 2);
+        assert_eq!(result.uncounted_votes.len(), 2);
+        assert_eq!(result.vote_opened.unwrap(), NaiveDate::from_ymd_opt(2024, 10, 11).unwrap());
+        assert_eq!(result.vote_closed.unwrap(), NaiveDate::from_ymd_opt(2024, 10, 16).unwrap());
+
+        // Verify vote choices
+        assert_eq!(result.counted_votes.get("TeamA"), Some(&VoteChoice::Yes));
+        assert_eq!(result.counted_votes.get("TeamB"), Some(&VoteChoice::No));
+    }
+
+    #[test]
+    fn test_invalid_resolution() {
+        let input = "name:Test Proposal res:invalid_value";
+        let args = TelegramCommand::parse_command(input).unwrap();
+        let result = TelegramCommand::parse_close_proposal(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_invalid_vote_format() {
+        let input = "name:Test Proposal counted:TeamA:maybe";
+        let args = TelegramCommand::parse_command(input).unwrap();
+        let result = TelegramCommand::parse_process_vote(&args);
         assert!(result.is_err());
     }
 
