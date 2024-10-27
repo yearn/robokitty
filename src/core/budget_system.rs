@@ -7,6 +7,7 @@ use crate::core::models::{
     Raffle, RaffleConfig, RaffleResult, RaffleTicket,
     Vote, VoteType, VoteStatus, VoteChoice, VoteCount, VoteParticipation, VoteResult, get_id_by_name
 };
+use crate::core::progress::raffle::{RaffleProgress, RaffleCreationError};
 use crate::core::models::common::NameMatches;
 use crate::services::ethereum::EthereumServiceTrait;
 use crate::commands::common::{ 
@@ -19,6 +20,7 @@ use crate::escape_markdown;
 use chrono::{DateTime, NaiveDate, Utc, TimeZone};
 use uuid::Uuid;
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet},
     error::Error, fmt,
     fs,
@@ -26,10 +28,15 @@ use std::{
     path::{Path, PathBuf},
     str,
     sync::Arc,
+    task::{Context, Poll},
+    pin::Pin
 };
 use log::{info, debug, error};
 use async_trait::async_trait;
-use tokio::time::Duration;
+use tokio::{time::Duration, sync::mpsc};
+use futures::{Stream, StreamExt, stream::unfold};
+use tokio_stream::wrappers::ReceiverStream;
+
 
 pub struct BudgetSystem {
     state: BudgetSystemState,
@@ -2005,6 +2012,343 @@ def hello_world():
         output.flush()?;
         Ok(())
     }
+
+    /// Creates a new raffle with progress updates streamed as an async stream
+    ///
+    /// # Arguments
+    /// * `proposal_name` - Name of the proposal to create raffle for
+    /// * `block_offset` - Optional override for the default block offset
+    /// * `excluded_teams` - Optional list of team names to exclude
+    ///
+    /// # Returns
+    /// A stream of RaffleProgress updates that can be consumed asynchronously
+    pub async fn create_raffle_with_progress<'a>(
+        &'a mut self,
+        proposal_name: String,
+        block_offset: Option<u64>,
+        excluded_teams: Option<Vec<String>>,
+    ) -> impl Stream<Item = Result<RaffleProgress, RaffleCreationError>> + 'a {
+        // Prepare initial state
+        let config = self.config.clone();
+        let preparation_result = self.prepare_raffle(&proposal_name, excluded_teams.clone(), &config);
+        
+        let initial_state = match preparation_result {
+            Ok((raffle_id, tickets)) => {
+                let ticket_ranges = self.group_tickets_by_team(&tickets);
+                Some(RaffleState::Preparing { 
+                    proposal_name: proposal_name.clone(),
+                    raffle_id,
+                    ticket_ranges,
+                })
+            },
+            Err(e) => Some(RaffleState::Failed(RaffleCreationError(e.to_string()))),
+        };
+
+        let eth_service = Arc::clone(&self.ethereum_service);
+
+        unfold(
+            initial_state,
+            move |state| {
+                let eth_service = Arc::clone(&eth_service);
+                let block_offset = block_offset.unwrap_or(config.future_block_offset);
+                
+                async move {
+                    match state {
+                        None => None,
+                        Some(RaffleState::Failed(e)) => {
+                            Some((Err(e), None))
+                        },
+                        Some(RaffleState::Preparing { proposal_name, raffle_id, ticket_ranges }) => {
+                            let progress = RaffleProgress::Preparing {
+                                proposal_name: proposal_name.clone(),
+                                ticket_ranges: ticket_ranges.clone()
+                            };
+                            
+                            match eth_service.get_current_block().await {
+                                Ok(current_block) => {
+                                    let target_block = current_block + block_offset;
+                                    Some((
+                                        Ok(progress),
+                                        Some(RaffleState::WaitingForBlock {
+                                            proposal_name,
+                                            raffle_id,
+                                            current_block,
+                                            target_block,
+                                        })
+                                    ))
+                                },
+                                Err(e) => Some((
+                                    Err(RaffleCreationError(e.to_string())),
+                                    None
+                                )),
+                            }
+                        },
+                        Some(RaffleState::WaitingForBlock { 
+                            proposal_name, 
+                            raffle_id, 
+                            current_block, 
+                            target_block 
+                        }) => {
+                            match eth_service.get_current_block().await {
+                                Ok(new_current) => {
+                                    if new_current >= target_block {
+                                        Some((
+                                            Ok(RaffleProgress::WaitingForBlock {
+                                                current: new_current,
+                                                target: target_block,
+                                            }),
+                                            Some(RaffleState::GettingRandomness {
+                                                proposal_name,
+                                                raffle_id,
+                                                current_block: new_current,
+                                                target_block,
+                                            })
+                                        ))
+                                    } else {
+                                        tokio::time::sleep(Duration::from_secs(1)).await;
+                                        Some((
+                                            Ok(RaffleProgress::WaitingForBlock {
+                                                current: new_current,
+                                                target: target_block,
+                                            }),
+                                            Some(RaffleState::WaitingForBlock {
+                                                proposal_name,
+                                                raffle_id,
+                                                current_block: new_current,
+                                                target_block,
+                                            })
+                                        ))
+                                    }
+                                },
+                                Err(e) => Some((
+                                    Err(RaffleCreationError(e.to_string())),
+                                    None
+                                )),
+                            }
+                        },
+                        Some(RaffleState::GettingRandomness { 
+                            proposal_name,
+                            raffle_id,
+                            current_block,
+                            target_block,
+                        }) => {
+                            match eth_service.get_randomness(target_block).await {
+                                Ok(randomness) => {
+                                    Some((
+                                        Ok(RaffleProgress::RandomnessAcquired {
+                                            block_hash: randomness.clone(),
+                                        }),
+                                        Some(RaffleState::ReadyToFinalize {
+                                            proposal_name,
+                                            raffle_id,
+                                            current_block,
+                                            target_block,
+                                            randomness,
+                                        })
+                                    ))
+                                },
+                                Err(e) => Some((
+                                    Err(RaffleCreationError(e.to_string())),
+                                    None
+                                )),
+                            }
+                        },
+                        Some(RaffleState::ReadyToFinalize { 
+                            proposal_name,
+                            raffle_id,
+                            current_block,
+                            target_block,
+                            randomness,
+                        }) => {
+                            Some((
+                                Ok(RaffleProgress::ReadyToFinalize {
+                                    raffle_id,
+                                    proposal_name,
+                                    current_block,
+                                    target_block,
+                                    randomness: randomness.clone()
+                                }),
+                                None
+                            ))
+                        },
+                    }
+                }
+            }
+        )
+    }
+
+    /// Finalizes a raffle after the progress stream completes
+    pub async fn finalize_raffle_from_progress(
+        &mut self,
+        progress: RaffleProgress,
+    ) -> Result<RaffleProgress, RaffleCreationError> {
+        match progress {
+            RaffleProgress::ReadyToFinalize { 
+                raffle_id,
+                proposal_name,
+                current_block,
+                target_block,
+                randomness
+            } => {
+                match self.finalize_raffle(
+                    raffle_id,
+                    current_block,
+                    target_block,
+                    randomness,
+                ).await {
+                    Ok(raffle) => {
+                        let (counted, uncounted) = self.get_team_names_from_raffle(&raffle);
+                        if let Err(e) = self.save_state() {
+                            log::error!("Failed to save state after raffle completion: {}", e);
+                        }
+                        Ok(RaffleProgress::Completed {
+                            raffle_id,
+                            proposal_name,
+                            counted,
+                            uncounted,
+                        })
+                    },
+                    Err(e) => Err(RaffleCreationError(e.to_string())),
+                }
+            },
+            _ => Err(RaffleCreationError("Invalid progress state for finalization".to_string())),
+        }
+    }
+
+    // Helper method to get team names from raffle result
+    fn get_team_names_from_raffle(&self, raffle: &Raffle) -> (Vec<String>, Vec<String>) {
+        if let Some(result) = raffle.result() {
+            let counted = result.counted()
+                .iter()
+                .filter_map(|&id| self.state.current_state().teams().get(&id))
+                .map(|team| team.name().to_string())
+                .collect();
+
+            let uncounted = result.uncounted()
+                .iter()
+                .filter_map(|&id| self.state.current_state().teams().get(&id))
+                .map(|team| team.name().to_string())
+                .collect();
+
+            (counted, uncounted)
+        } else {
+            (Vec::new(), Vec::new())
+        }
+    }
+}
+
+
+#[derive(Debug)]
+enum RaffleState {
+    Preparing {
+        proposal_name: String,
+        raffle_id: Uuid,
+        ticket_ranges: Vec<(String, u64, u64)>,
+    },
+    WaitingForBlock {
+        proposal_name: String,
+        raffle_id: Uuid,
+        current_block: u64,
+        target_block: u64,
+    },
+    GettingRandomness {
+        proposal_name: String,
+        raffle_id: Uuid,
+        current_block: u64,
+        target_block: u64,
+    },
+    ReadyToFinalize {
+        proposal_name: String,
+        raffle_id: Uuid,
+        current_block: u64,
+        target_block: u64,
+        randomness: String,
+    },
+    Failed(RaffleCreationError),
+}
+
+impl RaffleState {
+    fn into_progress(self) -> Result<RaffleProgress, RaffleCreationError> {
+        match self {
+            RaffleState::Preparing { proposal_name, ticket_ranges, .. } => {
+                Ok(RaffleProgress::Preparing { 
+                    proposal_name, 
+                    ticket_ranges 
+                })
+            },
+            RaffleState::WaitingForBlock { current_block, target_block, .. } => {
+                Ok(RaffleProgress::WaitingForBlock { 
+                    current: current_block, 
+                    target: target_block 
+                })
+            },
+            RaffleState::GettingRandomness { .. } => {
+                // This is an internal state that shouldn't be exposed
+                Ok(RaffleProgress::WaitingForBlock { 
+                    current: self.current_block()?, 
+                    target: self.target_block()? 
+                })
+            },
+            RaffleState::ReadyToFinalize { 
+                proposal_name,
+                raffle_id,
+                current_block,
+                target_block,
+                randomness,
+            } => {
+                Ok(RaffleProgress::ReadyToFinalize { 
+                    proposal_name,
+                    raffle_id,
+                    current_block,
+                    target_block,
+                    randomness,
+                })
+            },
+            RaffleState::Failed(e) => Err(e),
+        }
+    }
+
+    fn current_block(&self) -> Result<u64, RaffleCreationError> {
+        match self {
+            RaffleState::WaitingForBlock { current_block, .. } |
+            RaffleState::GettingRandomness { current_block, .. } |
+            RaffleState::ReadyToFinalize { current_block, .. } => Ok(*current_block),
+            _ => Err(RaffleCreationError("No current block in this state".to_string())),
+        }
+    }
+
+    fn target_block(&self) -> Result<u64, RaffleCreationError> {
+        match self {
+            RaffleState::WaitingForBlock { target_block, .. } |
+            RaffleState::GettingRandomness { target_block, .. } |
+            RaffleState::ReadyToFinalize { target_block, .. } => Ok(*target_block),
+            _ => Err(RaffleCreationError("No target block in this state".to_string())),
+        }
+    }
+
+    fn proposal_name(&self) -> Result<&str, RaffleCreationError> {
+        match self {
+            RaffleState::Preparing { proposal_name, .. } |
+            RaffleState::WaitingForBlock { proposal_name, .. } |
+            RaffleState::GettingRandomness { proposal_name, .. } |
+            RaffleState::ReadyToFinalize { proposal_name, .. } => Ok(proposal_name),
+            RaffleState::Failed(_) => Err(RaffleCreationError("No proposal name in failed state".to_string())),
+        }
+    }
+
+    fn raffle_id(&self) -> Result<Uuid, RaffleCreationError> {
+        match self {
+            RaffleState::Preparing { raffle_id, .. } |
+            RaffleState::WaitingForBlock { raffle_id, .. } |
+            RaffleState::GettingRandomness { raffle_id, .. } |
+            RaffleState::ReadyToFinalize { raffle_id, .. } => Ok(*raffle_id),
+            RaffleState::Failed(_) => Err(RaffleCreationError("No raffle id in failed state".to_string())),
+        }
+    }
+
+    fn is_terminal(&self) -> bool {
+        matches!(self, RaffleState::ReadyToFinalize { .. } | RaffleState::Failed(_))
+    }
 }
 
 #[async_trait]
@@ -3045,5 +3389,107 @@ mod tests {
         assert_eq!(raffle.config().initiation_block(), 12345);
         assert_eq!(raffle.config().randomness_block(), 12355);
         assert_eq!(raffle.config().block_randomness(), "mock_randomness");
+    }
+
+    #[tokio::test]
+    async fn test_raffle_creation_progress() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
+        create_active_epoch(&mut budget_system).await;
+        
+        // Add test proposal
+        budget_system.add_proposal(
+            "Test Proposal".to_string(),
+            None,
+            None,
+            Some(Utc::now().date_naive()),
+            Some(Utc::now().date_naive()),
+            None
+        ).unwrap();
+
+        // Add test teams
+        budget_system.create_team(
+            "Test Team 1".to_string(), 
+            "Rep 1".to_string(), 
+            Some(vec![1000])
+        ).unwrap();
+        budget_system.create_team(
+            "Test Team 2".to_string(), 
+            "Rep 2".to_string(), 
+            Some(vec![2000])
+        ).unwrap();
+
+        // Create raffle and collect progress
+        let mut progress = budget_system.create_raffle_with_progress(
+            "Test Proposal".to_string(),
+            Some(1), // Small offset for testing
+            None
+        ).await;
+
+        let mut phases = vec![];
+        while let Some(update) = progress.next().await {
+            match update.unwrap() {
+                p @ RaffleProgress::Preparing { .. } => phases.push("preparing"),
+                p @ RaffleProgress::WaitingForBlock { .. } => phases.push("waiting"),
+                p @ RaffleProgress::RandomnessAcquired { .. } => phases.push("randomness"),
+                p @ RaffleProgress::Completed { .. } => phases.push("completed"),
+            }
+        }
+
+        // Verify we saw all phases in order
+        assert_eq!(
+            phases, 
+            vec!["preparing", "waiting", "randomness", "completed"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_raffle_creation_with_excluded_teams() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
+        create_active_epoch(&mut budget_system).await;
+        
+        // Setup test data
+        budget_system.add_proposal(
+            "Test Proposal".to_string(),
+            None, None, None, None, None
+        ).unwrap();
+
+        let team1_id = budget_system.create_team(
+            "Team 1".to_string(), 
+            "Rep 1".to_string(), 
+            Some(vec![1000])
+        ).unwrap();
+        
+        let team2_id = budget_system.create_team(
+            "Team 2".to_string(), 
+            "Rep 2".to_string(), 
+            Some(vec![2000])
+        ).unwrap();
+
+        // Create raffle excluding Team 1
+        let mut progress = budget_system.create_raffle_with_progress(
+            "Test Proposal".to_string(),
+            Some(1),
+            Some(vec!["Team 1".to_string()])
+        ).await;
+
+        let mut completed_result = None;
+        while let Some(update) = progress.next().await {
+            if let Ok(RaffleProgress::Completed { counted, uncounted, .. }) = update {
+                completed_result = Some((counted, uncounted));
+                break;
+            }
+        }
+
+        if let Some((counted, uncounted)) = completed_result {
+            assert!(!counted.contains(&"Team 1".to_string()), "Excluded team should not be counted");
+            assert!(counted.contains(&"Team 2".to_string()) || uncounted.contains(&"Team 2".to_string()),
+                "Non-excluded team should be present");
+        } else {
+            panic!("Did not receive completion update");
+        }
     }
 }

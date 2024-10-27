@@ -3310,6 +3310,7 @@ dependencies = [
  "dirs 4.0.0",
  "dotenvy",
  "ethers",
+ "futures",
  "log",
  "mockall",
  "pretty_env_logger",
@@ -3319,6 +3320,7 @@ dependencies = [
  "teloxide",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "uuid 1.9.1",
 ]
 
