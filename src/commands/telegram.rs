@@ -99,6 +99,13 @@ pub enum TelegramCommand {
         args: String,
     },
 
+    /// Create a raffle for a proposal. 
+    /// Usage: /create_raffle name:ProposalName [block_offset:10] [excluded:Team1,Team2]
+    /// 
+    CreateRaffle {
+        args: String,
+    },
+
 }
 
 #[derive(Debug)]
@@ -156,6 +163,13 @@ struct ProcessVoteArgs {
     uncounted_votes: HashMap<String, VoteChoice>,
     vote_opened: Option<NaiveDate>,
     vote_closed: Option<NaiveDate>,
+}
+
+#[derive(Debug)]
+struct CreateRaffleArgs {
+    proposal_name: String,
+    block_offset: Option<u64>,
+    excluded_teams: Option<Vec<String>>,
 }
 
 impl TelegramCommand {
@@ -457,6 +471,38 @@ impl TelegramCommand {
             vote_closed,
         })
     }
+
+    fn parse_create_raffle(args: &[String]) -> Result<CreateRaffleArgs, String> {
+        let mut proposal_name = None;
+        let mut block_offset = None;
+        let mut excluded_teams = None;
+
+        for arg in args {
+            if let Some((key, value)) = arg.split_once(':') {
+                match key.to_lowercase().as_str() {
+                    "name" => proposal_name = Some(value.to_string()),
+                    "block_offset" => {
+                        block_offset = Some(value.parse::<u64>()
+                            .map_err(|_| format!("Invalid block offset: {}", value))?)
+                    },
+                    "excluded" => {
+                        excluded_teams = Some(value.split(',')
+                            .map(|s| s.trim().to_string())
+                            .collect());
+                    },
+                    _ => return Err(format!("Unknown parameter: {}", key)),
+                }
+            } else {
+                return Err(format!("Invalid argument format: {}. Expected key:value", arg));
+            }
+        }
+
+        Ok(CreateRaffleArgs {
+            proposal_name: proposal_name.ok_or("Missing required parameter: name")?,
+            block_offset,
+            excluded_teams,
+        })
+    }
     
 }
 
@@ -646,6 +692,10 @@ pub async fn execute_command(
                 vote_opened: parsed_args.vote_opened,
                 vote_closed: parsed_args.vote_closed,
             }).await
+        }
+
+        TelegramCommand::CreateRaffle { args } => {
+            Ok("TEMP".to_string())
         }
     }
 }
@@ -1170,6 +1220,48 @@ mod tests {
         let args = TelegramCommand::parse_command(input).unwrap();
         let result = TelegramCommand::parse_process_vote(&args);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_create_raffle() {
+        // Test minimal valid args
+        let args = vec!["name:Test Proposal".to_string()];
+        let parsed = TelegramCommand::parse_create_raffle(&args).unwrap();
+        assert_eq!(parsed.proposal_name, "Test Proposal");
+        assert!(parsed.block_offset.is_none());
+        assert!(parsed.excluded_teams.is_none());
+
+        // Test full args
+        let args = vec![
+            "name:Test Proposal".to_string(),
+            "block_offset:20".to_string(),
+            "excluded:Team1,Team2,Team3".to_string(),
+        ];
+        let parsed = TelegramCommand::parse_create_raffle(&args).unwrap();
+        assert_eq!(parsed.proposal_name, "Test Proposal");
+        assert_eq!(parsed.block_offset, Some(20));
+        assert_eq!(
+            parsed.excluded_teams,
+            Some(vec!["Team1".to_string(), "Team2".to_string(), "Team3".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_parse_create_raffle_errors() {
+        // Test missing name
+        let args = vec!["block_offset:20".to_string()];
+        assert!(TelegramCommand::parse_create_raffle(&args).is_err());
+
+        // Test invalid block offset
+        let args = vec![
+            "name:Test".to_string(),
+            "block_offset:invalid".to_string(),
+        ];
+        assert!(TelegramCommand::parse_create_raffle(&args).is_err());
+
+        // Test invalid format
+        let args = vec!["name=Test".to_string()];
+        assert!(TelegramCommand::parse_create_raffle(&args).is_err());
     }
 
 }
