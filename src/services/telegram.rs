@@ -112,7 +112,7 @@ mod tests {
 
     async fn create_test_budget_system() -> BudgetSystem {
         let config = AppConfig::default();
-        let ethereum_service = Arc::new(MockEthereumService);
+        let ethereum_service = Arc::new(MockEthereumService::new());
         BudgetSystem::new(config, ethereum_service, None).await.unwrap()
     }
 

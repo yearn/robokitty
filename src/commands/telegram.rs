@@ -678,7 +678,7 @@ mod tests {
                 token: "test_token".to_string(),
             },
         };
-        let ethereum_service = Arc::new(MockEthereumService);
+        let ethereum_service = Arc::new(MockEthereumService::new());
         let budget_system = BudgetSystem::new(config, ethereum_service, None).await.unwrap();
         (budget_system, temp_dir)
     }

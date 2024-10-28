@@ -366,7 +366,7 @@ mod tests {
             },
         };
     
-        let ethereum_service = Arc::new(MockEthereumService);
+        let ethereum_service = Arc::new(MockEthereumService::new());
         let budget_system = BudgetSystem::new(config.clone(), ethereum_service, None).await.unwrap();
     
         (budget_system, config)
