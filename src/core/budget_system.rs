@@ -2028,81 +2028,60 @@ def hello_world():
         proposal_name: String,
         block_offset: Option<u64>,
         excluded_teams: Option<Vec<String>>,
-    ) -> impl Stream<Item = Result<RaffleProgress, RaffleCreationError>> + 'a {
-        // Create owned copies for use in the stream
-        let proposal_name = proposal_name.clone();
+    ) -> impl Stream<Item = Result<RaffleProgress, RaffleCreationError>> + Send + 'a {
         let config = self.config.clone();
         let eth_service = Arc::clone(&self.ethereum_service);
-    
+        
         try_stream! {
-            // Preparation phase
+            // Do setup inside the stream
             let (raffle_id, tickets) = self.prepare_raffle(&proposal_name, excluded_teams.clone(), &config)
                 .map_err(|e| RaffleCreationError(format!("Failed to prepare raffle: {}", e)))?;
-            
+    
             let ticket_ranges = self.group_tickets_by_team(&tickets);
-            
+    
             yield RaffleProgress::Preparing {
                 proposal_name: proposal_name.clone(),
                 raffle_id,
                 ticket_ranges,
             };
     
-            // Block waiting phase
-            let current_block = eth_service.get_current_block().await
+            let current_block = eth_service.get_current_block()
+                .await
                 .map_err(|e| RaffleCreationError(format!("Failed to get current block: {}", e)))?;
+                
             let target_block = current_block + block_offset.unwrap_or(config.future_block_offset);
     
-            yield RaffleProgress::WaitingForBlock {
-                proposal_name: proposal_name.clone(),
-                raffle_id,
-                current_block,
-                target_block,
-            };
-    
-            let mut last_block = current_block;
-            while let Ok(new_block) = eth_service.get_current_block().await {
-                if new_block >= target_block {
-                    break;
-                }
-    
-                if new_block != last_block {
-                    yield RaffleProgress::WaitingForBlock {
-                        proposal_name: proposal_name.clone(),
-                        raffle_id,
-                        current_block: new_block,
-                        target_block,
-                    };
-                    last_block = new_block;
-                }
-    
+            while eth_service.get_current_block()
+                .await
+                .map_err(|e| RaffleCreationError(format!("Failed to get current block: {}", e)))? < target_block 
+            {
+                yield RaffleProgress::WaitingForBlock {
+                    proposal_name: proposal_name.clone(),
+                    raffle_id,
+                    current_block,
+                    target_block,
+                };
+                
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
     
-            // Get randomness
-            let randomness = eth_service.get_randomness(target_block).await
+            let randomness = eth_service.get_randomness(target_block)
+                .await
                 .map_err(|e| RaffleCreationError(format!("Failed to get randomness: {}", e)))?;
-            
+    
             yield RaffleProgress::RandomnessAcquired {
                 proposal_name: proposal_name.clone(),
                 raffle_id,
-                current_block: last_block,
+                current_block,
                 target_block,
                 randomness: randomness.clone(),
             };
     
-            // Finalize
-            let raffle = self.finalize_raffle(
-                raffle_id,
-                current_block,
-                target_block,
-                randomness,
-            ).await.map_err(|e| RaffleCreationError(format!("Failed to finalize raffle: {}", e)))?;
+            let raffle = self.finalize_raffle(raffle_id, current_block, target_block, randomness)
+                .await
+                .map_err(|e| RaffleCreationError(format!("Failed to finalize raffle: {}", e)))?;
     
             let (counted, uncounted) = self.get_team_names_from_raffle(&raffle);
-    
-            if let Err(e) = self.save_state() {
-                log::error!("Failed to save state after raffle completion: {}", e);
-            }
     
             yield RaffleProgress::Completed {
                 proposal_name,
@@ -2402,10 +2381,34 @@ impl CommandExecutor for BudgetSystem {
                 self.close_with_reason(proposal_id, &resolution)?;
                 Ok(format!("Closed proposal '{}' with resolution: {:?}", proposal_name, resolution))
             },
+            // Command::CreateRaffle { proposal_name, block_offset, excluded_teams } => {
+            //     let mut output = Vec::new();
+            //     self.handle_create_raffle(proposal_name, block_offset, excluded_teams, &mut output).await?;
+            //     Ok(String::from_utf8(output)?)
+            // },
             Command::CreateRaffle { proposal_name, block_offset, excluded_teams } => {
-                let mut output = Vec::new();
-                self.handle_create_raffle(proposal_name, block_offset, excluded_teams, &mut output).await?;
-                Ok(String::from_utf8(output)?)
+                let progress_stream = self.create_raffle_with_progress(
+                    proposal_name,
+                    block_offset,
+                    excluded_teams,
+                ).await;
+
+                let mut output = String::new();
+                pin_mut!(progress_stream);
+                
+                while let Some(progress) = progress_stream.next().await {
+                    match progress {
+                        Ok(progress) => {
+                            output.push_str(&format!("{}\n", progress.format_message()));
+                            if progress.is_complete() {
+                                break;
+                            }
+                        },
+                        Err(e) => return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.0))),
+                    }
+                }
+                
+                Ok(output)
             },
             Command::CreateAndProcessVote { proposal_name, counted_votes, uncounted_votes, vote_opened, vote_closed } => {
                 let mut output = format!("Executing CreateAndProcessVote command for proposal: {}\n", proposal_name);
@@ -3273,5 +3276,92 @@ mod tests {
             assert!(!counted.is_empty() || !uncounted.is_empty(), "Raffle should contain teams");
             println!("Final raffle result - Counted teams: {:?}, Uncounted teams: {:?}", counted, uncounted);
         }
+    }
+
+    #[tokio::test]
+    async fn test_create_raffle_with_progress() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+        
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
+
+        // Setup required state
+        create_active_epoch(&mut budget_system).await;
+        budget_system.add_proposal(
+            "Test Proposal".to_string(),
+            None,
+            None,
+            Some(Utc::now().date_naive()),
+            Some(Utc::now().date_naive()),
+            None
+        ).unwrap();
+
+        // Add some teams
+        budget_system.create_team("Team1".to_string(), "Rep1".to_string(), Some(vec![1000])).unwrap();
+        budget_system.create_team("Team2".to_string(), "Rep2".to_string(), Some(vec![2000])).unwrap();
+
+        // Create the progress stream and collect updates in their own scope
+        let updates = {
+            let progress_stream = budget_system.create_raffle_with_progress(
+                "Test Proposal".to_string(),
+                Some(1), // Small offset for testing
+                None,
+            ).await;
+
+            let mut updates = Vec::new();
+            pin_mut!(progress_stream);
+            
+            while let Some(progress) = progress_stream.next().await {
+                match progress {
+                    Ok(update) => {
+                        updates.push(update.clone());
+                        if matches!(update, RaffleProgress::Completed { .. }) {
+                            break;
+                        }
+                    },
+                    Err(e) => panic!("Unexpected error: {}", e),
+                }
+            }
+            updates
+        }; // progress_stream is dropped here, releasing the mutable borrow
+
+        // Now we can borrow budget_system again
+        
+        // Verify progress sequence
+        assert!(matches!(updates[0], RaffleProgress::Preparing { .. }));
+        assert!(matches!(updates[1], RaffleProgress::WaitingForBlock { .. }));
+        assert!(matches!(updates[2], RaffleProgress::RandomnessAcquired { .. }));
+        assert!(matches!(updates[3], RaffleProgress::Completed { .. }));
+
+        // Verify final state
+        if let RaffleProgress::Completed { ref counted, ref uncounted, .. } = updates[3] {
+            assert_eq!(counted.len() + uncounted.len(), 2); // All teams should be assigned
+        } else {
+            panic!("Final update should be Completed");
+        }
+
+        // Verify raffle was created in system
+        assert_eq!(budget_system.state().raffles().len(), 1);
+    }
+
+    // Test error cases
+    #[tokio::test]
+    async fn test_create_raffle_with_progress_invalid_proposal() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+        
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
+
+        let progress_stream = budget_system.create_raffle_with_progress(
+            "NonExistent".to_string(),
+            None,
+            None,
+        ).await;
+
+        pin_mut!(progress_stream);
+        
+        // Should fail on first update
+        let first_update = progress_stream.next().await.unwrap();
+        assert!(first_update.is_err());
     }
 }

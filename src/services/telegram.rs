@@ -85,15 +85,13 @@ pub fn spawn_command_executor(
 ) {
     tokio::spawn(async move {
         while let Some((telegram_command, response_sender)) = command_receiver.recv().await {
-            let result = execute_command(telegram_command, &mut budget_system).await;
-            
-            let response = match result {
+            let response = match execute_command(telegram_command, &mut budget_system).await {
                 Ok(output) => crate::escape_markdown(&output),
-                Err(e) => format!("Error: {}", crate::escape_markdown(&e.to_string())),
+                Err(e) => format!("Error: {}", crate::escape_markdown(&e)),
             };
 
-            if let Err(e) = response_sender.send(response) {
-                log::error!("Error sending response: {}", e);
+            if let Err(_) = response_sender.send(response) {
+                log::error!("Failed to send response");
             }
 
             if let Err(e) = budget_system.save_state() {

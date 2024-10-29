@@ -1,9 +1,12 @@
 use teloxide::utils::command::BotCommands;
+use crate::escape_markdown;
 use crate::core::budget_system::BudgetSystem;
 use crate::core::models::VoteChoice;
 use crate::commands::common::{Command, CommandExecutor, BudgetRequestDetailsCommand, UpdateProposalDetails, UpdateTeamDetails};
 use chrono::{NaiveDate, DateTime, Utc, TimeZone};
 use std::collections::HashMap;
+use futures::pin_mut;
+use tokio_stream::StreamExt;
 
 /// These commands are supported:
 #[derive(BotCommands, Clone)]
@@ -509,7 +512,7 @@ impl TelegramCommand {
 pub async fn execute_command(
     telegram_cmd: TelegramCommand,
     budget_system: &mut BudgetSystem,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<String, String> {
     match telegram_cmd {
         TelegramCommand::Help => {
             Ok(format!("{}", TelegramCommand::descriptions()))
@@ -517,10 +520,14 @@ pub async fn execute_command(
 
         TelegramCommand::PrintTeamReport => {
             budget_system.execute_command(Command::PrintTeamReport).await
+            .map(|s| escape_markdown(&s))
+            .map_err(|e| format!("Command failed: {}", e))
         },
 
         TelegramCommand::PrintEpochState => {
             budget_system.execute_command(Command::PrintEpochState).await
+            .map(|s| escape_markdown(&s))
+            .map_err(|e| format!("Command failed: {}", e))
         },
 
         TelegramCommand::PrintTeamParticipation { team_name, epoch_name } => {
@@ -528,6 +535,8 @@ pub async fn execute_command(
                 team_name, 
                 epoch_name: Some(epoch_name)
             }).await
+            .map(|s| escape_markdown(&s))
+            .map_err(|e| format!("Command failed: {}", e))
         },
 
         TelegramCommand::CreateEpoch { name, start_date, end_date } => {
@@ -541,16 +550,22 @@ pub async fn execute_command(
                 start_date, 
                 end_date
             }).await
+            .map(|s| escape_markdown(&s))
+            .map_err(|e| format!("Command failed: {}", e))
         },
 
         TelegramCommand::ActivateEpoch { name } => {
             budget_system.execute_command(Command::ActivateEpoch { name }).await
+            .map(|s| escape_markdown(&s))
+            .map_err(|e| format!("Command failed: {}", e))
         },
 
         TelegramCommand::SetEpochReward { token, amount } => {
             let amount = amount.parse::<f64>()
                 .map_err(|e| format!("Invalid amount: {}", e))?;
             budget_system.execute_command(Command::SetEpochReward { token, amount }).await
+            .map(|s| escape_markdown(&s))
+            .map_err(|e| format!("Command failed: {}", e))
         },
 
         TelegramCommand::AddTeam { args } => {
@@ -565,6 +580,8 @@ pub async fn execute_command(
                 representative: team_args.representative,
                 trailing_monthly_revenue: team_args.revenue,
             }).await
+            .map(|s| escape_markdown(&s))
+            .map_err(|e| format!("Command failed: {}", e))
         },
         
         TelegramCommand::UpdateTeam { args } => {
@@ -593,6 +610,8 @@ pub async fn execute_command(
                     trailing_monthly_revenue: update_args.revenue,
                 }
             }).await
+            .map(|s| escape_markdown(&s))
+            .map_err(|e| format!("Command failed: {}", e))
         }
 
         TelegramCommand::AddProposal { args } => {
@@ -626,6 +645,8 @@ pub async fn execute_command(
                     .and_then(|d| NaiveDate::parse_from_str(&d, "%Y-%m-%d").ok()),
                 is_historical: None,
             }).await
+            .map(|s| escape_markdown(&s))
+            .map_err(|e| format!("Command failed: {}", e))
         },
         
         TelegramCommand::UpdateProposal { args } => {
@@ -663,6 +684,8 @@ pub async fn execute_command(
                         .and_then(|d| NaiveDate::parse_from_str(&d, "%Y-%m-%d").ok()),
                 }
             }).await
+            .map(|s| escape_markdown(&s))
+            .map_err(|e| format!("Command failed: {}", e))
         },
 
         TelegramCommand::CloseProposal { args } => {
@@ -676,6 +699,8 @@ pub async fn execute_command(
                 proposal_name: parsed_args.name, 
                 resolution: parsed_args.resolution 
             }).await
+            .map(|s| escape_markdown(&s))
+            .map_err(|e| format!("Command failed: {}", e))
         },
 
         TelegramCommand::ProcessVote { args } => {
@@ -692,11 +717,25 @@ pub async fn execute_command(
                 vote_opened: parsed_args.vote_opened,
                 vote_closed: parsed_args.vote_closed,
             }).await
+            .map(|s| escape_markdown(&s))
+            .map_err(|e| format!("Command failed: {}", e))
         }
 
         TelegramCommand::CreateRaffle { args } => {
-            Ok("TEMP".to_string())
-        }
+            let args = TelegramCommand::parse_command(&args)
+                .map_err(|e| format!("Failed to parse arguments: {}", e))?;
+            
+            let parsed_args = TelegramCommand::parse_create_raffle(&args)
+                .map_err(|e| format!("Failed to parse raffle arguments: {}", e))?;
+            
+            budget_system.execute_command(Command::CreateRaffle { 
+                proposal_name: parsed_args.proposal_name, 
+                block_offset: parsed_args.block_offset, 
+                excluded_teams: parsed_args.excluded_teams, 
+            }).await
+            .map(|s| escape_markdown(&s))
+            .map_err(|e| format!("Command failed: {}", e))
+        },
     }
 }
 
@@ -1262,6 +1301,69 @@ mod tests {
         // Test invalid format
         let args = vec!["name=Test".to_string()];
         assert!(TelegramCommand::parse_create_raffle(&args).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_raffle_command() {
+        let (mut budget_system, _temp_dir) = create_test_budget_system().await;
+        let start_date = Utc::now();
+        let end_date = start_date + chrono::Duration::days(30);
+        budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
+        budget_system.activate_epoch(budget_system.get_epoch_id_by_name("Test Epoch").unwrap()).unwrap();
+
+        budget_system.add_proposal(
+            "Test Proposal".to_string(), 
+            None,
+            None,
+            None,
+            None,
+            None
+        ).unwrap();
+
+        budget_system.create_team("Team1".to_string(), "Rep1".to_string(), Some(vec![1000])).unwrap();
+        budget_system.create_team("Team2".to_string(), "Rep2".to_string(), Some(vec![2000])).unwrap();
+
+        let command = TelegramCommand::CreateRaffle {
+            args: "name:Test Proposal".to_string()
+        };
+        
+        let result = execute_command(command, &mut budget_system).await;
+        assert!(result.is_ok());
+        
+        let output = result.unwrap();
+        // Verify expected message content
+        assert!(output.contains("Preparing raffle"));
+        assert!(output.contains("ballot range"));
+        assert!(output.contains("Completed"));
+        
+        // Verify escaped markdown
+        assert!(output.contains("\\*")); // Should have escaped asterisks
+        
+        // Verify system state
+        assert_eq!(budget_system.state().raffles().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_create_raffle_command_error_cases() {
+        let (mut budget_system, _temp_dir) = create_test_budget_system().await;
+        
+        // Test invalid proposal
+        let command = TelegramCommand::CreateRaffle {
+            args: "name:NonExistent".to_string()
+        };
+        
+        let result = execute_command(command, &mut budget_system).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Failed to prepare raffle"));
+        
+        // Test invalid argument format
+        let command = TelegramCommand::CreateRaffle {
+            args: "invalid format".to_string()
+        };
+        
+        let result = execute_command(command, &mut budget_system).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Failed to parse arguments"));
     }
 
 }
