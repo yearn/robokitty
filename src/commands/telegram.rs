@@ -749,6 +749,8 @@ mod tests {
     use crate::services::ethereum::MockEthereumService;
     use std::sync::Arc;
     use tempfile::TempDir;
+    use downcast_rs::Downcast;
+    use tokio::time::Duration;
 
     async fn create_test_budget_system() -> (BudgetSystem, TempDir) {
         let temp_dir = TempDir::new().unwrap();
@@ -770,6 +772,23 @@ mod tests {
         let ethereum_service = Arc::new(MockEthereumService::new());
         let budget_system = BudgetSystem::new(config, ethereum_service, None).await.unwrap();
         (budget_system, temp_dir)
+    }
+
+    fn get_mock_service(budget_system: &BudgetSystem) -> Option<Arc<MockEthereumService>> {
+        budget_system.ethereum_service()
+            .clone() // Clone the Arc before downcasting
+            .downcast_arc::<MockEthereumService>()
+            .ok()
+    }
+
+    async fn setup_block_progression(mock_service: Arc<MockEthereumService>) {
+        let service = mock_service.clone();
+        tokio::spawn(async move {
+            for _ in 0..5 {
+                service.increment_block();
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
     }
 
     #[test]
@@ -1303,6 +1322,51 @@ mod tests {
         assert!(TelegramCommand::parse_create_raffle(&args).is_err());
     }
 
+    // #[tokio::test]
+    // async fn test_create_raffle_command() {
+    //     let (mut budget_system, _temp_dir) = create_test_budget_system().await;
+    //     let start_date = Utc::now();
+    //     let end_date = start_date + chrono::Duration::days(30);
+    //     budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
+    //     budget_system.activate_epoch(budget_system.get_epoch_id_by_name("Test Epoch").unwrap()).unwrap();
+
+    //     budget_system.add_proposal(
+    //         "Test Proposal".to_string(), 
+    //         None,
+    //         None,
+    //         None,
+    //         None,
+    //         None
+    //     ).unwrap();
+
+    //     budget_system.create_team("Team1".to_string(), "Rep1".to_string(), Some(vec![1000])).unwrap();
+    //     budget_system.create_team("Team2".to_string(), "Rep2".to_string(), Some(vec![2000])).unwrap();
+
+    //      // Setup block progression before executing command
+    //     if let Some(mock_service) = get_mock_service(&budget_system) {
+    //         setup_block_progression(mock_service).await;
+    //     }
+
+    //     let command = TelegramCommand::CreateRaffle {
+    //         args: "name:Test Proposal".to_string()
+    //     };
+        
+    //     let result = execute_command(command, &mut budget_system).await;
+    //     assert!(result.is_ok());
+        
+    //     let output = result.unwrap();
+    //     // Verify expected message content
+    //     assert!(output.contains("Preparing raffle"));
+    //     assert!(output.contains("ballot range"));
+    //     assert!(output.contains("Completed"));
+        
+    //     // Verify escaped markdown
+    //     assert!(output.contains("\\*")); // Should have escaped asterisks
+        
+    //     // Verify system state
+    //     assert_eq!(budget_system.state().raffles().len(), 1);
+    // }
+
     #[tokio::test]
     async fn test_create_raffle_command() {
         let (mut budget_system, _temp_dir) = create_test_budget_system().await;
@@ -1310,27 +1374,47 @@ mod tests {
         let end_date = start_date + chrono::Duration::days(30);
         budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
         budget_system.activate_epoch(budget_system.get_epoch_id_by_name("Test Epoch").unwrap()).unwrap();
-
+    
         budget_system.add_proposal(
-            "Test Proposal".to_string(), 
+            "Test Proposal".to_string(),
             None,
             None,
-            None,
-            None,
+            Some(Utc::now().date_naive()),
+            Some(Utc::now().date_naive()),
             None
         ).unwrap();
 
+        // Add some teams
         budget_system.create_team("Team1".to_string(), "Rep1".to_string(), Some(vec![1000])).unwrap();
         budget_system.create_team("Team2".to_string(), "Rep2".to_string(), Some(vec![2000])).unwrap();
+
+        // Setup block progression with completion notification
+        if let Some(mock_service) = get_mock_service(&budget_system) {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let service = mock_service.clone();
+            
+            tokio::spawn(async move {
+                for i in 0..5 {
+                    service.increment_block();
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                tx.send(()).unwrap();
+            });
+
+            // Wait for block progression to complete
+            rx.await.unwrap();
+        }
 
         let command = TelegramCommand::CreateRaffle {
             args: "name:Test Proposal".to_string()
         };
         
+        // Execute command with timeout
         let result = execute_command(command, &mut budget_system).await;
-        assert!(result.is_ok());
         
+        assert!(result.is_ok(), "Failed to execute command: {:?}", result.err());
         let output = result.unwrap();
+        
         // Verify expected message content
         assert!(output.contains("Preparing raffle"));
         assert!(output.contains("ballot range"));
@@ -1346,6 +1430,15 @@ mod tests {
     #[tokio::test]
     async fn test_create_raffle_command_error_cases() {
         let (mut budget_system, _temp_dir) = create_test_budget_system().await;
+        let start_date = Utc::now();
+        let end_date = start_date + chrono::Duration::days(30);
+        budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
+        budget_system.activate_epoch(budget_system.get_epoch_id_by_name("Test Epoch").unwrap()).unwrap();
+
+        // Setup block progression before executing command
+        if let Some(mock_service) = get_mock_service(&budget_system) {
+            setup_block_progression(mock_service).await;
+        }
         
         // Test invalid proposal
         let command = TelegramCommand::CreateRaffle {

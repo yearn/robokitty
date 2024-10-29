@@ -2536,6 +2536,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use crate::app_config::TelegramConfig;
     use crate::services::ethereum::MockEthereumService;
+    use tokio::time::Duration as Dur;
 
     // Helpers
 
@@ -2587,6 +2588,23 @@ mod tests {
         ).await.unwrap();
     
         (proposal_id, raffle_id)
+    }
+
+    fn get_mock_service(budget_system: &BudgetSystem) -> Option<Arc<MockEthereumService>> {
+        budget_system.ethereum_service()
+            .clone() // Clone the Arc before downcasting
+            .downcast_arc::<MockEthereumService>()
+            .ok()
+    }
+
+    async fn setup_block_progression(mock_service: Arc<MockEthereumService>) {
+        let service = mock_service.clone();
+        tokio::spawn(async move {
+            for _ in 0..5 {
+                service.increment_block();
+                tokio::time::sleep(Dur::from_millis(100)).await;
+            }
+        });
     }
     
     // Tests
@@ -3191,13 +3209,6 @@ mod tests {
         let mock_service = Arc::new(MockEthereumService::new());
         let mock_service_clone = Arc::clone(&mock_service);
         
-        // Spawn block progression task
-        let _block_task = tokio::spawn(async move {
-            for _ in 0..5 {
-                mock_service_clone.increment_block();
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-        });
 
         let temp_dir = TempDir::new().unwrap();
         
@@ -3221,6 +3232,11 @@ mod tests {
             BudgetSystem::new(config, mock_service, None).await.unwrap()
         };
         
+        // Setup block progression before executing command
+        if let Some(mock_service) = get_mock_service(&budget_system) {
+            setup_block_progression(mock_service).await;
+        }
+
         // Setup test data
         create_active_epoch(&mut budget_system).await;
         
@@ -3300,6 +3316,11 @@ mod tests {
         budget_system.create_team("Team1".to_string(), "Rep1".to_string(), Some(vec![1000])).unwrap();
         budget_system.create_team("Team2".to_string(), "Rep2".to_string(), Some(vec![2000])).unwrap();
 
+        // Setup block progression before executing command
+        if let Some(mock_service) = get_mock_service(&budget_system) {
+            setup_block_progression(mock_service).await;
+        }
+
         // Create the progress stream and collect updates in their own scope
         let updates = {
             let progress_stream = budget_system.create_raffle_with_progress(
@@ -3351,6 +3372,11 @@ mod tests {
         let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
         
         let mut budget_system = create_test_budget_system(&state_file, None).await;
+
+        // Setup block progression before executing command
+        if let Some(mock_service) = get_mock_service(&budget_system) {
+            setup_block_progression(mock_service).await;
+        }
 
         let progress_stream = budget_system.create_raffle_with_progress(
             "NonExistent".to_string(),

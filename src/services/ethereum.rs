@@ -5,14 +5,16 @@ use tokio::{
     self,
     time::Duration,
 };
+use downcast_rs::{impl_downcast, DowncastSync};
 
 #[async_trait]
-pub trait EthereumServiceTrait: Send + Sync {
+pub trait EthereumServiceTrait: DowncastSync {
     async fn get_current_block(&self) -> Result<u64, Box<dyn std::error::Error>>;
     async fn get_randomness(&self, block_number: u64) -> Result<String, Box<dyn std::error::Error>>;
     async fn get_raffle_randomness(&self) -> Result<(u64, u64, String), Box<dyn std::error::Error>>;
 }
 
+impl_downcast!(sync EthereumServiceTrait);
 
 pub struct EthereumService {
     client: Arc<Provider<Ipc>>,
