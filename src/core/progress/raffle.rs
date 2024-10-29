@@ -1,5 +1,6 @@
 use uuid::Uuid;
 use std::error::Error;
+use crate::core::models::TeamStatus;
 
 #[derive(Debug, Clone)]
 pub enum RaffleProgress {
@@ -24,8 +25,8 @@ pub enum RaffleProgress {
     Completed {
         proposal_name: String,
         raffle_id: Uuid,
-        counted: Vec<String>,
-        uncounted: Vec<String>
+        counted: Vec<(TeamStatus, String)>,
+        uncounted: Vec<(TeamStatus, String)>,
     },
     Failed(String)
 }
@@ -34,34 +35,68 @@ impl RaffleProgress {
     pub fn format_message(&self) -> String {
         match self {
             RaffleProgress::Preparing { proposal_name, ticket_ranges, .. } => {
-                let mut msg = format!("Preparing raffle for proposal: {}\n\n", proposal_name);
+                let mut msg = format!("Preparing raffle for proposal: {}\n", proposal_name);
                 for (team_name, start, end) in ticket_ranges {
                     msg.push_str(&format!("  {} ballot range [{}..{}]\n", team_name, start, end));
                 }
                 msg
             },
             RaffleProgress::WaitingForBlock { proposal_name, current_block, target_block, .. } => {
-                format!("Waiting for blocks for '{}'\nCurrent block: {}\nTarget block: {}", 
-                    proposal_name, current_block, target_block)
+                format!(
+                    "Current block number: {}\n\
+                     Target block for randomness: {}\n\
+                     Latest observed block: {}", 
+                    current_block, target_block, current_block)
             },
-            RaffleProgress::RandomnessAcquired { proposal_name, randomness, .. } => {
-                format!("Acquired randomness for '{}': {}", proposal_name, randomness)
+            RaffleProgress::RandomnessAcquired { proposal_name, current_block, target_block, randomness, .. } => {
+                format!(
+                    "Block randomness: {}\n\
+                     Etherscan URL: https://etherscan.io/block/{}#consensusinfo",
+                    randomness, target_block)
             },
-            RaffleProgress::Completed { proposal_name, counted, uncounted, .. } => {
-                let mut msg = format!("Raffle completed for '{}'\n\n", proposal_name);
-                msg.push_str("Counted voters:\n");
-                for team in counted {
-                    msg.push_str(&format!("- {}\n", team));
+            RaffleProgress::Completed { proposal_name, raffle_id, counted, uncounted } => {
+                let mut msg = format!("Raffle results for proposal '{}' (Raffle ID: {})\n\n", proposal_name, raffle_id);
+                
+                msg.push_str("**Counted voters:**\n");
+                msg.push_str("Earner teams:\n");
+                let earner_count = counted.iter()
+                    .filter(|(status, _)| matches!(status, TeamStatus::Earner { .. }))
+                    .count();
+                
+                // Print counted earners
+                for (status, team_info) in counted.iter() {
+                    if matches!(status, TeamStatus::Earner { .. }) {
+                        msg.push_str(&format!("  {}\n", team_info));
+                    }
                 }
-                msg.push_str("\nUncounted voters:\n");
-                for team in uncounted {
-                    msg.push_str(&format!("- {}\n", team));
+                
+                msg.push_str("Supporter teams:\n");
+                for (status, team_info) in counted.iter() {
+                    if matches!(status, TeamStatus::Supporter) {
+                        msg.push_str(&format!("  {}\n", team_info));
+                    }
+                }
+                
+                msg.push_str(&format!("Total counted voters: {} (Earners: {}, Supporters: {})\n\n", 
+                    counted.len(), earner_count, counted.len() - earner_count));
+                
+                msg.push_str("**Uncounted voters:**\n");
+                msg.push_str("Earner teams:\n");
+                for (status, team_info) in uncounted.iter() {
+                    if matches!(status, TeamStatus::Earner { .. }) {
+                        msg.push_str(&format!("  {}\n", team_info));
+                    }
+                }
+                
+                msg.push_str("Supporter teams:\n");
+                for (status, team_info) in uncounted.iter() {
+                    if matches!(status, TeamStatus::Supporter) {
+                        msg.push_str(&format!("  {}\n", team_info));
+                    }
                 }
                 msg
             },
-            RaffleProgress::Failed(error) => {
-                format!("Raffle failed: {}", error)
-            }
+            RaffleProgress::Failed(error) => format!("Raffle failed: {}", error),
         }
     }
 
@@ -70,36 +105,70 @@ impl RaffleProgress {
         
         match self {
             RaffleProgress::Preparing { proposal_name, ticket_ranges, .. } => {
-                let mut msg = format!("*Preparing raffle for:* {}\n\n", escape_markdown(proposal_name));
+                let mut msg = format!("Preparing raffle for proposal: {}\n", escape_markdown(proposal_name));
                 for (team_name, start, end) in ticket_ranges {
-                    msg.push_str(&format!("  `{}` ballot range \\[{}\\.\\.{}\\]\n", 
+                    msg.push_str(&format!("  {} ballot range \\[{}\\.\\.{}\\]\n", 
                         escape_markdown(team_name), start, end));
                 }
                 msg
             },
             RaffleProgress::WaitingForBlock { proposal_name, current_block, target_block, .. } => {
-                format!("Waiting for blocks for *{}*\nCurrent: `{}`\nTarget: `{}`", 
-                    escape_markdown(proposal_name), current_block, target_block)
+                format!(
+                    "Current block number: `{}`\n\
+                     Target block for randomness: `{}`\n\
+                     Latest observed block: `{}`", 
+                    current_block, target_block, current_block)
             },
-            RaffleProgress::RandomnessAcquired { proposal_name, randomness, .. } => {
-                format!("Acquired randomness for *{}*:\n`{}`", 
-                    escape_markdown(proposal_name), escape_markdown(randomness))
+            RaffleProgress::RandomnessAcquired { proposal_name, current_block, target_block, randomness, .. } => {
+                format!(
+                    "Block randomness: `{}`\n\
+                     Etherscan URL: https://etherscan\\.io/block/{}\\#consensusinfo",
+                    escape_markdown(randomness), target_block)
             },
-            RaffleProgress::Completed { proposal_name, counted, uncounted, .. } => {
-                let mut msg = format!("Raffle completed for *{}*\n\n", escape_markdown(proposal_name));
+            RaffleProgress::Completed { proposal_name, raffle_id, counted, uncounted } => {
+                let mut msg = format!("Raffle results for proposal '{}' \\(Raffle ID: {}\\)\n\n", 
+                    escape_markdown(proposal_name), raffle_id);
+                
                 msg.push_str("*Counted voters:*\n");
-                for team in counted {
-                    msg.push_str(&format!("\\- {}\n", escape_markdown(team)));
+                msg.push_str("_Earner teams:_\n");
+                let earner_count = counted.iter()
+                    .filter(|(status, _)| matches!(status, TeamStatus::Earner { .. }))
+                    .count();
+                
+                // Print counted earners
+                for (status, team_info) in counted.iter() {
+                    if matches!(status, TeamStatus::Earner { .. }) {
+                        msg.push_str(&format!("  {}\n", escape_markdown(team_info)));
+                    }
                 }
-                msg.push_str("\n*Uncounted voters:*\n");
-                for team in uncounted {
-                    msg.push_str(&format!("\\- {}\n", escape_markdown(team)));
+                
+                msg.push_str("_Supporter teams:_\n");
+                for (status, team_info) in counted.iter() {
+                    if matches!(status, TeamStatus::Supporter) {
+                        msg.push_str(&format!("  {}\n", escape_markdown(team_info)));
+                    }
+                }
+                
+                msg.push_str(&format!("Total counted voters: {} \\(Earners: {}, Supporters: {}\\)\n\n", 
+                    counted.len(), earner_count, counted.len() - earner_count));
+                
+                msg.push_str("*Uncounted voters:*\n");
+                msg.push_str("_Earner teams:_\n");
+                for (status, team_info) in uncounted.iter() {
+                    if matches!(status, TeamStatus::Earner { .. }) {
+                        msg.push_str(&format!("  {}\n", escape_markdown(team_info)));
+                    }
+                }
+                
+                msg.push_str("_Supporter teams:_\n");
+                for (status, team_info) in uncounted.iter() {
+                    if matches!(status, TeamStatus::Supporter) {
+                        msg.push_str(&format!("  {}\n", escape_markdown(team_info)));
+                    }
                 }
                 msg
             },
-            RaffleProgress::Failed(error) => {
-                format!("❌ Raffle failed: {}", escape_markdown(error))
-            }
+            RaffleProgress::Failed(error) => format!("❌ Raffle failed: {}", escape_markdown(error)),
         }
     }
 
