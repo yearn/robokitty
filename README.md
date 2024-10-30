@@ -1,6 +1,6 @@
-# RoboKitty
+# Robokitty
 
-RoboKitty is a dual-interface budget management system that helps organizations manage team participation, proposal voting, and reward distribution. It provides both a CLI and a Telegram bot interface for easy interaction.
+Robokitty is a dual-interface budget management system that helps organizations manage team participation, proposal voting, and reward distribution. It provides both a CLI and a Telegram bot interface for easy interaction.
 
 ## Features
 

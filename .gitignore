@@ -1,5 +1,7 @@
 /target
 config.toml
+config.toml.devel
+config.toml.master
 .env
 .env.devel
 .env.master
