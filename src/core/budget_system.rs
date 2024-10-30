@@ -3,7 +3,7 @@
 use crate::core::state::BudgetSystemState;
 use crate::core::models::{
     Team, TeamStatus, Epoch, EpochStatus, EpochReward, TeamReward,
-    Proposal, ProposalStatus, Resolution, PaymentStatus, BudgetRequestDetails,
+    Proposal, ProposalStatus, Resolution, BudgetRequestDetails,
     Raffle, RaffleConfig, RaffleResult, RaffleTicket,
     Vote, VoteType, VoteStatus, VoteChoice, VoteCount, VoteParticipation, VoteResult, get_id_by_name
 };
@@ -1292,17 +1292,40 @@ def hello_world():
         // Budget Request Details
         if let Some(budget_details) = proposal.budget_request_details() {
             report.push_str("## Budget Request Details\n\n");
+            
+            // Team info
             report.push_str(&format!("- **Requesting Team**: {}\n", 
                 budget_details.team()
                     .and_then(|id| self.state.current_state().teams().get(&id))
                     .map_or("N/A".to_string(), |team| team.name().to_string())));
+            
+            // Sort amounts by token for consistent output
+            let mut amounts: Vec<_> = budget_details.request_amounts().iter().collect();
+            amounts.sort_by(|(a, _), (b, _)| a.cmp(b));
+            
             report.push_str("- **Requested Amount(s)**:\n");
-            for (token, amount) in budget_details.request_amounts() {
+            for (token, amount) in amounts {
                 report.push_str(&format!("  - {}: {}\n", token, amount));
             }
-            report.push_str(&format!("- **Start Date**: {}\n", budget_details.start_date().map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())));
-            report.push_str(&format!("- **End Date**: {}\n", budget_details.end_date().map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())));
-            report.push_str(&format!("- **Payment Status**: {:?}\n\n", budget_details.payment_status()));
+ 
+            report.push_str(&format!("- **Start Date**: {}\n", 
+                budget_details.start_date()
+                    .map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())));
+            report.push_str(&format!("- **End Date**: {}\n", 
+                budget_details.end_date()
+                    .map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())));
+            report.push_str(&format!("- **Is Loan**: {}\n", 
+                budget_details.is_loan()));
+            report.push_str(&format!("- **Payment Address**: {}\n", 
+                budget_details.payment_address()
+                    .map_or("N/A".to_string(), |addr| format!("{:?}", addr))));
+            if budget_details.is_paid() {
+                report.push_str(&format!("- **Payment Transaction**: {}\n",
+                    budget_details.payment_tx().map_or("N/A".to_string(), |tx| format!("{:?}", tx))));
+                report.push_str(&format!("- **Payment Date**: {}\n",
+                    budget_details.payment_date().map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())));
+            }
+            report.push_str("\n");
         }
     
         // Raffle Information
@@ -1399,22 +1422,37 @@ def hello_world():
 
         for snapshot in raffle.team_snapshots() {
             let team_name = snapshot.name();
-            let status = format!("{:?}", snapshot.status());
-            let revenue = match snapshot.status() {
-                TeamStatus::Earner { trailing_monthly_revenue } => format!("{:?}", trailing_monthly_revenue),
+            
+            let status = match &snapshot.status() {
+                TeamStatus::Earner { .. } => "Earner",
+                TeamStatus::Supporter => "Supporter",
+                TeamStatus::Inactive => "Inactive",
+            };
+
+            let revenue = match &snapshot.status() {
+                TeamStatus::Earner { trailing_monthly_revenue } => 
+                    trailing_monthly_revenue.iter()
+                        .map(|r| r.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", "),
                 _ => "N/A".to_string(),
             };
+
             let tickets: Vec<_> = raffle.tickets().iter()
                 .filter(|t| t.team_id() == snapshot.id())
                 .collect();
+            
             let ballot_range = if !tickets.is_empty() {
-                format!("{} - {}", tickets.first().unwrap().index(), tickets.last().unwrap().index())
+                format!("{} - {}", 
+                    tickets.first().unwrap().index(), 
+                    tickets.last().unwrap().index())
             } else {
                 "N/A".to_string()
             };
+
             let ticket_count = tickets.len();
 
-            table.push_str(&format!("| {} | {} | {} | {} | {} |\n", 
+            table.push_str(&format!("| {} | {} | {} | {} | {} |\n",
                 team_name, status, revenue, ballot_range, ticket_count));
         }
 
@@ -2033,13 +2071,14 @@ impl CommandExecutor for BudgetSystem {
                         details.request_amounts.unwrap_or_default(),
                         details.start_date,
                         details.end_date,
-                        details.payment_status,
+                        details.is_loan,
+                        details.payment_address,
                     )
                 }).transpose()?;
-
+             
                 let proposal_id = self.add_proposal(title.clone(), url, budget_request_details, announced_at, published_at, is_historical)?;
                 Ok(format!("Added proposal: {} ({})", title, proposal_id))
-            },
+             },
             Command::UpdateProposal { proposal_name, updates } => {
                 self.update_proposal(&proposal_name, updates)?;
                 Ok(format!("Updated proposal: {}", proposal_name))
@@ -2711,6 +2750,7 @@ mod tests {
                 [("ETH".to_string(), 100.0)].iter().cloned().collect(),
                 Some(Utc::now().date_naive()),
                 Some((Utc::now() + Duration::days(30)).date_naive()),
+                Some(false),
                 None
             ).unwrap()),
             Some(Utc::now().date_naive()),
@@ -2959,7 +2999,8 @@ mod tests {
                 [("ETH".to_string(), 100.0)].iter().cloned().collect(),
                 Some(Utc::now().date_naive()),
                 Some((Utc::now() + Duration::days(30)).date_naive()),
-                None
+                Some(false),
+                None,
             ).unwrap()),
             Some(Utc::now().date_naive()),
             Some(Utc::now().date_naive()),

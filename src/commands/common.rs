@@ -4,7 +4,7 @@ use std::{collections::HashMap, io::Write};
 use uuid::Uuid;
 use async_trait::async_trait;
 
-use crate::core::models::{ PaymentStatus, VoteChoice };
+use crate::core::models::VoteChoice;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "params")]
@@ -123,7 +123,8 @@ pub struct BudgetRequestDetailsCommand {
     pub request_amounts: Option<HashMap<String, f64>>,
     pub start_date: Option<NaiveDate>,
     pub end_date: Option<NaiveDate>,
-    pub payment_status: Option<PaymentStatus>,
+    pub is_loan: Option<bool>,
+    pub payment_address: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

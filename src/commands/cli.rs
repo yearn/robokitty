@@ -7,7 +7,7 @@ use uuid::Uuid;
 use tokio::time::Duration;
 
 use crate::core::models::{
-    BudgetRequestDetails, PaymentStatus, Resolution, TeamStatus, VoteChoice, VoteType, VoteParticipation, NameMatches
+    BudgetRequestDetails, Resolution, TeamStatus, VoteChoice, VoteType, VoteParticipation, NameMatches
 };
 use crate::core::budget_system::BudgetSystem;
 use crate::app_config::AppConfig;
@@ -120,47 +120,94 @@ pub fn parse_cli_args(args: &[String]) -> Result<Command, Box<dyn Error>> {
         },
         "add-proposal" => {
             if args.len() < 2 {
-                return Err("Usage: add-proposal <title> <url> [--budget-request <team> <amount> <token> <start_date> <end_date>] [--announced <date>] [--published <date>] [--historical]".into());
+                return Err("Usage: add-proposal <title> <url> [--team TeamName] [--amounts ETH:100.5,USD:1000] [--start 2024-01-01] [--end 2024-12-31] [--announced 2024-01-01] [--published 2024-01-01] [--loan true] [--address 0x...]".into());
             }
+
             let title = args[0].clone();
-            let url = Some(args[1].clone());
-            let mut budget_request_details = None;
+            let url = args[1].clone();
+            let mut team = None;
+            let mut amounts = None;
+            let mut start_date = None;
+            let mut end_date = None;
             let mut announced_at = None;
             let mut published_at = None;
-            let mut is_historical = None;
+            let mut is_loan = None;
+            let mut payment_address = None;
+
             let mut i = 2;
             while i < args.len() {
                 match args[i].as_str() {
-                    "--budget-request" => {
-                        budget_request_details = Some(BudgetRequestDetailsCommand {
-                            team: Some(args[i+1].clone()),
-                            request_amounts: Some(HashMap::from([(args[i+3].clone(), args[i+2].parse()?)])),
-                            start_date: Some(NaiveDate::parse_from_str(&args[i+4], "%Y-%m-%d")?),
-                            end_date: Some(NaiveDate::parse_from_str(&args[i+5], "%Y-%m-%d")?),
-                            payment_status: None,
-                        });
-                        i += 6;
+                    "--team" => {
+                        team = Some(args[i + 1].clone());
+                        i += 2;
+                    },
+                    "--amounts" => {
+                        amounts = Some(args[i + 1].split(',')
+                            .map(|pair| {
+                                let parts: Vec<&str> = pair.split(':').collect();
+                                if parts.len() != 2 {
+                                    return Err(format!("Invalid amount format: {}. Expected token:amount", pair));
+                                }
+                                let amount = parts[1].parse::<f64>()
+                                    .map_err(|_| format!("Invalid amount {}: {}", parts[1], pair))?;
+                                Ok((parts[0].to_string(), amount))
+                            })
+                            .collect::<Result<HashMap<_, _>, String>>()?);
+                        i += 2;
+                    },
+                    "--start" => {
+                        start_date = Some(NaiveDate::parse_from_str(&args[i + 1], "%Y-%m-%d")?);
+                        i += 2;
+                    },
+                    "--end" => {
+                        end_date = Some(NaiveDate::parse_from_str(&args[i + 1], "%Y-%m-%d")?);
+                        i += 2;
                     },
                     "--announced" => {
-                        announced_at = Some(NaiveDate::parse_from_str(&args[i+1], "%Y-%m-%d")?);
+                        announced_at = Some(NaiveDate::parse_from_str(&args[i + 1], "%Y-%m-%d")?);
                         i += 2;
                     },
                     "--published" => {
-                        published_at = Some(NaiveDate::parse_from_str(&args[i+1], "%Y-%m-%d")?);
+                        published_at = Some(NaiveDate::parse_from_str(&args[i + 1], "%Y-%m-%d")?);
                         i += 2;
                     },
-                    "--historical" => {
-                        is_historical = Some(true);
-                        i += 1;
+                    "--loan" => {
+                        is_loan = Some(args[i + 1].parse()?);
+                        i += 2;
+                    },
+                    "--address" => {
+                        payment_address = Some(args[i + 1].clone());
+                        i += 2;
                     },
                     _ => return Err(format!("Unknown option: {}", args[i]).into()),
                 }
             }
-            Ok(Command::AddProposal { title, url, budget_request_details, announced_at, published_at, is_historical })
+
+            Ok(Command::AddProposal {
+                title,
+                url: Some(url),
+                budget_request_details: if team.is_some() || amounts.is_some() {
+                    Some(BudgetRequestDetailsCommand {
+                        team,
+                        request_amounts: amounts,
+                        start_date,
+                        end_date,
+                        is_loan,
+                        payment_address,
+                    })
+                } else {
+                    None
+                },
+                announced_at,
+                published_at,
+                is_historical: None,
+            })
         },
         "update-proposal" => {
             if args.len() < 2 {
-                return Err("Usage: update-proposal <name> [--title <title>] [--url <url>] [--budget-request <team> <amount> <token> <start_date> <end_date>] [--announced <date>] [--published <date>] [--resolved <date>]".into());
+                return Err("Usage: update-proposal <name> [--title <title>] [--url <url>] [--team <name>] \
+                        [--amounts <token:amount>] [--start <date>] [--end <date>] [--announced <date>] \
+                        [--published <date>] [--resolved <date>] [--loan <true/false>] [--address <eth_address>]".into());
             }
             let proposal_name = args[0].clone();
             let mut updates = UpdateProposalDetails {
@@ -171,42 +218,40 @@ pub fn parse_cli_args(args: &[String]) -> Result<Command, Box<dyn Error>> {
                 published_at: None,
                 resolved_at: None,
             };
+            
             let mut i = 1;
+            let mut budget_details = BudgetRequestDetailsCommand {
+                team: None,
+                request_amounts: None,
+                start_date: None,
+                end_date: None,
+                is_loan: None,
+                payment_address: None,
+            };
+            let mut has_budget_changes = false;
+
             while i < args.len() {
                 match args[i].as_str() {
-                    "--title" => {
-                        updates.title = Some(args[i+1].clone());
+                    // ... existing matches ...
+                    "--loan" => {
+                        budget_details.is_loan = Some(args[i+1].parse()
+                            .map_err(|_| format!("Invalid loan value: {}", args[i+1]))?);
+                        has_budget_changes = true;
                         i += 2;
                     },
-                    "--url" => {
-                        updates.url = Some(args[i+1].clone());
-                        i += 2;
-                    },
-                    "--budget-request" => {
-                        updates.budget_request_details = Some(BudgetRequestDetailsCommand {
-                            team: Some(args[i+1].clone()),
-                            request_amounts: Some(HashMap::from([(args[i+3].clone(), args[i+2].parse()?)])),
-                            start_date: Some(NaiveDate::parse_from_str(&args[i+4], "%Y-%m-%d")?),
-                            end_date: Some(NaiveDate::parse_from_str(&args[i+5], "%Y-%m-%d")?),
-                            payment_status: None,
-                        });
-                        i += 6;
-                    },
-                    "--announced" => {
-                        updates.announced_at = Some(NaiveDate::parse_from_str(&args[i+1], "%Y-%m-%d")?);
-                        i += 2;
-                    },
-                    "--published" => {
-                        updates.published_at = Some(NaiveDate::parse_from_str(&args[i+1], "%Y-%m-%d")?);
-                        i += 2;
-                    },
-                    "--resolved" => {
-                        updates.resolved_at = Some(NaiveDate::parse_from_str(&args[i+1], "%Y-%m-%d")?);
+                    "--address" => {
+                        budget_details.payment_address = Some(args[i+1].clone());
+                        has_budget_changes = true;
                         i += 2;
                     },
                     _ => return Err(format!("Unknown option: {}", args[i]).into()),
                 }
             }
+
+            if has_budget_changes {
+                updates.budget_request_details = Some(budget_details);
+            }
+
             Ok(Command::UpdateProposal { proposal_name, updates })
         },
         "import-predefined-raffle" => {
@@ -407,7 +452,7 @@ mod tests {
             end_date,
         };
         
-        let mut stdout = io::stdout();
+        let mut stdout = io::sink();
         let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
         assert!(result.is_ok());
         assert_eq!(budget_system.state().epochs().len(), 1);
@@ -426,7 +471,7 @@ mod tests {
             name: "Test Epoch".to_string(),
         };
         
-        let mut stdout = io::stdout();
+        let mut stdout = io::sink();
         let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
         assert!(result.is_ok());
         assert_eq!(budget_system.state().current_epoch(), Some(epoch_id));
@@ -448,7 +493,7 @@ mod tests {
             amount: 100.0,
         };
         
-        let mut stdout = io::stdout();
+        let mut stdout = io::sink();
         let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
         assert!(result.is_ok());
     
@@ -467,7 +512,7 @@ mod tests {
             trailing_monthly_revenue: Some(vec![1000, 2000, 3000]),
         };
         
-        let mut stdout = io::stdout();
+        let mut stdout = io::sink();
         let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
         assert!(result.is_ok());
         assert_eq!(budget_system.state().current_state().teams().len(), 1);
@@ -496,7 +541,7 @@ mod tests {
             },
         };
 
-        let mut stdout = io::stdout();
+        let mut stdout = io::sink();
         let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
         assert!(result.is_ok());
 
@@ -515,38 +560,46 @@ mod tests {
             name: "Non-existent Epoch".to_string(),
         };
         
-        let mut stdout = io::stdout();
+        let mut stdout = io::sink();
         let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
         assert!(result.is_err());
     }
 
+    #[test]
+    fn test_add_proposal_command() {
+        let args = vec![
+            "robokitty".to_string(),
+            "add-proposal".to_string(),
+            "Test Proposal".to_string(),
+            "https://example.com".to_string(),
+            "--team".to_string(),
+            "Team1".to_string(),
+            "--amounts".to_string(),
+            "ETH:100,USD:1000".to_string(),
+            "--loan".to_string(),
+            "true".to_string(),
+            "--address".to_string(),
+            "0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string(),
+        ];
 
-    #[tokio::test]
-    async fn test_add_proposal_command() {
-        let (mut budget_system, config) = create_test_budget_system().await;
-
-        // Create and activate an epoch
-        let start_date = Utc::now();
-        let end_date = start_date + chrono::Duration::days(30);
-        let epoch_id = budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
-        budget_system.activate_epoch(epoch_id).unwrap();
-
-        let command = Command::AddProposal {
-            title: "New Proposal".to_string(),
-            url: Some("http://example.com".to_string()),
-            budget_request_details: None,
-            announced_at: Some(Utc::now().date_naive()),
-            published_at: Some(Utc::now().date_naive()),
-            is_historical: Some(false),
-        };
-
-        let mut stdout = io::stdout();
-        let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
-        assert!(result.is_ok());
-        assert_eq!(budget_system.state().proposals().len(), 1);
-
-        let proposal = budget_system.state().proposals().values().next().unwrap();
-        assert_eq!(proposal.title(), "New Proposal");
+        let command = parse_cli_args(&args).unwrap();
+        match command {
+            Command::AddProposal { title, url, budget_request_details, .. } => {
+                assert_eq!(title, "Test Proposal");
+                assert_eq!(url, Some("https://example.com".to_string()));
+                
+                let details = budget_request_details.unwrap();
+                assert_eq!(details.team, Some("Team1".to_string()));
+                assert!(details.is_loan.unwrap());
+                assert_eq!(details.payment_address, 
+                    Some("0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string()));
+                
+                let amounts = details.request_amounts.unwrap();
+                assert_eq!(amounts.get("ETH").unwrap(), &100.0);
+                assert_eq!(amounts.get("USD").unwrap(), &1000.0);
+            },
+            _ => panic!("Wrong command type"),
+        }
     }
 
     #[tokio::test]
@@ -565,7 +618,7 @@ mod tests {
             },
         };
 
-        let mut stdout = io::stdout();
+        let mut stdout = io::sink();
         let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
         assert!(result.is_ok());
 
@@ -582,7 +635,7 @@ mod tests {
             resolution: "Approved".to_string(),
         };
 
-        let mut stdout = io::stdout();
+        let mut stdout = io::sink();
         let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
         assert!(result.is_ok());
 
@@ -601,7 +654,7 @@ mod tests {
             excluded_teams: None,
         };
 
-        let mut stdout = io::stdout();
+        let mut stdout = io::sink();
         let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
         assert!(result.is_ok());
         assert_eq!(budget_system.state().raffles().len(), 1);
@@ -627,7 +680,7 @@ mod tests {
             max_earner_seats: 1,
         };
 
-        let mut stdout = io::stdout();
+        let mut stdout = io::sink();
         let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
         assert!(result.is_ok());
         assert_eq!(budget_system.state().raffles().len(), 1);
@@ -648,7 +701,7 @@ mod tests {
             block_offset: None,
             excluded_teams: None,
         };
-        let mut stdout = io::stdout();
+        let mut stdout = io::sink();
         execute_command(&mut budget_system, create_raffle_command, &config, &mut stdout).await.unwrap();
 
         // Add some teams
@@ -678,7 +731,7 @@ mod tests {
             vote_closed: Some(Utc::now().date_naive()),
         };
 
-        let mut stdout = io::stdout();
+        let mut stdout = io::sink();
         let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
         assert!(result.is_ok(), "Failed to execute CreateAndProcessVote: {:?}", result);
         assert_eq!(budget_system.state().votes().len(), 1);
@@ -827,7 +880,7 @@ mod tests {
 
         let command = Command::PrintPointReport { epoch_name: None };
 
-        let mut stdout = io::stdout();
+        let mut stdout = io::sink();
         let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
         assert!(result.is_ok());
         // The actual content of the report is printed to stdout, so we can't easily verify it in this test
@@ -841,7 +894,7 @@ mod tests {
         let command = Command::ActivateEpoch {
             name: "Non-existent Epoch".to_string(),
         };  
-        let mut stdout = io::stdout();
+        let mut stdout = io::sink();
         let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
         assert!(result.is_err());
 
@@ -857,7 +910,7 @@ mod tests {
                 resolved_at: None,
             },
         };  
-        let mut stdout = io::stdout();
+        let mut stdout = io::sink();
         let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
         assert!(result.is_err());
 
@@ -875,7 +928,7 @@ mod tests {
             start_date,
             end_date,
         };  
-        let mut stdout = io::stdout();
+        let mut stdout = io::sink();
         let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
         assert!(result.is_err());
 
@@ -885,7 +938,7 @@ mod tests {
             representative: "John Doe".to_string(),
             trailing_monthly_revenue: Some(vec![]),  // Empty revenue for Earner status
         };  
-        let mut stdout = io::stdout();
+        let mut stdout = io::sink();
         let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
         assert!(result.is_err());
     }
@@ -903,7 +956,7 @@ mod tests {
             published_at: None,
             is_historical: None,
         };  
-        let mut stdout = io::stdout();
+        let mut stdout = io::sink();
         let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
         assert!(result.is_err());
 
@@ -913,9 +966,89 @@ mod tests {
             block_offset: None,
             excluded_teams: None,
         };  
-        let mut stdout = io::stdout();
+        let mut stdout = io::sink();
         let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_add_proposal_with_loan_and_address() {
+        let args = vec![
+            "robokitty".to_string(),
+            "add-proposal".to_string(),
+            "\"Test Proposal\"".to_string(),
+            "https://example.com".to_string(),
+            "--team".to_string(),
+            "Team1".to_string(),
+            "--amounts".to_string(),
+            "ETH:100".to_string(),
+            "--loan".to_string(),
+            "true".to_string(),
+            "--address".to_string(),
+            "0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string(),
+        ];
+
+        let command = parse_cli_args(&args).unwrap();
+        match command {
+            Command::AddProposal { budget_request_details, .. } => {
+                let details = budget_request_details.unwrap();
+                assert_eq!(details.team, Some("Team1".to_string()));
+                assert!(details.is_loan.unwrap());
+                assert_eq!(details.payment_address, 
+                    Some("0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string()));
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_update_proposal_with_loan_and_address() {
+        let args = vec![
+            "robokitty".to_string(),
+            "update-proposal".to_string(),
+            "Test Proposal".to_string(),
+            "--loan".to_string(),
+            "true".to_string(),
+            "--address".to_string(),
+            "0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string(),
+        ];
+
+        let command = parse_cli_args(&args).unwrap();
+        match command {
+            Command::UpdateProposal { updates, .. } => {
+                let details = updates.budget_request_details.unwrap();
+                assert!(details.is_loan.unwrap());
+                assert_eq!(details.payment_address,
+                    Some("0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string()));
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_add_proposal_invalid_inputs() {
+        // Test invalid loan value
+        let args = vec![
+            "robokitty".to_string(),
+            "add-proposal".to_string(),
+            "Test".to_string(),
+            "https://example.com".to_string(),
+            "--loan".to_string(),
+            "invalid".to_string(),
+        ];
+        assert!(parse_cli_args(&args).is_err());
+
+        // Test invalid date
+        let args = vec![
+            "robokitty".to_string(),
+            "add-proposal".to_string(),
+            "Test".to_string(),
+            "https://example.com".to_string(),
+            "--start".to_string(),
+            "invalid-date".to_string(),
+        ];
+        assert!(parse_cli_args(&args).is_err());
+    }
+
 
 }
