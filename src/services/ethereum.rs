@@ -1,26 +1,29 @@
 use ethers::prelude::*;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 use async_trait::async_trait;
 use tokio::{
     self,
     time::Duration,
 };
+use downcast_rs::{impl_downcast, DowncastSync};
 
 #[async_trait]
-pub trait EthereumServiceTrait: Send + Sync {
+pub trait EthereumServiceTrait: DowncastSync {
     async fn get_current_block(&self) -> Result<u64, Box<dyn std::error::Error>>;
     async fn get_randomness(&self, block_number: u64) -> Result<String, Box<dyn std::error::Error>>;
     async fn get_raffle_randomness(&self) -> Result<(u64, u64, String), Box<dyn std::error::Error>>;
 }
 
+impl_downcast!(sync EthereumServiceTrait);
 
 pub struct EthereumService {
     client: Arc<Provider<Ipc>>,
     future_block_offset: u64,
 }
 
-
-pub struct MockEthereumService;
+pub struct MockEthereumService {
+    current_block: Arc<AtomicU64>,
+}
 
 impl EthereumService {
     pub async fn new(ipc_path: &str, future_block_offset: u64) -> Result<Self, Box<dyn std::error::Error>> {
@@ -58,6 +61,18 @@ impl EthereumService {
     }
 }
 
+impl MockEthereumService {
+    pub fn new() -> Self {
+        Self {
+            current_block: Arc::new(AtomicU64::new(12345)),
+        }
+    }
+
+    pub fn increment_block(&self) {
+        self.current_block.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 #[async_trait]
 impl EthereumServiceTrait for EthereumService {
     async fn get_current_block(&self) -> Result<u64, Box<dyn std::error::Error>> {
@@ -89,7 +104,7 @@ impl EthereumServiceTrait for EthereumService {
 #[async_trait::async_trait]
 impl EthereumServiceTrait for MockEthereumService {
     async fn get_current_block(&self) -> Result<u64, Box<dyn std::error::Error>> {
-        Ok(12345)
+        Ok(self.current_block.load(Ordering::SeqCst))
     }
 
     async fn get_randomness(&self, block_number: u64) -> Result<String, Box<dyn std::error::Error>> {
@@ -97,6 +112,7 @@ impl EthereumServiceTrait for MockEthereumService {
     }
 
     async fn get_raffle_randomness(&self) -> Result<(u64, u64, String), Box<dyn std::error::Error>> {
-        Ok((12345, 12355, "mock_randomness".to_string()))
+        let current = self.current_block.load(Ordering::SeqCst);
+        Ok((current, current + 10, format!("mock_randomness_for_block_{}", current + 10)))
     }
 }

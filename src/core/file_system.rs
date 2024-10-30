@@ -602,7 +602,7 @@ mod tests {
                     token: "test_token".to_string(),
                 },
             };
-            let ethereum_service = Arc::new(MockEthereumService);
+            let ethereum_service = Arc::new(MockEthereumService::new());
             FileSystem::initialize_budget_system(&config, ethereum_service).await.unwrap()
         }
 

@@ -1,9 +1,10 @@
-use uuid::Uuid;
-use chrono::NaiveDate;
-use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
 use crate::commands::common::{UpdateProposalDetails, BudgetRequestDetailsCommand};
 use super::common::NameMatches;
+use uuid::Uuid;
+use chrono::{Utc, NaiveDate};
+use std::{collections::HashMap, str::FromStr};
+use serde::{Serialize, Deserialize};
+use ethers::types::{Address, H256};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Proposal {
@@ -42,14 +43,14 @@ pub struct BudgetRequestDetails {
     request_amounts: HashMap<String, f64>,
     start_date: Option<NaiveDate>,
     end_date: Option<NaiveDate>,
-    payment_status: Option<PaymentStatus>,
+    is_loan: Option<bool>,
+    #[serde(with = "address_serde")]
+    payment_address: Option<Address>,
+    #[serde(with = "tx_hash_serde")]
+    payment_tx: Option<H256>,
+    payment_date: Option<NaiveDate>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PaymentStatus {
-    Unpaid,
-    Paid
-}
 
 impl Proposal {
     pub fn new(
@@ -184,17 +185,6 @@ impl Proposal {
         self.is_historical = is_historical;
     }
 
-    pub fn set_payment_status(&mut self, status: PaymentStatus) -> Result<(), &'static str> {
-        match (&self.status, &self.resolution, &mut self.budget_request_details) {
-            (_, Some(Resolution::Approved), Some(details)) => {
-                details.set_payment_status(Some(status));
-                Ok(())
-            }
-            (_, Some(Resolution::Approved), None) => Err("Cannot set payment status: Not a budget request"),
-            _ => Err("Cannot set payment status: Proposal is not approved")
-        }
-    }
-
     // Helper methods
     pub fn is_open(&self) -> bool {
         matches!(self.status, ProposalStatus::Open)
@@ -266,31 +256,37 @@ impl Proposal {
         if let Some(budget_details) = updates.budget_request_details {
             self.update_budget_request_details(&budget_details, team_id)?;
         }
-    
+ 
         Ok(())
     }
-
+ 
     fn update_budget_request_details(&mut self, updates: &BudgetRequestDetailsCommand, team_id: Option<Uuid>) -> Result<(), &'static str> {
         let details = self.budget_request_details.get_or_insert_with(BudgetRequestDetails::default);
-
+ 
         if updates.team.is_some() {
             details.set_team(team_id);
         }
-
+ 
         if let Some(request_amounts) = &updates.request_amounts {
             for (token, &amount) in request_amounts {
                 details.add_request_amount(token.clone(), amount)?;
             }
         }
+ 
         if updates.start_date.is_some() || updates.end_date.is_some() {
             details.set_dates(updates.start_date, updates.end_date)?;
         }
-        if let Some(payment_status) = &updates.payment_status {
-            details.set_payment_status(Some(payment_status.clone()));
+ 
+        if let Some(is_loan) = updates.is_loan {
+            details.set_is_loan(is_loan);
         }
-
+ 
+        if let Some(address) = &updates.payment_address {
+            details.set_payment_address(Some(address.clone()))?;
+        }
+ 
         details.validate()?;
-
+ 
         Ok(())
     }
     
@@ -302,6 +298,68 @@ impl NameMatches for Proposal {
     }
 }
 
+// Custom serialization for Ethereum address
+mod address_serde {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S>(address: &Option<Address>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match address {
+            Some(addr) => serializer.serialize_str(&format!("{:?}", addr)),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Address>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s: Option<String> = Option::deserialize(deserializer)?;
+        match s {
+            Some(s) => {
+                Address::from_str(&s)
+                    .map(Some)
+                    .map_err(serde::de::Error::custom)
+            }
+            None => Ok(None),
+        }
+    }
+}
+
+// Custom serialization for transaction hash
+mod tx_hash_serde {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S>(hash: &Option<H256>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match hash {
+            Some(hash) => serializer.serialize_str(&format!("{:?}", hash)),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<H256>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s: Option<String> = Option::deserialize(deserializer)?;
+        match s {
+            Some(s) => {
+                H256::from_str(&s)
+                    .map(Some)
+                    .map_err(serde::de::Error::custom)
+            }
+            None => Ok(None),
+        }
+    }
+}
+
 impl BudgetRequestDetails {
     // Constructor
     pub fn new(
@@ -309,26 +367,31 @@ impl BudgetRequestDetails {
         request_amounts: HashMap<String, f64>,
         start_date: Option<NaiveDate>,
         end_date: Option<NaiveDate>,
-        payment_status: Option<PaymentStatus>
+        is_loan: Option<bool>,
+        payment_address: Option<String>,
     ) -> Result<Self, &'static str> {
+        // Validate ethereum address if provided
+        let payment_address = if let Some(addr) = payment_address {
+            Some(Address::from_str(&addr).map_err(|_| "Invalid Ethereum address")?)
+        } else {
+            None
+        };
+
         let brd = BudgetRequestDetails {
             team,
             request_amounts,
             start_date,
             end_date,
-            payment_status,
+            is_loan: is_loan.or(Some(false)), // Default to false if None provided
+            payment_address,
+            payment_tx: None,
+            payment_date: None,
         };
         brd.validate()?;
         Ok(brd)
     }
 
     fn validate(&self) -> Result<(), &'static str> {
-
-        // Ensure payment_status is None for new proposals
-        if self.payment_status().is_some() {
-            return Err("New proposals should not have a payment status");
-        }
-
         // Validate request amounts
         if self.request_amounts.is_empty() {
             return Err("Request amounts cannot be empty");
@@ -346,6 +409,11 @@ impl BudgetRequestDetails {
             }
         }
 
+        // Ensure new proposals don't have payment details
+        if self.payment_tx.is_some() || self.payment_date.is_some() {
+            return Err("New budget requests cannot have payment details");
+        }
+
         Ok(())
     }
 
@@ -355,7 +423,10 @@ impl BudgetRequestDetails {
             request_amounts: HashMap::new(),
             start_date: None,
             end_date: None,
-            payment_status: None,
+            is_loan: None,
+            payment_address: None,
+            payment_tx: None,
+            payment_date: None
         }
     }
 
@@ -376,17 +447,25 @@ impl BudgetRequestDetails {
         self.end_date
     }
 
-    pub fn payment_status(&self) -> Option<PaymentStatus> {
-        self.payment_status.clone()
+    pub fn is_loan(&self) -> bool {
+        self.is_loan.unwrap_or(false)  // This is just for safety, should never be None
+    }
+
+    pub fn payment_address(&self) -> Option<&Address> {
+        self.payment_address.as_ref()
+    }
+
+    pub fn payment_tx(&self) -> Option<&H256> {
+        self.payment_tx.as_ref()
+    }
+
+    pub fn payment_date(&self) -> Option<NaiveDate> {
+        self.payment_date
     }
 
     // Setter methods
     pub fn set_team(&mut self, team: Option<Uuid>) {
         self.team = team;
-    }
-
-    pub fn set_payment_status(&mut self, status: Option<PaymentStatus>) {
-        self.payment_status = status;
     }
 
     pub fn add_request_amount(&mut self, token: String, amount: f64) -> Result<(), &'static str> {
@@ -412,10 +491,38 @@ impl BudgetRequestDetails {
         Ok(())
     }
 
+    pub fn set_is_loan(&mut self, is_loan: bool) {
+        self.is_loan = Some(is_loan);
+    }
+
+    pub fn set_payment_address(&mut self, address: Option<String>) -> Result<(), &'static str> {
+        self.payment_address = match address {
+            Some(addr) => Some(Address::from_str(&addr).map_err(|_| "Invalid Ethereum address")?),
+            None => None,
+        };
+        Ok(())
+    }
+
+    // Method for recording payment
+    pub fn record_payment(&mut self, tx_hash: String, payment_date: NaiveDate) -> Result<(), &'static str> {
+        // Validate transaction hash
+        let tx = H256::from_str(&tx_hash).map_err(|_| "Invalid transaction hash")?;
+        
+        self.payment_tx = Some(tx);
+        self.payment_date = Some(payment_date);
+        Ok(())
+    }
+
+    pub fn clear_payment(&mut self) {
+        self.payment_tx = None;
+        self.payment_date = None;
+    }
+
+
     // Helper methods
 
     pub fn is_paid(&self) -> bool {
-        matches!(self.payment_status, Some(PaymentStatus::Paid))
+        self.payment_tx.is_some() && self.payment_date.is_some()
     }
 
     pub fn total_request_amount(&self) -> f64 {
@@ -484,6 +591,7 @@ mod tests {
             [("ETH".to_string(), 100.0)].iter().cloned().collect(),
             Some(NaiveDate::from_ymd_opt(2023, 2, 1).unwrap()),
             Some(NaiveDate::from_ymd_opt(2023, 2, 28).unwrap()),
+            Some(false),
             None,
         ).unwrap();
         
@@ -526,7 +634,8 @@ mod tests {
                 request_amounts: Some([("ETH".to_string(), 200.0)].iter().cloned().collect()),
                 start_date: Some(NaiveDate::from_ymd_opt(2023, 4, 1).unwrap()),
                 end_date: Some(NaiveDate::from_ymd_opt(2023, 4, 30).unwrap()),
-                payment_status: None,
+                is_loan: None,
+                payment_address: None,
             }),
             announced_at: Some(NaiveDate::from_ymd_opt(2023, 3, 15).unwrap()),
             published_at: Some(NaiveDate::from_ymd_opt(2023, 3, 20).unwrap()),
@@ -577,6 +686,7 @@ mod tests {
             [("ETH".to_string(), -100.0)].iter().cloned().collect(),
             None,
             None,
+            Some(false),
             None,
         );
         assert!(result.is_err());
@@ -592,5 +702,187 @@ mod tests {
         
         proposal.set_status(ProposalStatus::Reopened);
         assert!(proposal.is_actionable());
+    }
+
+    #[test]
+    fn test_budget_request_details_creation() {
+        let mut amounts = HashMap::new();
+        amounts.insert("ETH".to_string(), 100.0);
+        
+        let result = BudgetRequestDetails::new(
+            Some(Uuid::new_v4()),
+            amounts,
+            Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()),
+            Some(NaiveDate::from_ymd_opt(2024, 12, 31).unwrap()),
+            Some(true), // is_loan
+            Some("0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string()), // valid eth address
+        );
+        
+        assert!(result.is_ok());
+        let details = result.unwrap();
+        assert!(details.is_loan());
+        assert!(!details.is_paid());
+        assert!(details.payment_tx().is_none());
+        assert!(details.payment_date().is_none());
+    }
+
+    #[test]
+    fn test_budget_request_details_invalid_address() {
+        let mut amounts = HashMap::new();
+        amounts.insert("ETH".to_string(), 100.0);
+        
+        let result = BudgetRequestDetails::new(
+            Some(Uuid::new_v4()),
+            amounts,
+            None,
+            None,
+            None,
+            Some("invalid_address".to_string()), // invalid address
+        );
+        
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_record_payment() {
+        let mut amounts = HashMap::new();
+        amounts.insert("ETH".to_string(), 100.0);
+        
+        let mut details = BudgetRequestDetails::new(
+            Some(Uuid::new_v4()),
+            amounts,
+            None,
+            None,
+            None,
+            None,
+        ).unwrap();
+        
+        assert!(!details.is_paid());
+        
+        // Record valid payment
+        let result = details.record_payment(
+            "0x742d35Cc6634C0532925a3b844Bc454e4438f44e4438f44e4438f44e4438f44e".to_string(),
+            Utc::now().date_naive()
+        );
+        
+        assert!(result.is_ok());
+        assert!(details.is_paid());
+    }
+
+    #[test]
+    fn test_record_invalid_payment() {
+        let mut amounts = HashMap::new();
+        amounts.insert("ETH".to_string(), 100.0);
+        
+        let mut details = BudgetRequestDetails::new(
+            Some(Uuid::new_v4()),
+            amounts,
+            None,
+            None,
+            None,
+            None,
+        ).unwrap();
+        
+        // Try to record invalid payment
+        let result = details.record_payment(
+            "invalid_tx_hash".to_string(),
+            Utc::now().date_naive()
+        );
+        
+        assert!(result.is_err());
+        assert!(!details.is_paid());
+    }
+
+    #[test]
+    fn test_clear_payment() {
+        let mut amounts = HashMap::new();
+        amounts.insert("ETH".to_string(), 100.0);
+        
+        let mut details = BudgetRequestDetails::new(
+            Some(Uuid::new_v4()),
+            amounts,
+            None,
+            None,
+            None,
+            None,
+        ).unwrap();
+        
+        // Record payment then clear it
+        details.record_payment(
+            "0x742d35Cc6634C0532925a3b844Bc454e4438f44e4438f44e4438f44e4438f44e".to_string(),
+            Utc::now().date_naive()
+        ).unwrap();
+        
+        assert!(details.is_paid());
+        
+        details.clear_payment();
+        assert!(!details.is_paid());
+        assert!(details.payment_tx().is_none());
+        assert!(details.payment_date().is_none());
+    }
+
+    #[test]
+    fn test_budget_request_details_loan_defaults() {
+        let mut amounts = HashMap::new();
+        amounts.insert("ETH".to_string(), 100.0);
+        
+        // Test with no loan status provided
+        let details = BudgetRequestDetails::new(
+            Some(Uuid::new_v4()),
+            amounts.clone(),
+            None,
+            None,
+            None,  // No loan status provided
+            None,
+        ).unwrap();
+        
+        assert!(!details.is_loan());  // Should default to false
+        
+        // Test with explicit false
+        let details = BudgetRequestDetails::new(
+            Some(Uuid::new_v4()),
+            amounts.clone(),
+            None,
+            None,
+            Some(false),
+            None,
+        ).unwrap();
+        
+        assert!(!details.is_loan());
+        
+        // Test with explicit true
+        let details = BudgetRequestDetails::new(
+            Some(Uuid::new_v4()),
+            amounts.clone(),
+            None,
+            None,
+            Some(true),
+            None,
+        ).unwrap();
+        
+        assert!(details.is_loan());
+    }
+
+    #[test]
+    fn test_budget_request_set_loan_status() {
+        let mut amounts = HashMap::new();
+        amounts.insert("ETH".to_string(), 100.0);
+        
+        let mut details = BudgetRequestDetails::new(
+            Some(Uuid::new_v4()),
+            amounts,
+            None,
+            None,
+            None,
+            None,
+        ).unwrap();
+        
+        assert!(!details.is_loan());  // Starts as false
+        
+        details.set_is_loan(true);
+        assert!(details.is_loan());
+        
+        details.set_is_loan(false);
+        assert!(!details.is_loan());
     }
 }

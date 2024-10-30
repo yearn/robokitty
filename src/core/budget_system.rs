@@ -3,10 +3,11 @@
 use crate::core::state::BudgetSystemState;
 use crate::core::models::{
     Team, TeamStatus, Epoch, EpochStatus, EpochReward, TeamReward,
-    Proposal, ProposalStatus, Resolution, PaymentStatus, BudgetRequestDetails,
+    Proposal, ProposalStatus, Resolution, BudgetRequestDetails,
     Raffle, RaffleConfig, RaffleResult, RaffleTicket,
     Vote, VoteType, VoteStatus, VoteChoice, VoteCount, VoteParticipation, VoteResult, get_id_by_name
 };
+use crate::core::progress::raffle::{RaffleProgress, RaffleCreationError};
 use crate::core::models::common::NameMatches;
 use crate::services::ethereum::EthereumServiceTrait;
 use crate::commands::common::{ 
@@ -19,6 +20,7 @@ use crate::escape_markdown;
 use chrono::{DateTime, NaiveDate, Utc, TimeZone};
 use uuid::Uuid;
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet},
     error::Error, fmt,
     fs,
@@ -26,10 +28,16 @@ use std::{
     path::{Path, PathBuf},
     str,
     sync::Arc,
+    task::{Context, Poll},
+    pin::Pin
 };
 use log::{info, debug, error};
 use async_trait::async_trait;
-use tokio::time::Duration;
+use tokio::{time::Duration, sync::mpsc};
+use futures::{pin_mut, Stream, StreamExt, stream::unfold};
+use tokio_stream::wrappers::ReceiverStream;
+use async_stream::try_stream;
+
 
 pub struct BudgetSystem {
     state: BudgetSystemState,
@@ -1284,17 +1292,40 @@ def hello_world():
         // Budget Request Details
         if let Some(budget_details) = proposal.budget_request_details() {
             report.push_str("## Budget Request Details\n\n");
+            
+            // Team info
             report.push_str(&format!("- **Requesting Team**: {}\n", 
                 budget_details.team()
                     .and_then(|id| self.state.current_state().teams().get(&id))
                     .map_or("N/A".to_string(), |team| team.name().to_string())));
+            
+            // Sort amounts by token for consistent output
+            let mut amounts: Vec<_> = budget_details.request_amounts().iter().collect();
+            amounts.sort_by(|(a, _), (b, _)| a.cmp(b));
+            
             report.push_str("- **Requested Amount(s)**:\n");
-            for (token, amount) in budget_details.request_amounts() {
+            for (token, amount) in amounts {
                 report.push_str(&format!("  - {}: {}\n", token, amount));
             }
-            report.push_str(&format!("- **Start Date**: {}\n", budget_details.start_date().map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())));
-            report.push_str(&format!("- **End Date**: {}\n", budget_details.end_date().map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())));
-            report.push_str(&format!("- **Payment Status**: {:?}\n\n", budget_details.payment_status()));
+ 
+            report.push_str(&format!("- **Start Date**: {}\n", 
+                budget_details.start_date()
+                    .map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())));
+            report.push_str(&format!("- **End Date**: {}\n", 
+                budget_details.end_date()
+                    .map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())));
+            report.push_str(&format!("- **Is Loan**: {}\n", 
+                budget_details.is_loan()));
+            report.push_str(&format!("- **Payment Address**: {}\n", 
+                budget_details.payment_address()
+                    .map_or("N/A".to_string(), |addr| format!("{:?}", addr))));
+            if budget_details.is_paid() {
+                report.push_str(&format!("- **Payment Transaction**: {}\n",
+                    budget_details.payment_tx().map_or("N/A".to_string(), |tx| format!("{:?}", tx))));
+                report.push_str(&format!("- **Payment Date**: {}\n",
+                    budget_details.payment_date().map_or("N/A".to_string(), |d| d.format("%Y-%m-%d").to_string())));
+            }
+            report.push_str("\n");
         }
     
         // Raffle Information
@@ -1391,22 +1422,37 @@ def hello_world():
 
         for snapshot in raffle.team_snapshots() {
             let team_name = snapshot.name();
-            let status = format!("{:?}", snapshot.status());
-            let revenue = match snapshot.status() {
-                TeamStatus::Earner { trailing_monthly_revenue } => format!("{:?}", trailing_monthly_revenue),
+            
+            let status = match &snapshot.status() {
+                TeamStatus::Earner { .. } => "Earner",
+                TeamStatus::Supporter => "Supporter",
+                TeamStatus::Inactive => "Inactive",
+            };
+
+            let revenue = match &snapshot.status() {
+                TeamStatus::Earner { trailing_monthly_revenue } => 
+                    trailing_monthly_revenue.iter()
+                        .map(|r| r.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", "),
                 _ => "N/A".to_string(),
             };
+
             let tickets: Vec<_> = raffle.tickets().iter()
                 .filter(|t| t.team_id() == snapshot.id())
                 .collect();
+            
             let ballot_range = if !tickets.is_empty() {
-                format!("{} - {}", tickets.first().unwrap().index(), tickets.last().unwrap().index())
+                format!("{} - {}", 
+                    tickets.first().unwrap().index(), 
+                    tickets.last().unwrap().index())
             } else {
                 "N/A".to_string()
             };
+
             let ticket_count = tickets.len();
 
-            table.push_str(&format!("| {} | {} | {} | {} | {} |\n", 
+            table.push_str(&format!("| {} | {} | {} | {} | {} |\n",
                 team_name, status, revenue, ballot_range, ticket_count));
         }
 
@@ -1888,123 +1934,106 @@ def hello_world():
         (counted, uncounted)
     }
 
-    async fn handle_create_raffle<W: Write + Send + 'static>(
-        &mut self,
+    /// Creates a new raffle with progress updates streamed as an async stream
+    ///
+    /// # Arguments
+    /// * `proposal_name` - Name of the proposal to create raffle for
+    /// * `block_offset` - Optional override for the default block offset
+    /// * `excluded_teams` - Optional list of team names to exclude
+    ///
+    /// # Returns
+    /// A stream of RaffleProgress updates that can be consumed asynchronously
+    pub async fn create_raffle_with_progress<'a>(
+        &'a mut self,
         proposal_name: String,
         block_offset: Option<u64>,
         excluded_teams: Option<Vec<String>>,
-        output: &mut W,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        // Preparation phase
-        writeln!(output, "Preparing raffle for proposal: {}", proposal_name)?;
+    ) -> impl Stream<Item = Result<RaffleProgress, RaffleCreationError>> + Send + 'a {
         let config = self.config.clone();
-        let (raffle_id, tickets) = self.prepare_raffle(&proposal_name, excluded_teams.clone(), &config)?;
-
-        for (team_name, start, end) in self.group_tickets_by_team(&tickets) {
-            writeln!(output, "  {} ballot range [{}..{}]", team_name, start, end)?;
+        let eth_service = Arc::clone(&self.ethereum_service);
+        
+        try_stream! {
+            // Do setup inside the stream
+            let (raffle_id, tickets) = self.prepare_raffle(&proposal_name, excluded_teams.clone(), &config)
+                .map_err(|e| RaffleCreationError(format!("Failed to prepare raffle: {}", e)))?;
+    
+            let ticket_ranges = self.group_tickets_by_team(&tickets);
+    
+            yield RaffleProgress::Preparing {
+                proposal_name: proposal_name.clone(),
+                raffle_id,
+                ticket_ranges,
+            };
+    
+            let current_block = eth_service.get_current_block()
+                .await
+                .map_err(|e| RaffleCreationError(format!("Failed to get current block: {}", e)))?;
+                
+            let target_block = current_block + block_offset.unwrap_or(config.future_block_offset);
+    
+            while eth_service.get_current_block()
+                .await
+                .map_err(|e| RaffleCreationError(format!("Failed to get current block: {}", e)))? < target_block 
+            {
+                yield RaffleProgress::WaitingForBlock {
+                    proposal_name: proposal_name.clone(),
+                    raffle_id,
+                    current_block,
+                    target_block,
+                };
+                
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+    
+            let randomness = eth_service.get_randomness(target_block)
+                .await
+                .map_err(|e| RaffleCreationError(format!("Failed to get randomness: {}", e)))?;
+    
+            yield RaffleProgress::RandomnessAcquired {
+                proposal_name: proposal_name.clone(),
+                raffle_id,
+                current_block,
+                target_block,
+                randomness: randomness.clone(),
+            };
+    
+            let raffle = self.finalize_raffle(raffle_id, current_block, target_block, randomness)
+                .await
+                .map_err(|e| RaffleCreationError(format!("Failed to finalize raffle: {}", e)))?;
+    
+            let (counted, uncounted) = if let Some(result) = raffle.result() {
+                let format_team_with_score = |team_id: &Uuid| {
+                    let snapshot = raffle.team_snapshots().iter()
+                        .find(|s| s.id() == *team_id)
+                        .unwrap();
+                    let best_score = raffle.tickets().iter()
+                        .filter(|t| t.team_id() == *team_id)
+                        .map(|t| t.score())
+                        .max_by(|a, b| a.partial_cmp(b).unwrap())
+                        .unwrap_or(0.0);
+                    (snapshot.status().clone(), format!("{} (score: {})", snapshot.name(), best_score))
+                };
+        
+                let counted: Vec<(TeamStatus, String)> = result.counted().iter()
+                    .map(|team_id| format_team_with_score(team_id))
+                    .collect();
+                let uncounted: Vec<(TeamStatus, String)> = result.uncounted().iter()
+                    .map(|team_id| format_team_with_score(team_id))
+                    .collect();
+                (counted, uncounted)
+            } else {
+                (Vec::new(), Vec::new())
+            };
+        
+            yield RaffleProgress::Completed {
+                proposal_name: proposal_name.clone(),
+                raffle_id,
+                counted,
+                uncounted,
+            };
         }
-
-        if let Some(excluded) = &excluded_teams {
-            writeln!(output, "Excluded teams: {:?}", excluded)?;
-        }
-
-        // Waiting phase
-        let current_block = self.ethereum_service().get_current_block().await?;
-        writeln!(output, "Current block number: {}", current_block)?;
-
-        let initiation_block = current_block;
-        let target_block = current_block + block_offset.unwrap_or(self.config.future_block_offset);
-        writeln!(output, "Target block for randomness: {}", target_block)?;
-        writeln!(output, "Waiting for target block...")?;
-        output.flush()?;
-
-        let mut last_observed_block = current_block;
-        while self.ethereum_service().get_current_block().await? < target_block {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            let new_block = self.ethereum_service().get_current_block().await?;
-            if new_block != last_observed_block {
-                writeln!(output, "Latest observed block: {}", new_block)?;
-                output.flush()?;
-                last_observed_block = new_block;
-            }
-        }
-
-        // Finalization phase
-        let randomness = self.ethereum_service().get_randomness(target_block).await?;
-        writeln!(output, "Block randomness: {}", randomness)?;
-        writeln!(output, "Etherscan URL: https://etherscan.io/block/{}#consensusinfo", target_block)?;
-
-        let raffle = self.finalize_raffle(raffle_id, initiation_block, target_block, randomness).await?;
-
-        writeln!(output, "Raffle results for proposal '{}' (Raffle ID: {})", proposal_name, raffle_id)?;
-
-        if let Some(result) = raffle.result() {
-            writeln!(output, "**Counted voters:**")?;
-            writeln!(output, "Earner teams:")?;
-            let mut earner_count = 0;
-            for &team_id in result.counted() {
-                if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
-                    if let TeamStatus::Earner { .. } = snapshot.status() {
-                        earner_count += 1;
-                        let best_score = raffle.tickets().iter()
-                            .filter(|t| t.team_id() == team_id)
-                            .map(|t| t.score())
-                            .max_by(|a, b| a.partial_cmp(b).unwrap())
-                            .unwrap_or(0.0);
-                        writeln!(output, "  {} (score: {})", snapshot.name(), best_score)?;
-                    }
-                }
-            }
-            writeln!(output, "Supporter teams:")?;
-            for &team_id in result.counted() {
-                if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
-                    if let TeamStatus::Supporter = snapshot.status() {
-                        let best_score = raffle.tickets().iter()
-                            .filter(|t| t.team_id() == team_id)
-                            .map(|t| t.score())
-                            .max_by(|a, b| a.partial_cmp(b).unwrap())
-                            .unwrap_or(0.0);
-                        writeln!(output, "  {} (score: {})", snapshot.name(), best_score)?;
-                    }
-                }
-            }
-            writeln!(output, "Total counted voters: {} (Earners: {}, Supporters: {})", 
-                        result.counted().len(), earner_count, result.counted().len() - earner_count)?;
-
-            writeln!(output, "**Uncounted voters:**")?;
-            writeln!(output, "Earner teams:")?;
-            for &team_id in result.uncounted() {
-                if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
-                    if let TeamStatus::Earner { .. } = snapshot.status() {
-                        let best_score = raffle.tickets().iter()
-                            .filter(|t| t.team_id() == team_id)
-                            .map(|t| t.score())
-                            .max_by(|a, b| a.partial_cmp(b).unwrap())
-                            .unwrap_or(0.0);
-                        writeln!(output, "  {} (score: {})", snapshot.name(), best_score)?;
-                    }
-                }
-            }
-            writeln!(output, "Supporter teams:")?;
-            for &team_id in result.uncounted() {
-                if let Some(snapshot) = raffle.team_snapshots().iter().find(|s| s.id() == team_id) {
-                    if let TeamStatus::Supporter = snapshot.status() {
-                        let best_score = raffle.tickets().iter()
-                            .filter(|t| t.team_id() == team_id)
-                            .map(|t| t.score())
-                            .max_by(|a, b| a.partial_cmp(b).unwrap())
-                            .unwrap_or(0.0);
-                        writeln!(output, "  {} (score: {})", snapshot.name(), best_score)?;
-                    }
-                }
-            }
-        } else {
-            writeln!(output, "Raffle result not available")?;
-        }
-
-        output.flush()?;
-        Ok(())
     }
+
 }
 
 #[async_trait]
@@ -2042,13 +2071,14 @@ impl CommandExecutor for BudgetSystem {
                         details.request_amounts.unwrap_or_default(),
                         details.start_date,
                         details.end_date,
-                        details.payment_status,
+                        details.is_loan,
+                        details.payment_address,
                     )
                 }).transpose()?;
-
+             
                 let proposal_id = self.add_proposal(title.clone(), url, budget_request_details, announced_at, published_at, is_historical)?;
                 Ok(format!("Added proposal: {} ({})", title, proposal_id))
-            },
+             },
             Command::UpdateProposal { proposal_name, updates } => {
                 self.update_proposal(&proposal_name, updates)?;
                 Ok(format!("Updated proposal: {}", proposal_name))
@@ -2274,10 +2304,34 @@ impl CommandExecutor for BudgetSystem {
                 self.close_with_reason(proposal_id, &resolution)?;
                 Ok(format!("Closed proposal '{}' with resolution: {:?}", proposal_name, resolution))
             },
+            // Command::CreateRaffle { proposal_name, block_offset, excluded_teams } => {
+            //     let mut output = Vec::new();
+            //     self.handle_create_raffle(proposal_name, block_offset, excluded_teams, &mut output).await?;
+            //     Ok(String::from_utf8(output)?)
+            // },
             Command::CreateRaffle { proposal_name, block_offset, excluded_teams } => {
-                let mut output = Vec::new();
-                self.handle_create_raffle(proposal_name, block_offset, excluded_teams, &mut output).await?;
-                Ok(String::from_utf8(output)?)
+                let progress_stream = self.create_raffle_with_progress(
+                    proposal_name,
+                    block_offset,
+                    excluded_teams,
+                ).await;
+
+                let mut output = String::new();
+                pin_mut!(progress_stream);
+                
+                while let Some(progress) = progress_stream.next().await {
+                    match progress {
+                        Ok(progress) => {
+                            output.push_str(&format!("{}\n", progress.format_message()));
+                            if progress.is_complete() {
+                                break;
+                            }
+                        },
+                        Err(e) => return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.0))),
+                    }
+                }
+                
+                Ok(output)
             },
             Command::CreateAndProcessVote { proposal_name, counted_votes, uncounted_votes, vote_opened, vote_closed } => {
                 let mut output = format!("Executing CreateAndProcessVote command for proposal: {}\n", proposal_name);
@@ -2381,9 +2435,32 @@ impl CommandExecutor for BudgetSystem {
     ) -> Result<(), Box<dyn std::error::Error>> {
         match command {
             Command::CreateRaffle { proposal_name, block_offset, excluded_teams } => {
-                self.handle_create_raffle(proposal_name, block_offset, excluded_teams, output).await
+                let progress_stream = self.create_raffle_with_progress(
+                    proposal_name,
+                    block_offset,
+                    excluded_teams,
+                ).await;
+                
+                pin_mut!(progress_stream);
+                
+                while let Some(progress) = progress_stream.next().await {
+                    match progress {
+                        Ok(progress) => {
+                            writeln!(output, "{}", progress.format_message())?;
+                            output.flush()?;
+                            if progress.is_complete() {
+                                break;
+                            }
+                        },
+                        Err(e) => return Err(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::Other, 
+                            e.0
+                        ))),
+                    }
+                }
+                Ok(())
             },
-            // For commands that don't support streaming, we can fall back to the original implementation
+            // For commands that don't support streaming, fall back to the original implementation
             _ => {
                 let result = self.execute_command(command).await?;
                 write!(output, "{}", result)?;
@@ -2401,8 +2478,11 @@ mod tests {
     use tempfile::TempDir;
     use uuid::Uuid;
     use async_trait::async_trait;
+    use futures::pin_mut;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use crate::app_config::TelegramConfig;
     use crate::services::ethereum::MockEthereumService;
+    use tokio::time::Duration as Dur;
 
     // Helpers
 
@@ -2422,7 +2502,7 @@ mod tests {
                 token: "test_token".to_string(),
             },
         };
-        let ethereum_service = Arc::new(MockEthereumService);
+        let ethereum_service = Arc::new(MockEthereumService::new());
         BudgetSystem::new(config, ethereum_service, initial_state).await.unwrap()
     }
 
@@ -2454,6 +2534,23 @@ mod tests {
         ).await.unwrap();
     
         (proposal_id, raffle_id)
+    }
+
+    fn get_mock_service(budget_system: &BudgetSystem) -> Option<Arc<MockEthereumService>> {
+        budget_system.ethereum_service()
+            .clone() // Clone the Arc before downcasting
+            .downcast_arc::<MockEthereumService>()
+            .ok()
+    }
+
+    async fn setup_block_progression(mock_service: Arc<MockEthereumService>) {
+        let service = mock_service.clone();
+        tokio::spawn(async move {
+            for _ in 0..5 {
+                service.increment_block();
+                tokio::time::sleep(Dur::from_millis(100)).await;
+            }
+        });
     }
     
     // Tests
@@ -2653,6 +2750,7 @@ mod tests {
                 [("ETH".to_string(), 100.0)].iter().cloned().collect(),
                 Some(Utc::now().date_naive()),
                 Some((Utc::now() + Duration::days(30)).date_naive()),
+                Some(false),
                 None
             ).unwrap()),
             Some(Utc::now().date_naive()),
@@ -2901,7 +2999,8 @@ mod tests {
                 [("ETH".to_string(), 100.0)].iter().cloned().collect(),
                 Some(Utc::now().date_naive()),
                 Some((Utc::now() + Duration::days(30)).date_naive()),
-                None
+                Some(false),
+                None,
             ).unwrap()),
             Some(Utc::now().date_naive()),
             Some(Utc::now().date_naive()),
@@ -3031,7 +3130,7 @@ mod tests {
         let (init_block, rand_block, randomness) = budget_system.get_raffle_randomness().await.unwrap();
         assert_eq!(init_block, 12345);
         assert_eq!(rand_block, 12355);
-        assert_eq!(randomness, "mock_randomness");
+        assert_eq!(randomness, "mock_randomness_for_block_12355");
 
         // Test raffle creation with Ethereum service interaction
         create_active_epoch(&mut budget_system).await;
@@ -3045,5 +3144,198 @@ mod tests {
         assert_eq!(raffle.config().initiation_block(), 12345);
         assert_eq!(raffle.config().randomness_block(), 12355);
         assert_eq!(raffle.config().block_randomness(), "mock_randomness");
+    }
+
+    #[tokio::test]
+    async fn test_raffle_creation_stream() {
+        use futures::pin_mut;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::time::Duration;
+        use std::sync::Arc;
+
+        // Create mock service
+        let mock_service = Arc::new(MockEthereumService::new());
+        let mock_service_clone = Arc::clone(&mock_service);
+        
+
+        let temp_dir = TempDir::new().unwrap();
+        
+        // Create budget system with our mock service
+        let mut budget_system = {
+            let config = AppConfig {
+                state_file: temp_dir.path().join("test_state.json").to_str().unwrap().to_string(),
+                ipc_path: "/tmp/test_reth.ipc".to_string(),
+                future_block_offset: 2, // Small offset for testing
+                script_file: "test_script.json".to_string(),
+                default_total_counted_seats: 7,
+                default_max_earner_seats: 5,
+                default_qualified_majority_threshold: 0.7,
+                counted_vote_points: 5,
+                uncounted_vote_points: 2,
+                telegram: TelegramConfig {
+                    chat_id: "test_chat_id".to_string(),
+                    token: "test_token".to_string(),
+                },
+            };
+            BudgetSystem::new(config, mock_service, None).await.unwrap()
+        };
+        
+        // Setup block progression before executing command
+        if let Some(mock_service) = get_mock_service(&budget_system) {
+            setup_block_progression(mock_service).await;
+        }
+
+        // Setup test data
+        create_active_epoch(&mut budget_system).await;
+        
+        // Add test teams
+        budget_system.create_team("Team 1".to_string(), "Rep 1".to_string(), Some(vec![1000])).unwrap();
+        budget_system.create_team("Team 2".to_string(), "Rep 2".to_string(), Some(vec![2000])).unwrap();
+        
+        budget_system.add_proposal(
+            "Test Proposal".to_string(),
+            None,
+            None,
+            Some(Utc::now().date_naive()),
+            Some(Utc::now().date_naive()),
+            None
+        ).unwrap();
+
+        // Create and pin the stream
+        let progress_stream = budget_system.create_raffle_with_progress(
+            "Test Proposal".to_string(),
+            Some(2), // Small offset for testing
+            None
+        ).await;
+        pin_mut!(progress_stream);
+
+        // Collect updates with longer timeout
+        let mut updates = Vec::new();
+        while let Some(progress) = tokio::time::timeout(
+            Duration::from_secs(10), // Increased timeout
+            progress_stream.next()
+        ).await.unwrap() {
+            let progress = progress.unwrap();
+            println!("Received progress update: {:?}", progress);
+            updates.push(progress);
+            
+            if matches!(updates.last().unwrap(), RaffleProgress::Completed { .. }) {
+                break;
+            }
+        }
+
+        // Verify states
+        assert!(!updates.is_empty(), "Should have received updates");
+        assert!(matches!(updates[0], RaffleProgress::Preparing { .. }), "First update should be Preparing");
+        
+        let has_waiting = updates.iter().any(|p| matches!(p, RaffleProgress::WaitingForBlock { .. }));
+        assert!(has_waiting, "Should have WaitingForBlock state");
+        
+        let has_randomness = updates.iter().any(|p| matches!(p, RaffleProgress::RandomnessAcquired { .. }));
+        assert!(has_randomness, "Should have RandomnessAcquired state");
+        
+        assert!(matches!(updates.last().unwrap(), RaffleProgress::Completed { .. }), "Should end with Completed state");
+
+        if let RaffleProgress::Completed { counted, uncounted, .. } = updates.last().unwrap() {
+            assert!(!counted.is_empty() || !uncounted.is_empty(), "Raffle should contain teams");
+            println!("Final raffle result - Counted teams: {:?}, Uncounted teams: {:?}", counted, uncounted);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_raffle_with_progress() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+        
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
+
+        // Setup required state
+        create_active_epoch(&mut budget_system).await;
+        budget_system.add_proposal(
+            "Test Proposal".to_string(),
+            None,
+            None,
+            Some(Utc::now().date_naive()),
+            Some(Utc::now().date_naive()),
+            None
+        ).unwrap();
+
+        // Add some teams
+        budget_system.create_team("Team1".to_string(), "Rep1".to_string(), Some(vec![1000])).unwrap();
+        budget_system.create_team("Team2".to_string(), "Rep2".to_string(), Some(vec![2000])).unwrap();
+
+        // Setup block progression before executing command
+        if let Some(mock_service) = get_mock_service(&budget_system) {
+            setup_block_progression(mock_service).await;
+        }
+
+        // Create the progress stream and collect updates in their own scope
+        let updates = {
+            let progress_stream = budget_system.create_raffle_with_progress(
+                "Test Proposal".to_string(),
+                Some(1), // Small offset for testing
+                None,
+            ).await;
+
+            let mut updates = Vec::new();
+            pin_mut!(progress_stream);
+            
+            while let Some(progress) = progress_stream.next().await {
+                match progress {
+                    Ok(update) => {
+                        updates.push(update.clone());
+                        if matches!(update, RaffleProgress::Completed { .. }) {
+                            break;
+                        }
+                    },
+                    Err(e) => panic!("Unexpected error: {}", e),
+                }
+            }
+            updates
+        }; // progress_stream is dropped here, releasing the mutable borrow
+
+        // Now we can borrow budget_system again
+        
+        // Verify progress sequence
+        assert!(matches!(updates[0], RaffleProgress::Preparing { .. }));
+        assert!(matches!(updates[1], RaffleProgress::WaitingForBlock { .. }));
+        assert!(matches!(updates[2], RaffleProgress::RandomnessAcquired { .. }));
+        assert!(matches!(updates[3], RaffleProgress::Completed { .. }));
+
+        // Verify final state
+        if let RaffleProgress::Completed { ref counted, ref uncounted, .. } = updates[3] {
+            assert_eq!(counted.len() + uncounted.len(), 2); // All teams should be assigned
+        } else {
+            panic!("Final update should be Completed");
+        }
+
+        // Verify raffle was created in system
+        assert_eq!(budget_system.state().raffles().len(), 1);
+    }
+
+    // Test error cases
+    #[tokio::test]
+    async fn test_create_raffle_with_progress_invalid_proposal() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+        
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
+
+        // Setup block progression before executing command
+        if let Some(mock_service) = get_mock_service(&budget_system) {
+            setup_block_progression(mock_service).await;
+        }
+
+        let progress_stream = budget_system.create_raffle_with_progress(
+            "NonExistent".to_string(),
+            None,
+            None,
+        ).await;
+
+        pin_mut!(progress_stream);
+        
+        // Should fail on first update
+        let first_update = progress_stream.next().await.unwrap();
+        assert!(first_update.is_err());
     }
 }

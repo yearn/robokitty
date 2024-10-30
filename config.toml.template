@@ -10,5 +10,3 @@ future_block_offset = 2
 # default_qualified_majority_threshold = 0.7
 # counted_vote_points = 5
 # uncounted_vote_points = 2
-[telegram]
-chat_id = "your_chat_id_here"
