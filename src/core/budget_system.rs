@@ -8,7 +8,7 @@ use crate::core::models::{
     Vote, VoteType, VoteStatus, VoteChoice, VoteCount, VoteParticipation, VoteResult, get_id_by_name
 };
 use crate::core::progress::raffle::{RaffleProgress, RaffleCreationError};
-use crate::core::models::common::NameMatches;
+use crate::core::models::common::{NameMatches, UnpaidRequest, UnpaidRequestsReport};
 use crate::services::ethereum::EthereumServiceTrait;
 use crate::commands::common::{ 
     UpdateProposalDetails, UpdateTeamDetails, Command, CommandExecutor
@@ -2034,6 +2034,97 @@ def hello_world():
         }
     }
 
+    pub fn generate_unpaid_requests_report(
+        &self,
+        output_path: Option<&str>,
+        epoch_name: Option<&str>,
+    ) -> Result<String, Box<dyn Error>> {
+        // Collect unpaid requests
+        let unpaid_requests: Vec<UnpaidRequest> = self
+            .state
+            .proposals()
+            .iter()
+            .filter_map(|(proposal_id, proposal)| {
+                // Check if proposal is approved
+                if !proposal.is_approved() {
+                    return None;
+                }
+
+                // Check if it has budget details
+                let budget_details = match proposal.budget_request_details() {
+                    Some(details) => details,
+                    None => return None,
+                };
+
+                // Skip if already paid
+                if budget_details.is_paid() {
+                    return None;
+                }
+
+                // Get team name
+                let team_name = budget_details
+                    .team()
+                    .and_then(|team_id| self.state.current_state().teams().get(&team_id))
+                    .map(|team| team.name().to_string())
+                    .unwrap_or_else(|| "No Team".to_string());
+
+                // Get epoch name
+                let epoch = self.state.epochs().get(&proposal.epoch_id());
+                
+                // Filter by epoch if specified
+                if let Some(target_epoch) = epoch_name {
+                    if let Some(epoch) = epoch {
+                        if epoch.name() != target_epoch {
+                            return None;
+                        }
+                    }
+                }
+
+                let epoch_name = epoch
+                    .map(|e| e.name().to_string())
+                    .unwrap_or_else(|| "Unknown Epoch".to_string());
+
+                // Get approval date
+                let approved_date = proposal.resolved_at()
+                    .unwrap_or_else(|| Utc::now().date_naive());
+
+                Some(UnpaidRequest::new(
+                    *proposal_id,
+                    proposal.title().to_string(),
+                    team_name,
+                    budget_details.request_amounts().clone(),
+                    budget_details.payment_address().map(|addr| format!("{:?}", addr)),
+                    approved_date,
+                    budget_details.is_loan(),
+                    epoch_name,
+                ))
+            })
+            .collect();
+
+        let report = UnpaidRequestsReport::new(unpaid_requests);
+
+        // Generate output path if not provided
+        let output_path = output_path.map(PathBuf::from).unwrap_or_else(|| {
+            let date = Utc::now().format("%Y%m%d");
+            PathBuf::from(&self.config.state_file)
+                .parent()
+                .unwrap()
+                .join("reports")
+                .join(format!("unpaid_requests_{}.json", date))
+        });
+
+        // Create directory if it doesn't exist
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        // Write report to file
+        let json = serde_json::to_string_pretty(&report)?;
+        fs::write(&output_path, json)?;
+
+        Ok(format!("Generated unpaid requests report at: {:?}", output_path))
+    }
+
 }
 
 #[async_trait]
@@ -2424,6 +2515,12 @@ impl CommandExecutor for BudgetSystem {
             },
             Command::RunScript { .. } => {
                 Err("RunScript command should be handled by the CLI, not the BudgetSystem".into())
+            },
+            Command::GenerateUnpaidRequestsReport { output_path, epoch_name } => {
+                self.generate_unpaid_requests_report(
+                    output_path.as_deref(),
+                    epoch_name.as_deref()
+                ).map(|s| format!("{}\n", s))
             },
         }
     }
@@ -3337,5 +3434,62 @@ mod tests {
         // Should fail on first update
         let first_update = progress_stream.next().await.unwrap();
         assert!(first_update.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_generate_unpaid_requests_report() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
+
+        // Create an epoch
+        let epoch_id = create_active_epoch(&mut budget_system).await;
+
+        // Create a team
+        let team_id = budget_system.create_team(
+            "Test Team".to_string(),
+            "Representative".to_string(),
+            Some(vec![1000]),
+        ).unwrap();
+
+        // Create a proposal with budget request
+        let mut amounts = HashMap::new();
+        amounts.insert("ETH".to_string(), 100.0);
+        
+        let proposal_id = budget_system.add_proposal(
+            "Test Proposal".to_string(),
+            None,
+            Some(BudgetRequestDetails::new(
+                Some(team_id),
+                amounts,
+                None,
+                None,
+                Some(false),
+                Some("0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string()),
+            ).unwrap()),
+            Some(Utc::now().date_naive()),
+            Some(Utc::now().date_naive()),
+            None,
+        ).unwrap();
+
+        // Approve the proposal
+        budget_system.close_with_reason(proposal_id, &Resolution::Approved).unwrap();
+
+        // Generate report
+        let output_path = temp_dir.path().join("test_report.json");
+        let result = budget_system.generate_unpaid_requests_report(
+            Some(output_path.to_str().unwrap()),
+            None,
+        );
+
+        assert!(result.is_ok());
+
+        // Verify report contents
+        let report_content = fs::read_to_string(output_path).unwrap();
+        let report: UnpaidRequestsReport = serde_json::from_str(&report_content).unwrap();
+        
+        assert_eq!(report.unpaid_requests.len(), 1);
+        assert_eq!(report.unpaid_requests[0].title, "Test Proposal");
+        assert_eq!(report.unpaid_requests[0].team_name, "Test Team");
     }
 }

@@ -370,6 +370,11 @@ pub fn parse_cli_args(args: &[String]) -> Result<Command, Box<dyn Error>> {
             let script_file_path = args.get(0).cloned();
             Ok(Command::RunScript { script_file_path })
         },
+        "generate-unpaid-requests-report" => {
+            let output_path = args.get(0).cloned();
+            let epoch_name = args.get(1).cloned();
+            Ok(Command::GenerateUnpaidRequestsReport { output_path, epoch_name })
+        },
         _ => Err(format!("Unknown command: {}", command).into()),
     }
 }

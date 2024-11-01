@@ -107,6 +107,10 @@ pub enum Command {
     RunScript {
         script_file_path: Option<String>,
     },
+    GenerateUnpaidRequestsReport {
+        output_path: Option<String>,
+        epoch_name: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

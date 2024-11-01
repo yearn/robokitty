@@ -109,6 +109,12 @@ pub enum TelegramCommand {
         args: String,
     },
 
+    /// Generate unpaid requests report. 
+    /// Usage: /generate_unpaid_report [epoch_name]
+    GenerateUnpaidReport {
+        args: String,
+    },
+
 }
 
 #[derive(Debug)]
@@ -763,6 +769,40 @@ pub async fn execute_command(
             .map(|s| escape_markdown(&s))
             .map_err(|e| format!("Command failed: {}", e))
         },
+
+        TelegramCommand::GenerateUnpaidReport { args } => {
+            let epoch_name = if args.is_empty() {
+                None
+            } else {
+                Some(args)
+            };
+        
+            let temp_dir = std::env::temp_dir();
+            let output_path = temp_dir.join(format!("unpaid_report_{}.json", Utc::now().timestamp()));
+            
+            // First generate the report file
+            budget_system.generate_unpaid_requests_report(
+                Some(output_path.to_str().unwrap()),
+                epoch_name.as_deref()
+            ).map_err(|e| e.to_string())?;
+        
+            // Read and format the JSON
+            let json_content = std::fs::read_to_string(&output_path)
+                .map_err(|e| format!("Failed to read report: {}", e))?;
+            
+            // Parse and re-serialize to ensure proper formatting
+            let json_value: serde_json::Value = serde_json::from_str(&json_content)
+                .map_err(|e| format!("Failed to parse JSON: {}", e))?;
+            let formatted_json = serde_json::to_string_pretty(&json_value)
+                .map_err(|e| format!("Failed to format JSON: {}", e))?;
+            
+            // Return the formatted message
+            Ok(format!("{}\n\n```json\n\n{}\n\n```", 
+                escape_markdown("Unpaid Requests Report:"),
+                formatted_json
+            ))
+            
+        }
     }
 }
 
@@ -1550,6 +1590,66 @@ mod tests {
         let args = TelegramCommand::parse_command(input).unwrap();
         let result = TelegramCommand::parse_update_proposal(&args);
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_generate_unpaid_report_command() {
+        use crate::core::models::BudgetRequestDetails;
+        use crate::core::models::Resolution;
+
+        let (mut budget_system, _temp_dir) = create_test_budget_system().await;
+        let start_date = Utc::now();
+        let end_date = start_date + chrono::Duration::days(30);
+        budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
+        budget_system.activate_epoch(budget_system.get_epoch_id_by_name("Test Epoch").unwrap()).unwrap();
+
+        let team_id = budget_system.create_team(
+            "Test Team".to_string(),
+            "Representative".to_string(),
+            Some(vec![1000]),
+        ).unwrap();
+
+        let mut amounts = HashMap::new();
+        amounts.insert("ETH".to_string(), 100.0);
+        
+        let proposal_id = budget_system.add_proposal(
+            "Test Proposal".to_string(),
+            None,
+            Some(BudgetRequestDetails::new(
+                Some(team_id),
+                amounts,
+                None,
+                None,
+                Some(false),
+                Some("0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string()),
+            ).unwrap()),
+            Some(Utc::now().date_naive()),
+            Some(Utc::now().date_naive()),
+            None,
+        ).unwrap();
+
+        budget_system.close_with_reason(proposal_id, &Resolution::Approved).unwrap();
+
+        // Test command without epoch name
+        let command = TelegramCommand::GenerateUnpaidReport { 
+            args: "".to_string() 
+        };
+        
+        let result = execute_command(command, &mut budget_system).await;
+        assert!(result.is_ok());
+        
+        let response = result.unwrap();
+        assert!(response.contains("```json"));
+        assert!(response.contains("Test Proposal"));
+        assert!(response.contains("Test Team"));
+
+        // Test with epoch name
+        let command = TelegramCommand::GenerateUnpaidReport { 
+            args: "Test Epoch".to_string() 
+        };
+        
+        let result = execute_command(command, &mut budget_system).await;
+        assert!(result.is_ok());
     }
 
 }
