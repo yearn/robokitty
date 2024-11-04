@@ -24,11 +24,13 @@ pub struct UnpaidRequestsReport {
 pub struct UnpaidRequest {
     pub proposal_id: String,
     pub title: String,
+    pub url: Option<String>,
     pub team_name: String,
     pub amounts: HashMap<String, f64>,
     pub payment_address: Option<String>,
     pub approved_date: String,
     pub is_loan: bool,
+    pub start_date: Option<String>,
     pub epoch_name: String,
 }
 
@@ -51,15 +53,19 @@ impl UnpaidRequest {
         approved_date: chrono::NaiveDate,
         is_loan: bool,
         epoch_name: String,
+        url: Option<String>,
+        start_date: Option<chrono::NaiveDate>,
     ) -> Self {
         Self {
             proposal_id: proposal_id.to_string(),
             title,
+            url,
             team_name,
             amounts,
             payment_address,
             approved_date: approved_date.format("%Y-%m-%d").to_string(),
             is_loan,
+            start_date: start_date.map(|d| d.format("%Y-%m-%d").to_string()),
             epoch_name,
         }
     }
@@ -84,6 +90,8 @@ mod tests {
             NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             false,
             "Q1 2024".to_string(),
+            Some("https://example.com".to_string()),
+            Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()),
         );
         
         let json = serde_json::to_string_pretty(&request).unwrap();
@@ -92,6 +100,8 @@ mod tests {
         let deserialized: UnpaidRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.title, "Test Proposal");
         assert_eq!(deserialized.team_name, "Test Team");
+        assert_eq!(deserialized.url, Some("https://example.com".to_string()));
+        assert_eq!(deserialized.start_date, Some("2024-01-01".to_string()));
     }
 
     #[test]
@@ -108,6 +118,8 @@ mod tests {
             NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             false,
             "Q1 2024".to_string(),
+            Some("https://example.com".to_string()),
+            Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()),
         );
         
         let report = UnpaidRequestsReport::new(vec![request]);

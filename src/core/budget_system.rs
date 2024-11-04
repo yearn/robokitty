@@ -2097,6 +2097,8 @@ def hello_world():
                     approved_date,
                     budget_details.is_loan(),
                     epoch_name,
+                    proposal.url().map(|u| u.to_string()),
+                    budget_details.start_date(),
                 ))
             })
             .collect();
