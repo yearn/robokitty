@@ -104,8 +104,8 @@ impl BudgetSystem {
         self.state.votes().get(id)
     }
 
-    pub fn create_team(&mut self, name: String, representative: String, trailing_monthly_revenue: Option<Vec<u64>>) -> Result<Uuid, Box<dyn Error>> {
-        let team = Team::new(name, representative, trailing_monthly_revenue)?;
+    pub fn create_team(&mut self, name: String, representative: String, trailing_monthly_revenue: Option<Vec<u64>>, address: Option<String>) -> Result<Uuid, Box<dyn Error>> {
+        let team = Team::new(name, representative, trailing_monthly_revenue, address)?;
         let id = self.state.add_team(team);
         self.save_state()?;
         Ok(id)
@@ -172,17 +172,36 @@ impl BudgetSystem {
         FileSystem::save_state(&self.state, &self.config.state_file)
     }
 
-    pub fn add_proposal(&mut self, title: String, url: Option<String>, budget_request_details: Option<BudgetRequestDetails>, announced_at: Option<NaiveDate>, published_at: Option<NaiveDate>, is_historical: Option<bool>) -> Result<Uuid, &'static str> {
-        let current_epoch_id = self.state.current_epoch().ok_or("No active epoch")?;
-    
-        let proposal = Proposal::new(current_epoch_id, title, url, budget_request_details, announced_at, published_at, is_historical);
-        let proposal_id = self.state.add_proposal(&proposal);
+    pub fn add_proposal(
+        &mut self,
+        title: String,
+        url: Option<String>,
+        budget_request_details: Option<BudgetRequestDetails>,
+        announced_at: Option<NaiveDate>,
+        published_at: Option<NaiveDate>,
+        is_historical: Option<bool>
+    ) -> Result<Uuid, &'static str> {
+        let current_epoch_id = self.state.current_epoch()
+            .ok_or("No active epoch")?;
 
+        let proposal = Proposal::new(
+            current_epoch_id,
+            title,
+            url,
+            budget_request_details,
+            announced_at,
+            published_at,
+            is_historical
+        );
+
+        let proposal_id = self.state.add_proposal(&proposal);
+        
         if let Some(epoch) = self.state.get_epoch_mut(&current_epoch_id) {
             epoch.add_proposal(proposal_id);
         } else {
             return Err("Current epoch not found");
         }
+
         self.save_state();
         Ok(proposal_id)
     }
@@ -2147,8 +2166,8 @@ impl CommandExecutor for BudgetSystem {
                 self.set_epoch_reward(&token, amount)?;
                 Ok(format!("Set epoch reward: {} {}", amount, token))
             },
-            Command::AddTeam { name, representative, trailing_monthly_revenue } => {
-                let team_id = self.create_team(name.clone(), representative, trailing_monthly_revenue)?;
+            Command::AddTeam { name, representative, trailing_monthly_revenue, address} => {
+                let team_id = self.create_team(name.clone(), representative, trailing_monthly_revenue, address)?;
                 Ok(format!("Added team: {} ({})", name, team_id))
             },
             Command::UpdateTeam { team_name, updates } => {
@@ -2664,7 +2683,7 @@ mod tests {
         
         // Modify state
         let epoch_id = budget_system.create_epoch("Test Epoch", Utc::now(), Utc::now() + Duration::days(30)).unwrap();
-        let team_id = budget_system.create_team("Test Team".to_string(), "Representative".to_string(), Some(vec![1000, 2000, 3000])).unwrap();
+        let team_id = budget_system.create_team("Test Team".to_string(), "Representative".to_string(), Some(vec![1000, 2000, 3000]), None).unwrap();
 
         // Save state
         budget_system.save_state().unwrap();
@@ -2721,7 +2740,7 @@ mod tests {
         assert!(budget_system.activate_epoch(another_epoch_id).is_err());
 
         // Ensure points are earned before closing an epoch
-        let team_id = budget_system.create_team("Test Team".to_string(), "Rep".to_string(), Some(vec![1000])).unwrap();
+        let team_id = budget_system.create_team("Test Team".to_string(), "Rep".to_string(), Some(vec![1000]), None).unwrap();
         let (proposal_id, raffle_id) = create_proposal_with_raffle(&mut budget_system, "Test Proposal").await;
         let vote_id = budget_system.create_formal_vote(proposal_id, raffle_id, None).unwrap();
         budget_system.cast_votes(vote_id, vec![(team_id, VoteChoice::Yes)]).unwrap();
@@ -2746,7 +2765,8 @@ mod tests {
         let team_id = budget_system.create_team(
             "Test Team".to_string(),
             "Representative".to_string(),
-            Some(vec![1000, 2000, 3000])
+            Some(vec![1000, 2000, 3000]),
+            None
         ).unwrap();
         let team = budget_system.get_team(&team_id).unwrap();
         assert_eq!(team.name(), "Test Team");
@@ -2762,7 +2782,7 @@ mod tests {
         assert!(budget_system.get_team(&team_id).is_none());
 
         // Test creating a team with invalid data (should fail)
-        assert!(budget_system.create_team("".to_string(), "Representative".to_string(), None).is_err());
+        assert!(budget_system.create_team("".to_string(), "Representative".to_string(), None, None).is_err());
     }
 
     #[tokio::test]
@@ -2771,7 +2791,7 @@ mod tests {
         let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
         let mut budget_system = create_test_budget_system(&state_file, None).await;
 
-        let team_id = budget_system.create_team("Test Team".to_string(), "John Doe".to_string(), Some(vec![1000])).unwrap();
+        let team_id = budget_system.create_team("Test Team".to_string(), "John Doe".to_string(), Some(vec![1000]), None).unwrap();
 
         let updates = UpdateTeamDetails {
             name: Some("Updated Team".to_string()),
@@ -2794,7 +2814,7 @@ mod tests {
         let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
         let mut budget_system = create_test_budget_system(&state_file, None).await;
 
-        let team_id = budget_system.create_team("Test Team".to_string(), "John Doe".to_string(), Some(vec![1000])).unwrap();
+        let team_id = budget_system.create_team("Test Team".to_string(), "John Doe".to_string(), Some(vec![1000]), None).unwrap();
 
         let updates = UpdateTeamDetails {
             name: None,
@@ -2819,7 +2839,7 @@ mod tests {
         let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
         let mut budget_system = create_test_budget_system(&state_file, None).await;
 
-        let team_id = budget_system.create_team("Test Team".to_string(), "John Doe".to_string(), Some(vec![1000])).unwrap();
+        let team_id = budget_system.create_team("Test Team".to_string(), "John Doe".to_string(), Some(vec![1000]), None).unwrap();
 
         let updates = UpdateTeamDetails {
             name: None,
@@ -2914,8 +2934,8 @@ mod tests {
         ).unwrap();
 
         // Create some teams
-        let team_id1 = budget_system.create_team("Team 1".to_string(), "Rep 1".to_string(), Some(vec![1000])).unwrap();
-        let team_id2 = budget_system.create_team("Team 2".to_string(), "Rep 2".to_string(), None).unwrap();
+        let team_id1 = budget_system.create_team("Team 1".to_string(), "Rep 1".to_string(), Some(vec![1000]), None).unwrap();
+        let team_id2 = budget_system.create_team("Team 2".to_string(), "Rep 2".to_string(), None, None).unwrap();
 
         // Test preparing a raffle
         let config = budget_system.config().clone();
@@ -2999,8 +3019,8 @@ mod tests {
         let proposal_id = budget_system.add_proposal("Test Proposal".to_string(), None, None, None, None, None).unwrap();
 
         // Create teams
-        let team_id1 = budget_system.create_team("Team 1".to_string(), "Rep 1".to_string(), Some(vec![1000])).unwrap();
-        let team_id2 = budget_system.create_team("Team 2".to_string(), "Rep 2".to_string(), Some(vec![2000])).unwrap();
+        let team_id1 = budget_system.create_team("Team 1".to_string(), "Rep 1".to_string(), Some(vec![1000]), None).unwrap();
+        let team_id2 = budget_system.create_team("Team 2".to_string(), "Rep 2".to_string(), Some(vec![2000]), None).unwrap();
 
         // Prepare and finalize raffle
         let config = budget_system.config().clone();
@@ -3038,7 +3058,7 @@ mod tests {
         let mut budget_system = create_test_budget_system(&state_file, None).await;
     
         let epoch_id = create_active_epoch(&mut budget_system).await;
-        let team_id = budget_system.create_team("Test Team".to_string(), "Rep".to_string(), Some(vec![1000])).unwrap();
+        let team_id = budget_system.create_team("Test Team".to_string(), "Rep".to_string(), Some(vec![1000]), None).unwrap();
         
         // Create proposal and raffle
         let proposal_id = budget_system.add_proposal("Test Proposal".to_string(), None, None, None, None, None).unwrap();
@@ -3085,9 +3105,9 @@ mod tests {
         budget_system.set_epoch_reward("ETH", 1000.0).unwrap();
 
         // Create teams
-        let team_id1 = budget_system.create_team("Team 1".to_string(), "Rep 1".to_string(), Some(vec![1000])).unwrap();
-        let team_id2 = budget_system.create_team("Team 2".to_string(), "Rep 2".to_string(), Some(vec![2000])).unwrap();
-        let team_id3 = budget_system.create_team("Team 3".to_string(), "Rep 3".to_string(), None).unwrap();
+        let team_id1 = budget_system.create_team("Team 1".to_string(), "Rep 1".to_string(), Some(vec![1000]), None).unwrap();
+        let team_id2 = budget_system.create_team("Team 2".to_string(), "Rep 2".to_string(), Some(vec![2000]), None).unwrap();
+        let team_id3 = budget_system.create_team("Team 3".to_string(), "Rep 3".to_string(), None, None).unwrap();
 
         // Create a proposal
         let proposal_id = budget_system.add_proposal(
@@ -3177,7 +3197,7 @@ mod tests {
 
         // Test invalid inputs
         assert!(budget_system.create_epoch("", Utc::now(), Utc::now()).is_err());
-        assert!(budget_system.create_team("".to_string(), "Rep".to_string(), None).is_err());
+        assert!(budget_system.create_team("".to_string(), "Rep".to_string(), None, None).is_err());
         assert!(budget_system.set_epoch_reward("ETH", -100.0).is_err());
 
         // Test overlapping epochs
@@ -3288,8 +3308,8 @@ mod tests {
         create_active_epoch(&mut budget_system).await;
         
         // Add test teams
-        budget_system.create_team("Team 1".to_string(), "Rep 1".to_string(), Some(vec![1000])).unwrap();
-        budget_system.create_team("Team 2".to_string(), "Rep 2".to_string(), Some(vec![2000])).unwrap();
+        budget_system.create_team("Team 1".to_string(), "Rep 1".to_string(), Some(vec![1000]), None).unwrap();
+        budget_system.create_team("Team 2".to_string(), "Rep 2".to_string(), Some(vec![2000]), None).unwrap();
         
         budget_system.add_proposal(
             "Test Proposal".to_string(),
@@ -3360,8 +3380,8 @@ mod tests {
         ).unwrap();
 
         // Add some teams
-        budget_system.create_team("Team1".to_string(), "Rep1".to_string(), Some(vec![1000])).unwrap();
-        budget_system.create_team("Team2".to_string(), "Rep2".to_string(), Some(vec![2000])).unwrap();
+        budget_system.create_team("Team1".to_string(), "Rep1".to_string(), Some(vec![1000]), None).unwrap();
+        budget_system.create_team("Team2".to_string(), "Rep2".to_string(), Some(vec![2000]), None).unwrap();
 
         // Setup block progression before executing command
         if let Some(mock_service) = get_mock_service(&budget_system) {
@@ -3452,6 +3472,7 @@ mod tests {
             "Test Team".to_string(),
             "Representative".to_string(),
             Some(vec![1000]),
+            None
         ).unwrap();
 
         // Create a proposal with budget request

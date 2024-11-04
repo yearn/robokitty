@@ -26,6 +26,7 @@ pub enum Command {
         name: String,
         representative: String,
         trailing_monthly_revenue: Option<Vec<u64>>,
+        address: Option<String>,
     },
     UpdateTeam {
         team_name: String,

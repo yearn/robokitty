@@ -121,7 +121,8 @@ pub enum TelegramCommand {
 struct AddTeamArgs {
     name: String,
     representative: String,
-    revenue: Option<Vec<u64>>
+    revenue: Option<Vec<u64>>,
+    address: Option<String>,
 }
 
 #[derive(Debug)]
@@ -232,12 +233,13 @@ impl TelegramCommand {
 
     fn parse_add_team(args: &[String]) -> Result<AddTeamArgs, String> {
         if args.len() < 2 {
-            return Err("Usage: /add_team <name> <representative> revenue1 revenue2 revenue3".to_string());
+            return Err("Usage: /add_team name:<name> rep:<representative> rev:<revenue1,revenue2,revenue3> addy:<default_payment_address>".to_string());
         }
 
         let mut name = None;
         let mut representative = None;
         let mut revenue = None;
+        let mut address = None;
 
         for arg in args {
             if let Some((key, value)) = arg.split_once(':') {
@@ -250,6 +252,7 @@ impl TelegramCommand {
                             .collect::<Result<Vec<_>, _>>()
                             .map_err(|e| format!("Invalid revenue format: {}", e))?)
                     },
+                    "addy" => address = Some(value.to_string()),
                     _ => return Err(format!("Unknown parameter: {}", key))
                 }
             }
@@ -259,6 +262,7 @@ impl TelegramCommand {
             name: name.ok_or("Missing name parameter")?,
             representative: representative.ok_or("Missing rep parameter")?,
             revenue,
+            address,
         })
     }
 
@@ -610,6 +614,7 @@ pub async fn execute_command(
                 name: team_args.name,
                 representative: team_args.representative,
                 trailing_monthly_revenue: team_args.revenue,
+                address: team_args.address,
             }).await
             .map(|s| escape_markdown(&s))
             .map_err(|e| format!("Command failed: {}", e))
@@ -1607,6 +1612,7 @@ mod tests {
             "Test Team".to_string(),
             "Representative".to_string(),
             Some(vec![1000]),
+            None
         ).unwrap();
 
         let mut amounts = HashMap::new();

@@ -1,7 +1,8 @@
 use uuid::Uuid;
-use std::collections::HashMap;
+use std::{collections::HashMap, str::FromStr};
 use chrono::{DateTime, Utc};
 use serde::{Serialize, Deserialize};
+use ethers::types::{Address, H256};
 
 pub trait NameMatches {
     fn name_matches(&self, name: &str) -> bool;
@@ -71,6 +72,68 @@ impl UnpaidRequest {
     }
 }
 
+// Custom serialization for Ethereum address
+pub mod address_serde {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S>(address: &Option<Address>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match address {
+            Some(addr) => serializer.serialize_str(&format!("{:?}", addr)),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Address>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s: Option<String> = Option::deserialize(deserializer)?;
+        match s {
+            Some(s) => {
+                Address::from_str(&s)
+                    .map(Some)
+                    .map_err(serde::de::Error::custom)
+            }
+            None => Ok(None),
+        }
+    }
+}
+
+// Custom serialization for transaction hash
+pub mod tx_hash_serde {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S>(hash: &Option<H256>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match hash {
+            Some(hash) => serializer.serialize_str(&format!("{:?}", hash)),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<H256>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s: Option<String> = Option::deserialize(deserializer)?;
+        match s {
+            Some(s) => {
+                H256::from_str(&s)
+                    .map(Some)
+                    .map_err(serde::de::Error::custom)
+            }
+            None => Ok(None),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,4 +192,52 @@ mod tests {
         let deserialized: UnpaidRequestsReport = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.unpaid_requests.len(), 1);
     }
+
+    #[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::{Serialize, Deserialize};
+
+    #[derive(Serialize, Deserialize)]
+    struct TestStruct {
+        #[serde(with = "address_serde")]
+        address: Option<Address>,
+        #[serde(with = "tx_hash_serde")]
+        hash: Option<H256>,
+    }
+
+    #[test]
+    fn test_address_serialization() {
+        let addr_str = "0x742d35Cc6634C0532925a3b844Bc454e4438f44e";
+        let addr = Address::from_str(addr_str).unwrap();
+        let test_struct = TestStruct {
+            address: Some(addr),
+            hash: None,
+        };
+
+        let serialized = serde_json::to_string(&test_struct).unwrap();
+        let deserialized: TestStruct = serde_json::from_str(&serialized).unwrap();
+        
+        // Address is case-insensitive for validation but always serializes to lowercase
+        let expected_str = "0x742d35cc6634c0532925a3b844bc454e4438f44e";
+        assert_eq!(format!("{:?}", test_struct.address.unwrap()), expected_str);
+        assert_eq!(format!("{:?}", deserialized.address.unwrap()), expected_str);
+    }
+
+    #[test]
+    fn test_hash_serialization() {
+        let hash_str = "0x0000000000000000000000000000000000000000000000000000000000000000";
+        let hash = H256::from_str(hash_str).unwrap();
+        let test_struct = TestStruct {
+            address: None,
+            hash: Some(hash),
+        };
+
+        let serialized = serde_json::to_string(&test_struct).unwrap();
+        let deserialized: TestStruct = serde_json::from_str(&serialized).unwrap();
+        
+        assert_eq!(format!("{:?}", test_struct.hash.unwrap()), hash_str);
+        assert_eq!(format!("{:?}", deserialized.hash.unwrap()), hash_str);
+    }
+}
 }

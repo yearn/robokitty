@@ -5,6 +5,7 @@ use chrono::{Utc, NaiveDate};
 use std::{collections::HashMap, str::FromStr};
 use serde::{Serialize, Deserialize};
 use ethers::types::{Address, H256};
+use super::common::{address_serde, tx_hash_serde};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Proposal {
@@ -295,68 +296,6 @@ impl Proposal {
 impl NameMatches for Proposal {
     fn name_matches(&self, name: &str) -> bool {
         self.title() == name
-    }
-}
-
-// Custom serialization for Ethereum address
-mod address_serde {
-    use super::*;
-    use serde::{Deserializer, Serializer};
-
-    pub fn serialize<S>(address: &Option<Address>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match address {
-            Some(addr) => serializer.serialize_str(&format!("{:?}", addr)),
-            None => serializer.serialize_none(),
-        }
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Address>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s: Option<String> = Option::deserialize(deserializer)?;
-        match s {
-            Some(s) => {
-                Address::from_str(&s)
-                    .map(Some)
-                    .map_err(serde::de::Error::custom)
-            }
-            None => Ok(None),
-        }
-    }
-}
-
-// Custom serialization for transaction hash
-mod tx_hash_serde {
-    use super::*;
-    use serde::{Deserializer, Serializer};
-
-    pub fn serialize<S>(hash: &Option<H256>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match hash {
-            Some(hash) => serializer.serialize_str(&format!("{:?}", hash)),
-            None => serializer.serialize_none(),
-        }
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<H256>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s: Option<String> = Option::deserialize(deserializer)?;
-        match s {
-            Some(s) => {
-                H256::from_str(&s)
-                    .map(Some)
-                    .map_err(serde::de::Error::custom)
-            }
-            None => Ok(None),
-        }
     }
 }
 

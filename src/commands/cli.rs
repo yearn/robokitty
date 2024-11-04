@@ -12,6 +12,41 @@ use crate::core::models::{
 use crate::core::budget_system::BudgetSystem;
 use crate::app_config::AppConfig;
 use super::common::{BudgetRequestDetailsCommand, Command, CommandExecutor, UpdateTeamDetails, UpdateProposalDetails};
+use clap::{Parser, Subcommand};
+
+#[derive(Parser, Debug)]
+#[command(name = "add-team", about = "Add a new team to the system")]
+struct AddTeamArgs {
+    /// Name of the team
+    #[arg(long, short)]
+    name: String,
+    
+    /// Team representative's name
+    #[arg(long, short)]
+    representative: String,
+    
+    /// Optional monthly revenue values (1-3 comma-separated numbers)
+    #[arg(long)]
+    revenue: Option<String>,
+    
+    /// Optional Ethereum payment address
+    #[arg(long, value_parser = parse_eth_address)]
+    address: Option<String>,
+}
+
+fn parse_eth_address(addr: &str) -> Result<String, String> {
+    if !addr.starts_with("0x") {
+        return Err("Ethereum address must start with 0x".into());
+    }
+    if addr.len() != 42 {
+        return Err("Ethereum address must be 42 characters long".into());
+    }
+    // Basic hex check
+    if !addr[2..].chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("Invalid hex characters in address".into());
+    }
+    Ok(addr.to_string())
+}
 
 pub async fn execute_command<W: Write + Send + 'static>(
     budget_system: &mut BudgetSystem,
@@ -43,6 +78,36 @@ pub fn parse_cli_args(args: &[String]) -> Result<Command, Box<dyn Error>> {
     let args = &args[2..];
 
     match command.as_str() {
+        "add-team" => {
+            // Create a dummy args array just for the add-team command
+            let mut cmd_args = vec!["add-team".to_string()];
+            // Skip the first two args (program name and command)
+            cmd_args.extend_from_slice(&args);
+            
+            // Parse just the add-team command
+            let add_team_args = AddTeamArgs::try_parse_from(cmd_args)?;
+            
+            // Parse the revenue string if it exists
+            let trailing_monthly_revenue = add_team_args.revenue.map(|rev| -> Result<Vec<u64>, String> {
+                let values: Vec<u64> = rev
+                    .split(',')
+                    .map(|v| v.trim().parse::<u64>()
+                        .map_err(|e| format!("Invalid revenue value: {}", e)))
+                    .collect::<Result<Vec<_>, _>>()?;
+                
+                if values.is_empty() || values.len() > 3 {
+                    return Err("Must provide 1-3 revenue values".into());
+                }
+                Ok(values)
+            }).transpose()?;
+            
+            Ok(Command::AddTeam { 
+                name: add_team_args.name,
+                representative: add_team_args.representative,
+                trailing_monthly_revenue,
+                address: add_team_args.address,
+            })
+        },
         "create-epoch" => {
             if args.len() != 3 {
                 return Err("Usage: create-epoch <name> <start_date> <end_date>".into());
@@ -65,19 +130,6 @@ pub fn parse_cli_args(args: &[String]) -> Result<Command, Box<dyn Error>> {
             let token = args[0].clone();
             let amount = args[1].parse()?;
             Ok(Command::SetEpochReward { token, amount })
-        },
-        "add-team" => {
-            if args.len() < 2 {
-                return Err("Usage: add-team <name> <representative> [revenue1 revenue2 revenue3]".into());
-            }
-            let name = args[0].clone();
-            let representative = args[1].clone();
-            let trailing_monthly_revenue = if args.len() > 2 {
-                Some(args[2..].iter().map(|s| s.parse().unwrap()).collect())
-            } else {
-                None
-            };
-            Ok(Command::AddTeam { name, representative, trailing_monthly_revenue })
         },
         "update-team" => {
             if args.len() < 2 {
@@ -515,6 +567,7 @@ mod tests {
             name: "Test Team".to_string(),
             representative: "John Doe".to_string(),
             trailing_monthly_revenue: Some(vec![1000, 2000, 3000]),
+            address: None
         };
         
         let mut stdout = io::sink();
@@ -534,7 +587,7 @@ mod tests {
         let (mut budget_system, config) = create_test_budget_system().await;
         
         // Create a team
-        budget_system.create_team("Test Team".to_string(), "John Doe".to_string(), Some(vec![1000])).unwrap();
+        budget_system.create_team("Test Team".to_string(), "John Doe".to_string(), Some(vec![1000]), None).unwrap();
 
         let command = Command::UpdateTeam {
             team_name: "Test Team".to_string(),
@@ -674,8 +727,8 @@ mod tests {
         let (mut budget_system, config, _) = create_test_budget_system_with_proposal().await;
 
         // Add some teams
-        budget_system.create_team("Team 1".to_string(), "Rep 1".to_string(), Some(vec![1000])).unwrap();
-        budget_system.create_team("Team 2".to_string(), "Rep 2".to_string(), Some(vec![2000])).unwrap();
+        budget_system.create_team("Team 1".to_string(), "Rep 1".to_string(), Some(vec![1000]), None).unwrap();
+        budget_system.create_team("Team 2".to_string(), "Rep 2".to_string(), Some(vec![2000]), None).unwrap();
 
         let command = Command::ImportPredefinedRaffle {
             proposal_name: "Test Proposal".to_string(),
@@ -710,8 +763,8 @@ mod tests {
         execute_command(&mut budget_system, create_raffle_command, &config, &mut stdout).await.unwrap();
 
         // Add some teams
-        budget_system.create_team("Team 1".to_string(), "Rep 1".to_string(), Some(vec![1000])).unwrap();
-        budget_system.create_team("Team 2".to_string(), "Rep 2".to_string(), Some(vec![2000])).unwrap();
+        budget_system.create_team("Team 1".to_string(), "Rep 1".to_string(), Some(vec![1000]), None).unwrap();
+        budget_system.create_team("Team 2".to_string(), "Rep 2".to_string(), Some(vec![2000]), None).unwrap();
 
         // Get the raffle result to determine which teams are counted and uncounted
         let raffle = budget_system.state().raffles().values().next().unwrap();
@@ -772,6 +825,7 @@ mod tests {
                 name: format!("Team {}", i),
                 representative: format!("Rep {}", i),
                 trailing_monthly_revenue: if i <= 5 { Some(vec![1000 * i, 2000 * i, 3000 * i]) } else { None },
+                address: None,
             };
             execute_command(&mut budget_system, add_team_command, &config, &mut stdout).await
                 .unwrap_or_else(|e| panic!("Failed to add team {}: {}", i, e));
@@ -941,7 +995,8 @@ mod tests {
         let command = Command::AddTeam {
             name: "Invalid Team".to_string(),
             representative: "John Doe".to_string(),
-            trailing_monthly_revenue: Some(vec![]),  // Empty revenue for Earner status
+            trailing_monthly_revenue: Some(vec![]),
+            address: None,
         };  
         let mut stdout = io::sink();
         let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
@@ -1055,5 +1110,94 @@ mod tests {
         assert!(parse_cli_args(&args).is_err());
     }
 
+    #[test]
+    fn test_parse_eth_address() {
+        assert!(parse_eth_address("0x742d35Cc6634C0532925a3b844Bc454e4438f44e").is_ok());
+        assert!(parse_eth_address("742d35Cc6634C0532925a3b844Bc454e4438f44e").is_err()); // no 0x
+        assert!(parse_eth_address("0x742d35").is_err()); // too short
+        assert!(parse_eth_address("0x742d35Cc6634C0532925a3b844Bc454e4438f44eXX").is_err()); // invalid hex
+    }
+
+    #[test]
+    fn test_add_team_command_basic() {
+        let args = vec![
+            "robokitty".to_string(),
+            "add-team".to_string(),
+            "--name".to_string(),
+            "Test Team".to_string(),
+            "--representative".to_string(),
+            "John Doe".to_string(),
+        ];
+        
+        let cmd = parse_cli_args(&args).unwrap();
+        match cmd {
+            Command::AddTeam { name, representative, trailing_monthly_revenue, address } => {
+                assert_eq!(name, "Test Team");
+                assert_eq!(representative, "John Doe");
+                assert!(trailing_monthly_revenue.is_none());
+                assert!(address.is_none());
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_add_team_command_full() {
+        let args = vec![
+            "robokitty".to_string(),
+            "add-team".to_string(),
+            "--name".to_string(),
+            "Test Team".to_string(),
+            "--representative".to_string(),
+            "John Doe".to_string(),
+            "--revenue".to_string(),
+            "1000,2000,3000".to_string(),
+            "--address".to_string(),
+            "0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string(),
+        ];
+        
+        let cmd = parse_cli_args(&args).unwrap();
+        match cmd {
+            Command::AddTeam { name, representative, trailing_monthly_revenue, address } => {
+                assert_eq!(name, "Test Team");
+                assert_eq!(representative, "John Doe");
+                assert_eq!(trailing_monthly_revenue, Some(vec![1000, 2000, 3000]));
+                assert_eq!(address, Some("0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string()));
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_add_team_command_invalid_revenue() {
+        let args = vec![
+            "robokitty".to_string(),
+            "add-team".to_string(),
+            "-n".to_string(),
+            "Test Team".to_string(),
+            "-r".to_string(),
+            "John Doe".to_string(),
+            "--revenue".to_string(),
+            "1000,2000,3000,4000".to_string(),
+        ];
+        
+        assert!(parse_cli_args(&args).is_err());
+    }
+
+    #[test]
+    fn test_add_team_command_invalid_address() {
+        let args = vec![
+            "robokitty".to_string(),
+            "add-team".to_string(),
+            "-n".to_string(),
+            "Test Team".to_string(),
+            "-r".to_string(),
+            "John Doe".to_string(),
+            "--address".to_string(),
+            "invalid".to_string(),
+        ];
+        
+        assert!(parse_cli_args(&args).is_err());
+    }
 
 }

@@ -356,7 +356,7 @@ mod tests {
         Team::new(name.to_string(), "Representative".to_string(), match status {
             TeamStatus::Earner { .. } => Some(vec![1000, 2000, 3000]),
             _ => None,
-        }).unwrap()
+        }, None).unwrap()
     }
 
     // Helper function to create 9 mock teams (5 earners, 4 supporters)
