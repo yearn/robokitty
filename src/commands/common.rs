@@ -120,6 +120,7 @@ pub struct UpdateTeamDetails {
     pub representative: Option<String>,
     pub status: Option<String>,
     pub trailing_monthly_revenue: Option<Vec<u64>>,
+    pub address: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

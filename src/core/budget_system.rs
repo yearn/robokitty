@@ -147,6 +147,10 @@ impl BudgetSystem {
                 return Err("Cannot update trailing monthly revenue for non-Earner status".into());
             }
         }
+
+        if let Some(address) = updates.address {
+            team.set_payment_address(Some(address));
+        }
         
         self.save_state()?;
         Ok(())
@@ -2798,6 +2802,7 @@ mod tests {
             representative: Some("Jane Doe".to_string()),
             status: Some("Supporter".to_string()),
             trailing_monthly_revenue: None,
+            address: None
         };
 
         budget_system.update_team(team_id, updates).unwrap();
@@ -2821,6 +2826,7 @@ mod tests {
             representative: None,
             status: Some("Earner".to_string()),
             trailing_monthly_revenue: Some(vec![2000, 3000, 4000]),
+            address: None,
         };
 
         budget_system.update_team(team_id, updates).unwrap();
@@ -2846,6 +2852,7 @@ mod tests {
             representative: None,
             status: Some("InvalidStatus".to_string()),
             trailing_monthly_revenue: None,
+            address: None,
         };
 
         assert!(budget_system.update_team(team_id, updates).is_err());

@@ -131,7 +131,8 @@ struct UpdateTeamArgs {
     new_name: Option<String>,
     representative: Option<String>,
     status: Option<String>,
-    revenue: Option<Vec<u64>>
+    revenue: Option<Vec<u64>>,
+    address: Option<String>,
 }
 
 #[derive(Debug)]
@@ -272,6 +273,7 @@ impl TelegramCommand {
         let mut representative = None;
         let mut status = None;
         let mut revenue = None;
+        let mut address = None;
 
         for arg in args {
             if let Some((key, value)) = arg.split_once(':') {
@@ -292,6 +294,7 @@ impl TelegramCommand {
                             .collect::<Result<Vec<_>, _>>()
                             .map_err(|e| format!("Invalid revenue format: {}", e))?)
                     },
+                    "address" => address = Some(value.to_string()),
                     _ => return Err(format!("Unknown parameter: {}", key))
                 }
             }
@@ -303,6 +306,7 @@ impl TelegramCommand {
             representative,
             status,
             revenue,
+            address
         })
     }
 
@@ -644,6 +648,7 @@ pub async fn execute_command(
                     representative: update_args.representative,
                     status: update_args.status,
                     trailing_monthly_revenue: update_args.revenue,
+                    address: update_args.address,
                 }
             }).await
             .map(|s| escape_markdown(&s))
