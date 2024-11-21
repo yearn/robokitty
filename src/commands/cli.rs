@@ -24,165 +24,216 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Team management commands
+    /// Manage teams
     Team {
         #[command(subcommand)]
         command: TeamCommands,
     },
     
-    /// Epoch management commands  
+    /// Manage epochs  
     Epoch {
         #[command(subcommand)]
         command: EpochCommands, 
     },
-    /// Proposal management commands
+    /// Manage proposals
     Proposal {
         #[command(subcommand)]
         command: ProposalCommands,
     },
-    /// Vote management commands
+    /// Manage voting
    Vote {
     #[command(subcommand)]
     command: VoteCommands,
     },
-    /// Raffle management commands 
+    /// Manage raffles 
     Raffle {
         #[command(subcommand)]
         command: RaffleCommands,
-    }
+    },
+    /// Print reports
+    Report {
+        #[command(subcommand)]
+        command: ReportCommands,
+    },
+    /// Import existing raffles and votes
+    Import {
+        #[command(subcommand)]
+        command: ImportCommands,
+    },
+    /// Run JSON script
+    RunScript {
+        script_file_path: Option<String>,
+    }, 
 }
 
 #[derive(Subcommand)]
 pub enum TeamCommands {
-    /// Add a new team
+    /// Add a new team to the system
     Add {
-        /// Team name
-        #[arg(long, short)]
+        /// Team's display name
+        #[arg(long, value_name = "NAME")]
         name: String,
-        /// Representative name
-        #[arg(long, short)]
+        
+        /// Team's representative contact
+        #[arg(long, value_name = "REPRESENTATIVE")] 
         representative: String,
+        
         /// Monthly revenue values (comma separated)
-        #[arg(long)]
+        #[arg(long, value_name = "REVENUE")]
         revenue: Option<String>,
+        
         /// Ethereum payment address
-        #[arg(long)]
+        #[arg(long, value_name = "ADDRESS")]
         address: Option<String>,
     },
-    /// Update a team
+
+    /// Update an existing team
     Update {
-        /// Team name
+        /// Current team name
+        #[arg(value_name = "TEAM")]
         name: String,
-        /// New team name 
-        #[arg(long)]
+        
+        /// New team name
+        #[arg(long, value_name = "NAME")]
         new_name: Option<String>,
+        
         /// New representative
-        #[arg(long)]
+        #[arg(long, value_name = "REPRESENTATIVE")]
         representative: Option<String>,
+        
         /// New status (Earner/Supporter/Inactive)
-        #[arg(long)]
+        #[arg(long, value_name = "STATUS")]
         status: Option<String>,
-        /// New revenue values (comma separated)
-        #[arg(long)]
+        
+        /// New revenue values
+        #[arg(long, value_name = "REVENUE")]
         revenue: Option<String>,
-        /// New Ethereum payment address
-        #[arg(long)]
+        
+        /// New payment address 
+        #[arg(long, value_name = "ADDRESS")]
         address: Option<String>,
-    },
+    }
 }
 
 #[derive(Subcommand)] 
 pub enum EpochCommands {
-    /// Create a new epoch
+    /// Create a new epoch period
     Create {
-        /// Epoch name
+        /// Epoch name/identifier
+        #[arg(value_name = "NAME")]
         name: String,
+        
         /// Start date (YYYY-MM-DD)
+        #[arg(value_name = "START_DATE")]
         start_date: String,
-        /// End date (YYYY-MM-DD) 
+        
+        /// End date (YYYY-MM-DD)
+        #[arg(value_name = "END_DATE")]
         end_date: String,
     },
-    /// Activate an epoch
-   Activate {
-    /// Epoch name 
-    name: String,
+
+    /// Activate an epoch for proposals
+    Activate {
+        /// Epoch name to activate
+        #[arg(value_name = "NAME")]
+        name: String,
     },
-    /// Set epoch reward
+
+    /// Set epoch reward amount
     SetReward {
-        /// Token name
+        /// Token symbol (e.g. ETH)
+        #[arg(value_name = "TOKEN")]
         token: String,
+        
         /// Reward amount
+        #[arg(value_name = "AMOUNT")]
         amount: f64,
     },
+
+    /// Close an epoch
+    Close {
+        /// Optional epoch name (uses active if omitted)
+        #[arg(value_name = "NAME")]
+        epoch_name: Option<String>,
+    }
 }
 
 #[derive(Subcommand)]
 pub enum ProposalCommands {
-    /// Add a new proposal
-    Add {
-        /// Proposal title
-        #[arg(long)]
-        title: String,
-        /// Proposal URL
-        #[arg(long)]
-        url: Option<String>,
-        /// Team name
-        #[arg(long)]
-        team: Option<String>,
-        /// Request amounts (format: ETH:100.5,USD:1000)
-        #[arg(long)]
-        amounts: Option<String>,
-        /// Start date (YYYY-MM-DD)
-        #[arg(long)]
-        start: Option<String>,
-        /// End date (YYYY-MM-DD)
-        #[arg(long)]
-        end: Option<String>,
-        /// Is loan
-        #[arg(long)]
-        loan: Option<bool>,
-        /// Payment address
-        #[arg(long)]
-        address: Option<String>,
-    },
+   /// Add a new proposal
+   Add {
+       /// Proposal title
+       #[arg(long, value_name = "TITLE")]
+       title: String,
 
-    /// Close a proposal
-    Close {
-        /// Proposal name
-        name: String,
-        /// Resolution (Approved/Rejected/Invalid/Duplicate/Retracted)
-        resolution: String,
-    },
+       /// Proposal URL
+       #[arg(long, value_name = "URL")] 
+       url: Option<String>,
+       
+       /// Team name
+       #[arg(long, value_name = "TEAM")]
+       team: Option<String>,
+       
+       /// Request amounts (format: ETH:100.5,USD:1000)
+       #[arg(long, value_name = "AMOUNTS")]
+       amounts: Option<String>,
+       
+       /// Start date (YYYY-MM-DD)
+       #[arg(long, value_name = "START")]
+       start: Option<String>,
+       
+       /// End date (YYYY-MM-DD)
+       #[arg(long, value_name = "END")]
+       end: Option<String>,
+       
+       /// Is loan request
+       #[arg(long)]
+       loan: Option<bool>,
+       
+       /// Payment address
+       #[arg(long, value_name = "ADDRESS")]
+       address: Option<String>,
+   },
 
-    /// Update a proposal
+   /// Update an existing proposal 
    Update {
-        /// Proposal name
-        name: String,
-        /// New title
-        #[arg(long)]
-        title: Option<String>,
-        /// New URL
-        #[arg(long)]
-        url: Option<String>,
-        /// Team name
-        #[arg(long)] 
-        team: Option<String>,
-        /// Request amounts
-        #[arg(long)]
-        amounts: Option<String>,
-        /// Start date
-        #[arg(long)]
-        start: Option<String>,
-        /// End date 
-        #[arg(long)]
-        end: Option<String>,
-        /// Is loan
-        #[arg(long)]
-        loan: Option<bool>,
-        /// Payment address
-        #[arg(long)]
-        address: Option<String>,
-    },
+       /// Proposal name to update
+       #[arg(value_name = "NAME")]
+       name: String,
+       
+       #[arg(long, value_name = "TITLE")]
+       title: Option<String>,
+       
+       #[arg(long, value_name = "URL")]
+       url: Option<String>,
+       
+       #[arg(long, value_name = "TEAM")]
+       team: Option<String>,
+       
+       #[arg(long, value_name = "AMOUNTS")] 
+       amounts: Option<String>,
+       
+       #[arg(long, value_name = "START")]
+       start: Option<String>,
+       
+       #[arg(long, value_name = "END")]
+       end: Option<String>,
+       
+       #[arg(long)]
+       loan: Option<bool>,
+       
+       #[arg(long, value_name = "ADDRESS")]
+       address: Option<String>,
+   },
+
+   /// Close a proposal
+   Close {
+       /// Proposal name
+       name: String,
+       
+       /// Resolution (Approved/Rejected/Invalid/Duplicate/Retracted)
+       resolution: String,
+   },
 }
 
 #[derive(Subcommand)]
@@ -191,17 +242,21 @@ pub enum VoteCommands {
    Process {
        /// Proposal name
        name: String,
+       
        /// Counted votes (format: Team1:Yes,Team2:No)
-       #[arg(long)]
+       #[arg(long, value_name = "COUNTED")]
        counted: String,
-       /// Uncounted votes (format: Team3:Yes,Team4:No) 
-       #[arg(long)]
+       
+       /// Uncounted votes (format: Team3:Yes,Team4:No)
+       #[arg(long, value_name = "UNCOUNTED")]  
        uncounted: String,
+       
        /// Vote opened date (YYYY-MM-DD)
-       #[arg(long)]
+       #[arg(long, value_name = "OPENED")]
        opened: Option<String>,
+       
        /// Vote closed date (YYYY-MM-DD)
-       #[arg(long)]
+       #[arg(long, value_name = "CLOSED")]
        closed: Option<String>,
    }
 }
@@ -212,14 +267,98 @@ pub enum RaffleCommands {
    Create {
        /// Proposal name
        name: String,
+       
        /// Block offset
-       #[arg(long)]
+       #[arg(long, value_name = "OFFSET")]
        block_offset: Option<u64>,
+       
        /// Excluded teams (comma separated)
-       #[arg(long)]
+       #[arg(long, value_name = "EXCLUDED")]
        excluded: Option<String>,
+   }
+}
+
+#[derive(Subcommand)]
+pub enum ReportCommands {
+   /// Print team report
+   Team,
+
+   /// Print epoch state report
+   EpochState,
+
+   /// Print team vote participation
+   TeamParticipation {
+       team_name: String,
+       epoch_name: Option<String>,
+   },
+
+   /// Print point report
+   Points {
+       #[arg(long, value_name = "EPOCH")]
+       epoch_name: Option<String>,
+   },
+
+   /// Generate closed proposals report
+   ClosedProposals {
+       #[arg(value_name = "EPOCH")]
+       epoch_name: String,
+   },
+
+   /// Generate end of epoch report
+   EndOfEpoch {
+       #[arg(value_name = "EPOCH")] 
+       epoch_name: String,
+   },
+
+   /// Generate unpaid requests report
+   UnpaidRequests {
+       #[arg(long, value_name = "PATH")]
+       output_path: Option<String>,
+       #[arg(long, value_name = "EPOCH")]
+       epoch_name: Option<String>,
+   },
+
+   /// Generate report for specific proposal
+   ForProposal {
+       #[arg(value_name = "PROPOSAL")]
+       proposal_name: String,
    },
 }
+
+
+#[derive(Subcommand)]
+pub enum ImportCommands {
+   /// Import a predefined raffle
+   PredefinedRaffle {
+       proposal_name: String,
+       counted_teams: Vec<String>,
+       uncounted_teams: Vec<String>, 
+       total_counted_seats: usize,
+       max_earner_seats: usize,
+   },
+
+   /// Import historical vote
+   HistoricalVote {
+       proposal_name: String,
+       passed: bool,
+       participating_teams: Vec<String>,
+       non_participating_teams: Vec<String>,
+       counted_points: Option<u32>,
+       uncounted_points: Option<u32>,
+   },
+
+   /// Import historical raffle
+   HistoricalRaffle {
+       proposal_name: String,
+       initiation_block: u64,
+       randomness_block: u64,
+       team_order: Option<Vec<String>>,
+       excluded_teams: Option<Vec<String>>,
+       total_counted_seats: Option<usize>,
+       max_earner_seats: Option<usize>,
+   }
+}
+
 
 fn parse_eth_address(addr: &str) -> Result<String, String> {
     if !addr.starts_with("0x") {
@@ -257,6 +396,7 @@ fn parse_votes(votes_str: &str) -> Result<HashMap<String, VoteChoice>, Box<dyn E
 impl Cli {
     pub fn into_command(self) -> Result<Command, Box<dyn Error>> {
         match self.command {
+
             Commands::Team { command } => match command {
                 TeamCommands::Add { name, representative, revenue, address } => {
                     Ok(Command::AddTeam {
@@ -287,6 +427,7 @@ impl Cli {
                     })
                 }
             },
+
             Commands::Epoch { command } => match command {
                 EpochCommands::Create { name, start_date, end_date } => {
                     let start = DateTime::parse_from_rfc3339(&start_date)?
@@ -300,8 +441,12 @@ impl Cli {
                 },
                 EpochCommands::SetReward { token, amount } => {
                     Ok(Command::SetEpochReward { token, amount }) 
+                },
+                EpochCommands::Close { epoch_name } => {
+                    Ok(Command::CloseEpoch { epoch_name })
                 }
             },
+
             Commands::Proposal { command } => match command {
                 ProposalCommands::Add { title, url, team, amounts, start, end, loan, address } => {
                     let budget_details = if team.is_some() || amounts.is_some() {
@@ -358,6 +503,7 @@ impl Cli {
                     })
                 },
             },
+
             Commands::Vote { command } => match command {
                 VoteCommands::Process { name, counted, uncounted, opened, closed } => {
                     Ok(Command::CreateAndProcessVote {
@@ -369,6 +515,7 @@ impl Cli {
                     })
                 }
             },
+
             Commands::Raffle { command } => match command {
                 RaffleCommands::Create { name, block_offset, excluded } => {
                     Ok(Command::CreateRaffle {
@@ -377,7 +524,92 @@ impl Cli {
                         excluded_teams: excluded.map(|e| e.split(',').map(String::from).collect()),
                     })
                 }
-            }
+            },
+
+            Commands::Report { command } => match command {
+                ReportCommands::Team => {
+                    Ok(Command::PrintTeamReport)
+                },
+                ReportCommands::EpochState => {
+                    Ok(Command::PrintEpochState)
+                },
+                ReportCommands::TeamParticipation { team_name, epoch_name } => {
+                    Ok(Command::PrintTeamVoteParticipation { team_name, epoch_name })
+                },
+                ReportCommands::Points { epoch_name } => {
+                    Ok(Command::PrintPointReport { epoch_name })
+                },
+                ReportCommands::EndOfEpoch { epoch_name } => {
+                    Ok(Command::GenerateEndOfEpochReport { epoch_name })
+                },
+                ReportCommands::UnpaidRequests { output_path, epoch_name } => {
+                    Ok(Command::GenerateUnpaidRequestsReport { output_path, epoch_name })
+                },
+                ReportCommands::ForProposal { proposal_name } => {
+                    Ok(Command::GenerateReportForProposal { proposal_name })
+                },
+                ReportCommands::ClosedProposals { epoch_name } => {
+                    Ok(Command::GenerateReportsForClosedProposals { epoch_name })
+                },
+            },
+
+            Commands::Import { command } => match command {
+                ImportCommands::PredefinedRaffle { 
+                    proposal_name, 
+                    counted_teams,
+                    uncounted_teams,
+                    total_counted_seats,
+                    max_earner_seats 
+                } => {
+                    Ok(Command::ImportPredefinedRaffle {
+                        proposal_name,
+                        counted_teams,
+                        uncounted_teams, 
+                        total_counted_seats,
+                        max_earner_seats
+                    })
+                },
+                ImportCommands::HistoricalVote {
+                    proposal_name,
+                    passed,
+                    participating_teams,
+                    non_participating_teams,
+                    counted_points,
+                    uncounted_points
+                } => {
+                    Ok(Command::ImportHistoricalVote {
+                        proposal_name,
+                        passed,
+                        participating_teams,
+                        non_participating_teams,
+                        counted_points,
+                        uncounted_points
+                    })
+                },
+                ImportCommands::HistoricalRaffle {
+                    proposal_name,
+                    initiation_block,
+                    randomness_block,
+                    team_order,
+                    excluded_teams,
+                    total_counted_seats,
+                    max_earner_seats
+                } => {
+                    Ok(Command::ImportHistoricalRaffle {
+                        proposal_name,
+                        initiation_block,
+                        randomness_block,
+                        team_order,
+                        excluded_teams,
+                        total_counted_seats,
+                        max_earner_seats
+                    })
+                }
+            },
+
+            Commands::RunScript { script_file_path } => {
+                Ok(Command::RunScript { script_file_path })
+            },
         }
     }
 }
@@ -424,368 +656,6 @@ fn parse_amounts(amounts_str: &str) -> Result<HashMap<String, f64>, Box<dyn Erro
         .collect()
 }
 
-// pub fn parse_cli_args(args: &[String]) -> Result<Command, Box<dyn Error>> {
-//     if args.len() < 2 {
-//         return Err("Not enough arguments. Usage: robokitty_script <command> [args...]".into());
-//     }
-
-//     let command = &args[1];
-//     let args = &args[2..];
-
-//     match command.as_str() {
-//         "add-team" => {
-//             // Create a dummy args array just for the add-team command
-//             let mut cmd_args = vec!["add-team".to_string()];
-//             // Skip the first two args (program name and command)
-//             cmd_args.extend_from_slice(&args);
-            
-//             // Parse just the add-team command
-//             let add_team_args = AddTeamArgs::try_parse_from(cmd_args)?;
-            
-//             // Parse the revenue string if it exists
-//             let trailing_monthly_revenue = add_team_args.revenue.map(|rev| -> Result<Vec<u64>, String> {
-//                 let values: Vec<u64> = rev
-//                     .split(',')
-//                     .map(|v| v.trim().parse::<u64>()
-//                         .map_err(|e| format!("Invalid revenue value: {}", e)))
-//                     .collect::<Result<Vec<_>, _>>()?;
-                
-//                 if values.is_empty() || values.len() > 3 {
-//                     return Err("Must provide 1-3 revenue values".into());
-//                 }
-//                 Ok(values)
-//             }).transpose()?;
-            
-//             Ok(Command::AddTeam { 
-//                 name: add_team_args.name,
-//                 representative: add_team_args.representative,
-//                 trailing_monthly_revenue,
-//                 address: add_team_args.address,
-//             })
-//         },
-//         "create-epoch" => {
-//             if args.len() != 3 {
-//                 return Err("Usage: create-epoch <name> <start_date> <end_date>".into());
-//             }
-//             let name = args[0].clone();
-//             let start_date = DateTime::parse_from_rfc3339(&args[1])?.with_timezone(&Utc);
-//             let end_date = DateTime::parse_from_rfc3339(&args[2])?.with_timezone(&Utc);
-//             Ok(Command::CreateEpoch { name, start_date, end_date })
-//         },
-//         "activate-epoch" => {
-//             if args.len() != 1 {
-//                 return Err("Usage: activate-epoch <name>".into());
-//             }
-//             Ok(Command::ActivateEpoch { name: args[0].clone() })
-//         },
-//         "set-epoch-reward" => {
-//             if args.len() != 2 {
-//                 return Err("Usage: set-epoch-reward <token> <amount>".into());
-//             }
-//             let token = args[0].clone();
-//             let amount = args[1].parse()?;
-//             Ok(Command::SetEpochReward { token, amount })
-//         },
-//         "update-team" => {
-//             if args.len() < 2 {
-//                 return Err("Usage: update-team <name> [--new-name <name>] [--representative <name>] [--status <status>] [--revenue <rev1> <rev2> <rev3>]".into());
-//             }
-//             let team_name = args[0].clone();
-//             let mut updates = UpdateTeamDetails {
-//                 name: None,
-//                 representative: None,
-//                 status: None,
-//                 trailing_monthly_revenue: None,
-//             };
-//             let mut i = 1;
-//             while i < args.len() {
-//                 match args[i].as_str() {
-//                     "--new-name" => {
-//                         updates.name = Some(args[i+1].clone());
-//                         i += 2;
-//                     },
-//                     "--representative" => {
-//                         updates.representative = Some(args[i+1].clone());
-//                         i += 2;
-//                     },
-//                     "--status" => {
-//                         updates.status = Some(args[i+1].clone());
-//                         i += 2;
-//                     },
-//                     "--revenue" => {
-//                         updates.trailing_monthly_revenue = Some(vec![
-//                             args[i+1].parse()?,
-//                             args[i+2].parse()?,
-//                             args[i+3].parse()?
-//                         ]);
-//                         i += 4;
-//                     },
-//                     _ => return Err(format!("Unknown option: {}", args[i]).into()),
-//                 }
-//             }
-//             Ok(Command::UpdateTeam { team_name, updates })
-//         },
-//         "add-proposal" => {
-//             if args.len() < 2 {
-//                 return Err("Usage: add-proposal <title> <url> [--team TeamName] [--amounts ETH:100.5,USD:1000] [--start 2024-01-01] [--end 2024-12-31] [--announced 2024-01-01] [--published 2024-01-01] [--loan true] [--address 0x...]".into());
-//             }
-
-//             let title = args[0].clone();
-//             let url = args[1].clone();
-//             let mut team = None;
-//             let mut amounts = None;
-//             let mut start_date = None;
-//             let mut end_date = None;
-//             let mut announced_at = None;
-//             let mut published_at = None;
-//             let mut is_loan = None;
-//             let mut payment_address = None;
-
-//             let mut i = 2;
-//             while i < args.len() {
-//                 match args[i].as_str() {
-//                     "--team" => {
-//                         team = Some(args[i + 1].clone());
-//                         i += 2;
-//                     },
-//                     "--amounts" => {
-//                         amounts = Some(args[i + 1].split(',')
-//                             .map(|pair| {
-//                                 let parts: Vec<&str> = pair.split(':').collect();
-//                                 if parts.len() != 2 {
-//                                     return Err(format!("Invalid amount format: {}. Expected token:amount", pair));
-//                                 }
-//                                 let amount = parts[1].parse::<f64>()
-//                                     .map_err(|_| format!("Invalid amount {}: {}", parts[1], pair))?;
-//                                 Ok((parts[0].to_string(), amount))
-//                             })
-//                             .collect::<Result<HashMap<_, _>, String>>()?);
-//                         i += 2;
-//                     },
-//                     "--start" => {
-//                         start_date = Some(NaiveDate::parse_from_str(&args[i + 1], "%Y-%m-%d")?);
-//                         i += 2;
-//                     },
-//                     "--end" => {
-//                         end_date = Some(NaiveDate::parse_from_str(&args[i + 1], "%Y-%m-%d")?);
-//                         i += 2;
-//                     },
-//                     "--announced" => {
-//                         announced_at = Some(NaiveDate::parse_from_str(&args[i + 1], "%Y-%m-%d")?);
-//                         i += 2;
-//                     },
-//                     "--published" => {
-//                         published_at = Some(NaiveDate::parse_from_str(&args[i + 1], "%Y-%m-%d")?);
-//                         i += 2;
-//                     },
-//                     "--loan" => {
-//                         is_loan = Some(args[i + 1].parse()?);
-//                         i += 2;
-//                     },
-//                     "--address" => {
-//                         payment_address = Some(args[i + 1].clone());
-//                         i += 2;
-//                     },
-//                     _ => return Err(format!("Unknown option: {}", args[i]).into()),
-//                 }
-//             }
-
-//             Ok(Command::AddProposal {
-//                 title,
-//                 url: Some(url),
-//                 budget_request_details: if team.is_some() || amounts.is_some() {
-//                     Some(BudgetRequestDetailsCommand {
-//                         team,
-//                         request_amounts: amounts,
-//                         start_date,
-//                         end_date,
-//                         is_loan,
-//                         payment_address,
-//                     })
-//                 } else {
-//                     None
-//                 },
-//                 announced_at,
-//                 published_at,
-//                 is_historical: None,
-//             })
-//         },
-//         "update-proposal" => {
-//             if args.len() < 2 {
-//                 return Err("Usage: update-proposal <name> [--title <title>] [--url <url>] [--team <name>] \
-//                         [--amounts <token:amount>] [--start <date>] [--end <date>] [--announced <date>] \
-//                         [--published <date>] [--resolved <date>] [--loan <true/false>] [--address <eth_address>]".into());
-//             }
-//             let proposal_name = args[0].clone();
-//             let mut updates = UpdateProposalDetails {
-//                 title: None,
-//                 url: None,
-//                 budget_request_details: None,
-//                 announced_at: None,
-//                 published_at: None,
-//                 resolved_at: None,
-//             };
-            
-//             let mut i = 1;
-//             let mut budget_details = BudgetRequestDetailsCommand {
-//                 team: None,
-//                 request_amounts: None,
-//                 start_date: None,
-//                 end_date: None,
-//                 is_loan: None,
-//                 payment_address: None,
-//             };
-//             let mut has_budget_changes = false;
-
-//             while i < args.len() {
-//                 match args[i].as_str() {
-//                     // ... existing matches ...
-//                     "--loan" => {
-//                         budget_details.is_loan = Some(args[i+1].parse()
-//                             .map_err(|_| format!("Invalid loan value: {}", args[i+1]))?);
-//                         has_budget_changes = true;
-//                         i += 2;
-//                     },
-//                     "--address" => {
-//                         budget_details.payment_address = Some(args[i+1].clone());
-//                         has_budget_changes = true;
-//                         i += 2;
-//                     },
-//                     _ => return Err(format!("Unknown option: {}", args[i]).into()),
-//                 }
-//             }
-
-//             if has_budget_changes {
-//                 updates.budget_request_details = Some(budget_details);
-//             }
-
-//             Ok(Command::UpdateProposal { proposal_name, updates })
-//         },
-//         "import-predefined-raffle" => {
-//             if args.len() < 5 {
-//                 return Err("Usage: import-predefined-raffle <proposal_name> <counted_teams> <uncounted_teams> <total_counted_seats> <max_earner_seats>".into());
-//             }
-//             let proposal_name = args[0].clone();
-//             let counted_teams: Vec<String> = args[1].split(',').map(String::from).collect();
-//             let uncounted_teams: Vec<String> = args[2].split(',').map(String::from).collect();
-//             let total_counted_seats = args[3].parse()?;
-//             let max_earner_seats = args[4].parse()?;
-//             Ok(Command::ImportPredefinedRaffle { proposal_name, counted_teams, uncounted_teams, total_counted_seats, max_earner_seats })
-//         },
-//         "import-historical-vote" => {
-//             if args.len() < 5 {
-//                 return Err("Usage: import-historical-vote <proposal_name> <passed> <participating_teams> <non_participating_teams> [<counted_points> <uncounted_points>]".into());
-//             }
-//             let proposal_name = args[0].clone();
-//             let passed = args[1].parse()?;
-//             let participating_teams: Vec<String> = args[2].split(',').map(String::from).collect();
-//             let non_participating_teams: Vec<String> = args[3].split(',').map(String::from).collect();
-//             let counted_points = args.get(4).map(|s| s.parse()).transpose()?;
-//             let uncounted_points = args.get(5).map(|s| s.parse()).transpose()?;
-//             Ok(Command::ImportHistoricalVote { proposal_name, passed, participating_teams, non_participating_teams, counted_points, uncounted_points })
-//         },
-//         "import-historical-raffle" => {
-//             if args.len() < 4 {
-//                 return Err("Usage: import-historical-raffle <proposal_name> <initiation_block> <randomness_block> [<team_order>] [<excluded_teams>] [<total_counted_seats>] [<max_earner_seats>]".into());
-//             }
-//             let proposal_name = args[0].clone();
-//             let initiation_block = args[1].parse()?;
-//             let randomness_block = args[2].parse()?;
-//             let team_order = args.get(3).map(|s| s.split(',').map(String::from).collect());
-//             let excluded_teams = args.get(4).map(|s| s.split(',').map(String::from).collect());
-//             let total_counted_seats = args.get(5).map(|s| s.parse()).transpose()?;
-//             let max_earner_seats = args.get(6).map(|s| s.parse()).transpose()?;
-//             Ok(Command::ImportHistoricalRaffle { proposal_name, initiation_block, randomness_block, team_order, excluded_teams, total_counted_seats, max_earner_seats })
-//         },
-//         "print-team-report" => Ok(Command::PrintTeamReport),
-//         "print-epoch-state" => Ok(Command::PrintEpochState),
-//         "print-team-vote-participation" => {
-//             if args.len() < 1 || args.len() > 2 {
-//                 return Err("Usage: print-team-vote-participation <team_name> [epoch_name]".into());
-//             }
-//             let team_name = args[0].clone();
-//             let epoch_name = args.get(1).cloned();
-//             Ok(Command::PrintTeamVoteParticipation { team_name, epoch_name })
-//         },
-//         "close-proposal" => {
-//             if args.len() != 2 {
-//                 return Err("Usage: close-proposal <proposal_name> <resolution>".into());
-//             }
-//             let proposal_name = args[0].clone();
-//             let resolution = args[1].clone();
-//             Ok(Command::CloseProposal { proposal_name, resolution })
-//         },
-//         "create-raffle" => {
-//             if args.len() < 1 || args.len() > 3 {
-//                 return Err("Usage: create-raffle <proposal_name> [block_offset] [excluded_teams]".into());
-//             }
-//             let proposal_name = args[0].clone();
-//             let block_offset = args.get(1).map(|s| s.parse()).transpose()?;
-//             let excluded_teams = args.get(2).map(|s| s.split(',').map(String::from).collect());
-//             Ok(Command::CreateRaffle { proposal_name, block_offset, excluded_teams })
-//         },
-//         "create-and-process-vote" => {
-//             if args.len() < 3 {
-//                 return Err("Usage: create-and-process-vote <proposal_name> <counted_votes> <uncounted_votes> [vote_opened] [vote_closed]".into());
-//             }
-//             let proposal_name = args[0].clone();
-//             let counted_votes: HashMap<String, VoteChoice> = args[1].split(',')
-//                 .map(|s| {
-//                     let parts: Vec<&str> = s.split(':').collect();
-//                     (parts[0].to_string(), if parts[1] == "Yes" { VoteChoice::Yes } else { VoteChoice::No })
-//                 })
-//                 .collect();
-//             let uncounted_votes: HashMap<String, VoteChoice> = args[2].split(',')
-//                 .map(|s| {
-//                     let parts: Vec<&str> = s.split(':').collect();
-//                     (parts[0].to_string(), if parts[1] == "Yes" { VoteChoice::Yes } else { VoteChoice::No })
-//                 })
-//                 .collect();
-//             let vote_opened = args.get(3).map(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d")).transpose()?;
-//             let vote_closed = args.get(4).map(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d")).transpose()?;
-//             Ok(Command::CreateAndProcessVote { proposal_name, counted_votes, uncounted_votes, vote_opened, vote_closed })
-//         },
-//         "generate-reports-for-closed-proposals" => {
-//             if args.len() != 1 {
-//                 return Err("Usage: generate-reports-for-closed-proposals <epoch_name>".into());
-//             }
-//             let epoch_name = args[0].clone();
-//             Ok(Command::GenerateReportsForClosedProposals { epoch_name })
-//         },"generate-report-for-proposal" => {
-//             if args.len() != 1 {
-//                 return Err("Usage: generate-report-for-proposal <proposal_name>".into());
-//             }
-//             let proposal_name = args[0].clone();
-//             Ok(Command::GenerateReportForProposal { proposal_name })
-//         },
-//         "print-point-report" => {
-//             let epoch_name = args.get(0).cloned();
-//             Ok(Command::PrintPointReport { epoch_name })
-//         },
-//         "close-epoch" => {
-//             let epoch_name = args.get(0).cloned();
-//             Ok(Command::CloseEpoch { epoch_name })
-//         },
-//         "generate-end-of-epoch-report" => {
-//             if args.len() != 1 {
-//                 return Err("Usage: generate-end-of-epoch-report <epoch_name>".into());
-//             }
-//             let epoch_name = args[0].clone();
-//             Ok(Command::GenerateEndOfEpochReport { epoch_name })
-//         },
-//         "run-script" => {
-//             let script_file_path = args.get(0).cloned();
-//             Ok(Command::RunScript { script_file_path })
-//         },
-//         "generate-unpaid-requests-report" => {
-//             let output_path = args.get(0).cloned();
-//             let epoch_name = args.get(1).cloned();
-//             Ok(Command::GenerateUnpaidRequestsReport { output_path, epoch_name })
-//         },
-//         _ => Err(format!("Unknown command: {}", command).into()),
-//     }
-// }
-
 pub fn read_script_commands(script_file_path: &str) -> Result<Vec<Command>, Box<dyn Error>> {
     let script_content = fs::read_to_string(script_file_path)?;
     let commands: Vec<Command> = serde_json::from_str(&script_content)?;
@@ -797,6 +667,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::{path::Path, io};
+    use sha2::digest::typenum::assert_type;
     use tokio::time::timeout;
     use tempfile::TempDir;
     use crate::app_config::TelegramConfig;
@@ -978,132 +849,6 @@ mod tests {
         let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
         assert!(result.is_err());
     }
-
-    #[test]
-    fn test_add_proposal_command() {
-        let args = vec![
-            "robokitty".to_string(),
-            "add-proposal".to_string(),
-            "Test Proposal".to_string(),
-            "https://example.com".to_string(),
-            "--team".to_string(),
-            "Team1".to_string(),
-            "--amounts".to_string(),
-            "ETH:100,USD:1000".to_string(),
-            "--loan".to_string(),
-            "true".to_string(),
-            "--address".to_string(),
-            "0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string(),
-        ];
-
-        let command = parse_cli_args(&args).unwrap();
-        match command {
-            Command::AddProposal { title, url, budget_request_details, .. } => {
-                assert_eq!(title, "Test Proposal");
-                assert_eq!(url, Some("https://example.com".to_string()));
-                
-                let details = budget_request_details.unwrap();
-                assert_eq!(details.team, Some("Team1".to_string()));
-                assert!(details.is_loan.unwrap());
-                assert_eq!(details.payment_address, 
-                    Some("0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string()));
-                
-                let amounts = details.request_amounts.unwrap();
-                assert_eq!(amounts.get("ETH").unwrap(), &100.0);
-                assert_eq!(amounts.get("USD").unwrap(), &1000.0);
-            },
-            _ => panic!("Wrong command type"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_update_proposal_command() {
-        let (mut budget_system, config, proposal_id) = create_test_budget_system_with_proposal().await;
-
-        let command = Command::UpdateProposal {
-            proposal_name: "Test Proposal".to_string(),
-            updates: UpdateProposalDetails {
-                title: Some("Updated Proposal".to_string()),
-                url: None,
-                budget_request_details: None,
-                announced_at: None,
-                published_at: None,
-                resolved_at: None,
-            },
-        };
-
-        let mut stdout = io::sink();
-        let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
-        assert!(result.is_ok());
-
-        let updated_proposal = budget_system.state().proposals().get(&proposal_id).unwrap();
-        assert_eq!(updated_proposal.title(), "Updated Proposal");
-    }
-
-    #[tokio::test]
-    async fn test_close_proposal_command() {
-        let (mut budget_system, config, proposal_id) = create_test_budget_system_with_proposal().await;
-
-        let command = Command::CloseProposal {
-            proposal_name: "Test Proposal".to_string(),
-            resolution: "Approved".to_string(),
-        };
-
-        let mut stdout = io::sink();
-        let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
-        assert!(result.is_ok());
-
-        let closed_proposal = budget_system.state().proposals().get(&proposal_id).unwrap();
-        assert!(closed_proposal.is_closed());
-        assert_eq!(closed_proposal.resolution(), Some(Resolution::Approved));
-    }
-
-    #[tokio::test]
-    async fn test_create_raffle_command() {
-        let (mut budget_system, config, _) = create_test_budget_system_with_proposal().await;
-
-        let command = Command::CreateRaffle {
-            proposal_name: "Test Proposal".to_string(),
-            block_offset: None,  // Remove block offset
-            excluded_teams: None,
-        };
-
-        let mut stdout = io::sink();
-        let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
-        assert!(result.is_ok());
-        assert_eq!(budget_system.state().raffles().len(), 1);
-
-        // Verify that the raffle has been finalized immediately
-        let raffle = budget_system.state().raffles().values().next().unwrap();
-        assert!(raffle.is_completed());
-    }
-
-    #[tokio::test]
-    async fn test_import_predefined_raffle_command() {
-        let (mut budget_system, config, _) = create_test_budget_system_with_proposal().await;
-
-        // Add some teams
-        budget_system.create_team("Team 1".to_string(), "Rep 1".to_string(), Some(vec![1000]), None).unwrap();
-        budget_system.create_team("Team 2".to_string(), "Rep 2".to_string(), Some(vec![2000]), None).unwrap();
-
-        let command = Command::ImportPredefinedRaffle {
-            proposal_name: "Test Proposal".to_string(),
-            counted_teams: vec!["Team 1".to_string()],
-            uncounted_teams: vec!["Team 2".to_string()],
-            total_counted_seats: 1,
-            max_earner_seats: 1,
-        };
-
-        let mut stdout = io::sink();
-        let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
-        assert!(result.is_ok());
-        assert_eq!(budget_system.state().raffles().len(), 1);
-
-        let raffle = budget_system.state().raffles().values().next().unwrap();
-        assert_eq!(raffle.result().unwrap().counted().len(), 1);
-        assert_eq!(raffle.result().unwrap().uncounted().len(), 1);
-    }
-
 
     #[tokio::test]
     async fn test_create_and_process_vote_command() {
@@ -1388,201 +1133,11 @@ mod tests {
     }
 
     #[test]
-    fn test_add_proposal_with_loan_and_address() {
-        let args = vec![
-            "robokitty".to_string(),
-            "add-proposal".to_string(),
-            "\"Test Proposal\"".to_string(),
-            "https://example.com".to_string(),
-            "--team".to_string(),
-            "Team1".to_string(),
-            "--amounts".to_string(),
-            "ETH:100".to_string(),
-            "--loan".to_string(),
-            "true".to_string(),
-            "--address".to_string(),
-            "0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string(),
-        ];
-
-        let command = parse_cli_args(&args).unwrap();
-        match command {
-            Command::AddProposal { budget_request_details, .. } => {
-                let details = budget_request_details.unwrap();
-                assert_eq!(details.team, Some("Team1".to_string()));
-                assert!(details.is_loan.unwrap());
-                assert_eq!(details.payment_address, 
-                    Some("0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string()));
-            },
-            _ => panic!("Wrong command type"),
-        }
-    }
-
-    #[test]
-    fn test_update_proposal_with_loan_and_address() {
-        let args = vec![
-            "robokitty".to_string(),
-            "update-proposal".to_string(),
-            "Test Proposal".to_string(),
-            "--loan".to_string(),
-            "true".to_string(),
-            "--address".to_string(),
-            "0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string(),
-        ];
-
-        let command = parse_cli_args(&args).unwrap();
-        match command {
-            Command::UpdateProposal { updates, .. } => {
-                let details = updates.budget_request_details.unwrap();
-                assert!(details.is_loan.unwrap());
-                assert_eq!(details.payment_address,
-                    Some("0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string()));
-            },
-            _ => panic!("Wrong command type"),
-        }
-    }
-
-    #[test]
-    fn test_add_proposal_invalid_inputs() {
-        // Test invalid loan value
-        let args = vec![
-            "robokitty".to_string(),
-            "add-proposal".to_string(),
-            "Test".to_string(),
-            "https://example.com".to_string(),
-            "--loan".to_string(),
-            "invalid".to_string(),
-        ];
-        assert!(parse_cli_args(&args).is_err());
-
-        // Test invalid date
-        let args = vec![
-            "robokitty".to_string(),
-            "add-proposal".to_string(),
-            "Test".to_string(),
-            "https://example.com".to_string(),
-            "--start".to_string(),
-            "invalid-date".to_string(),
-        ];
-        assert!(parse_cli_args(&args).is_err());
-    }
-
-    #[test]
     fn test_parse_eth_address() {
         assert!(parse_eth_address("0x742d35Cc6634C0532925a3b844Bc454e4438f44e").is_ok());
         assert!(parse_eth_address("742d35Cc6634C0532925a3b844Bc454e4438f44e").is_err()); // no 0x
         assert!(parse_eth_address("0x742d35").is_err()); // too short
         assert!(parse_eth_address("0x742d35Cc6634C0532925a3b844Bc454e4438f44eXX").is_err()); // invalid hex
-    }
-
-    #[test]
-    fn test_add_team_command_basic() {
-        let args = vec![
-            "robokitty".to_string(),
-            "add-team".to_string(),
-            "--name".to_string(),
-            "Test Team".to_string(),
-            "--representative".to_string(),
-            "John Doe".to_string(),
-        ];
-        
-        let cmd = parse_cli_args(&args).unwrap();
-        match cmd {
-            Command::AddTeam { name, representative, trailing_monthly_revenue, address } => {
-                assert_eq!(name, "Test Team");
-                assert_eq!(representative, "John Doe");
-                assert!(trailing_monthly_revenue.is_none());
-                assert!(address.is_none());
-            },
-            _ => panic!("Wrong command type"),
-        }
-    }
-
-    #[test]
-    fn test_add_team_command_full() {
-        let args = vec![
-            "robokitty".to_string(),
-            "add-team".to_string(),
-            "--name".to_string(),
-            "Test Team".to_string(),
-            "--representative".to_string(),
-            "John Doe".to_string(),
-            "--revenue".to_string(),
-            "1000,2000,3000".to_string(),
-            "--address".to_string(),
-            "0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string(),
-        ];
-        
-        let cmd = parse_cli_args(&args).unwrap();
-        match cmd {
-            Command::AddTeam { name, representative, trailing_monthly_revenue, address } => {
-                assert_eq!(name, "Test Team");
-                assert_eq!(representative, "John Doe");
-                assert_eq!(trailing_monthly_revenue, Some(vec![1000, 2000, 3000]));
-                assert_eq!(address, Some("0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string()));
-            },
-            _ => panic!("Wrong command type"),
-        }
-    }
-
-    #[test]
-    fn test_add_team_command_invalid_revenue() {
-        let args = vec![
-            "robokitty".to_string(),
-            "add-team".to_string(),
-            "-n".to_string(),
-            "Test Team".to_string(),
-            "-r".to_string(),
-            "John Doe".to_string(),
-            "--revenue".to_string(),
-            "1000,2000,3000,4000".to_string(),
-        ];
-        
-        assert!(parse_cli_args(&args).is_err());
-    }
-
-    #[test]
-    fn test_add_team_command_invalid_address() {
-        let args = vec![
-            "robokitty".to_string(),
-            "add-team".to_string(),
-            "-n".to_string(),
-            "Test Team".to_string(),
-            "-r".to_string(),
-            "John Doe".to_string(),
-            "--address".to_string(),
-            "invalid".to_string(),
-        ];
-        
-        assert!(parse_cli_args(&args).is_err());
-    }
-
-    #[test]
-    fn test_cli_team_add() {
-        let args = vec![
-            "robokitty".to_string(),
-            "team".to_string(),
-            "add".to_string(),
-            "--name".to_string(), "Test Team".to_string(),
-            "--representative".to_string(), "John Doe".to_string(),
-            "--revenue".to_string(), "1000,2000,3000".to_string()
-        ];
-        
-        let command = parse_cli_args(&args).unwrap();
-        match command {
-            Command::AddTeam { name, representative, trailing_monthly_revenue, .. } => {
-                assert_eq!(name, "Test Team");
-                assert_eq!(representative, "John Doe");
-                assert_eq!(trailing_monthly_revenue, Some(vec![1000, 2000, 3000]));
-            },
-            _ => panic!("Wrong command type")
-        }
-    }
-
-    #[test]
-    fn test_parse_amounts() {
-        let amounts = parse_amounts("ETH:100.5,USD:1000").unwrap();
-        assert_eq!(amounts.get("ETH"), Some(&100.5));
-        assert_eq!(amounts.get("USD"), Some(&1000.0));
     }
 
     #[test]
@@ -1644,16 +1199,6 @@ mod tests {
    }
 
    #[test]
-   fn test_parse_votes() {
-       let votes = parse_votes("Team1:Yes,Team2:No").unwrap();
-       assert_eq!(votes.get("Team1"), Some(&VoteChoice::Yes));
-       assert_eq!(votes.get("Team2"), Some(&VoteChoice::No));
-
-       assert!(parse_votes("Team1:Maybe").is_err());
-       assert!(parse_votes("InvalidFormat").is_err());
-   }
-
-   #[test]
     fn test_activate_epoch() {
         let args = vec![
             "robokitty".to_string(),
@@ -1696,52 +1241,593 @@ mod tests {
     }
 
     #[test]
-    fn test_team_commands() {
-    // Test Add
-    let add_args = vec![
-        "robokitty".to_string(),
-        "team".to_string(),
-        "add".to_string(),
-        "--name".to_string(), "Test Team".to_string(),
-        "--representative".to_string(), "John Doe".to_string(),
-        "--revenue".to_string(), "1000,2000,3000".to_string(),
-        "--address".to_string(), "0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string()
-    ];
+    fn test_proposal_with_loan_and_address() {
+        // Test add proposal
+        let cli = Cli::parse_from([
+            "robokitty", 
+            "proposal",
+            "add",
+            "--title", "Test Proposal",
+            "--url", "https://test.com",
+            "--team", "Team1",
+            "--amounts", "ETH:100.5",
+            "--loan", "true",
+            "--address", "0x742d35Cc6634C0532925a3b844Bc454e4438f44e"
+        ].iter());
 
-    match parse_cli_args(&add_args).unwrap() {
-        Command::AddTeam { name, representative, trailing_monthly_revenue, address } => {
-            assert_eq!(name, "Test Team");
-            assert_eq!(representative, "John Doe"); 
-            assert_eq!(trailing_monthly_revenue, Some(vec![1000, 2000, 3000]));
-            assert_eq!(address, Some("0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string()));
+        let cmd = cli.into_command().unwrap();
+        match cmd {
+            Command::AddProposal { 
+                title,
+                url,
+                budget_request_details,
+                ..
+            } => {
+                assert_eq!(title, "Test Proposal");
+                if let Some(details) = budget_request_details {
+                    assert!(details.is_loan.unwrap());
+                    assert_eq!(details.payment_address, Some("0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string()));
+                } else {
+                    panic!("Expected budget details");
+                }
+            },
+            _ => panic!("Wrong command type")
+        }
+
+        // Test update proposal
+        let cli = Cli::parse_from([
+            "robokitty",
+            "proposal", 
+            "update",
+            "Test Proposal",
+            "--loan", "true",
+            "--address", "0x742d35Cc6634C0532925a3b844Bc454e4438f44e"
+        ].iter());
+
+        let cmd = cli.into_command().unwrap();
+        match cmd {
+            Command::UpdateProposal {
+                proposal_name,
+                updates
+            } => {
+                assert_eq!(proposal_name, "Test Proposal");
+                if let Some(details) = updates.budget_request_details {
+                    assert!(details.is_loan.unwrap());
+                    assert_eq!(details.payment_address, Some("0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string()));
+                } else {
+                    panic!("Expected budget details");
+                }
+            },
+            _ => panic!("Wrong command type")
+        }
+    }
+
+    #[test]
+    fn test_team_report_command() {
+        let cli = Cli::parse_from([
+            "robokitty", 
+            "report",
+            "team"
+        ].iter());
+ 
+        let cmd = cli.into_command().unwrap();
+        assert!(matches!(cmd, Command::PrintTeamReport));
+    }
+ 
+    #[test] 
+    fn test_epoch_state_report_command() {
+        let cli = Cli::parse_from([
+            "robokitty",
+            "report", 
+            "epoch-state"
+        ].iter());
+ 
+        let cmd = cli.into_command().unwrap();
+        assert!(matches!(cmd, Command::PrintEpochState));
+    }
+ 
+    #[test]
+    fn test_team_participation_report_command() {
+        let cli = Cli::parse_from([
+            "robokitty",
+            "report",
+            "team-participation",
+            "Test Team",
+            "--epoch-name",
+            "Test Epoch"
+        ].iter());
+ 
+        let cmd = cli.into_command().unwrap();
+        match cmd {
+            Command::PrintTeamVoteParticipation { team_name, epoch_name } => {
+                assert_eq!(team_name, "Test Team");
+                assert_eq!(epoch_name, Some("Test Epoch".to_string()));
+            },
+            _ => panic!("Wrong command type")
+        }
+    }
+ 
+    #[test]
+    fn test_points_report_command() {
+        let cli = Cli::parse_from([
+            "robokitty",
+            "report",
+            "points",
+            "--epoch-name",
+            "Test Epoch"
+        ].iter());
+ 
+        let cmd = cli.into_command().unwrap();
+        match cmd {
+            Command::PrintPointReport { epoch_name } => {
+                assert_eq!(epoch_name, Some("Test Epoch".to_string()));
+            },
+            _ => panic!("Wrong command type")
+        }
+    }
+ 
+    #[test]
+    fn test_end_of_epoch_report_command() {
+        let cli = Cli::parse_from([
+            "robokitty",
+            "report",
+            "end-of-epoch",
+            "Test Epoch"
+        ].iter());
+ 
+        let cmd = cli.into_command().unwrap();
+        match cmd {
+            Command::GenerateEndOfEpochReport { epoch_name } => {
+                assert_eq!(epoch_name, "Test Epoch");
+            },
+            _ => panic!("Wrong command type")
+        }
+    }
+ 
+    #[test]
+    fn test_unpaid_requests_report_command() {
+        let cli = Cli::parse_from([
+            "robokitty",
+            "report",
+            "unpaid-requests",
+            "--output-path",
+            "test.json",
+            "--epoch-name",
+            "Test Epoch"
+        ].iter());
+ 
+        let cmd = cli.into_command().unwrap();
+        match cmd {
+            Command::GenerateUnpaidRequestsReport { output_path, epoch_name } => {
+                assert_eq!(output_path, Some("test.json".to_string()));
+                assert_eq!(epoch_name, Some("Test Epoch".to_string()));
+            },
+            _ => panic!("Wrong command type")
+        }
+    }
+ 
+    #[test]
+    fn test_proposal_report_command() {
+        let cli = Cli::parse_from([
+            "robokitty",
+            "report",
+            "for-proposal",
+            "--proposal-name",
+            "Test Proposal"
+        ].iter());
+ 
+        let cmd = cli.into_command().unwrap();
+        match cmd {
+            Command::GenerateReportForProposal { proposal_name } => {
+                assert_eq!(proposal_name, "Test Proposal");
+            },
+            _ => panic!("Wrong command type")
+        }
+    }
+ 
+    #[test]
+    fn test_closed_proposals_report_command() {
+        let cli = Cli::parse_from([
+            "robokitty",
+            "report",
+            "closed-proposals",
+            "Test Epoch"
+        ].iter());
+ 
+        let cmd = cli.into_command().unwrap();
+        match cmd {
+            Command::GenerateReportsForClosedProposals { epoch_name } => {
+                assert_eq!(epoch_name, "Test Epoch");
+            },
+            _ => panic!("Wrong command type")
+        }
+    }
+ 
+    #[test]
+    fn test_report_command_invalid_args() {
+        let result = Cli::parse_from([
+            "robokitty",
+            "report",
+            "team-participation",
+            "--epoch-name",
+            "Test Epoch"
+        ].iter()).into_command();
+ 
+        assert!(result.is_err());
+    }
+
+    // Epoch Command Tests
+    #[test]
+    fn test_close_epoch_command() {
+    let cli = Cli::parse_from([
+        "robokitty",
+        "epoch",
+        "close",
+        "Test Epoch"
+    ].iter());
+
+    let cmd = cli.into_command().unwrap();
+    match cmd {
+        Command::CloseEpoch { epoch_name } => {
+            assert_eq!(epoch_name, Some("Test Epoch".to_string()));
         },
         _ => panic!("Wrong command type")
     }
+    }
 
-    // Test Update
-    let update_args = vec![
-        "robokitty".to_string(),
-        "team".to_string(),
-        "update".to_string(),
-        "Old Team".to_string(),
-        "--new-name".to_string(), "New Team".to_string(),
-        "--representative".to_string(), "Jane Doe".to_string(),
-        "--status".to_string(), "Supporter".to_string(),
-        "--revenue".to_string(), "2000,3000,4000".to_string(),
-        "--address".to_string(), "0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string()
-    ];
+    #[test]
+    fn test_close_epoch_without_name() {
+    let cli = Cli::parse_from([
+        "robokitty",
+        "epoch",
+        "close"
+    ].iter());
 
-    match parse_cli_args(&update_args).unwrap() {
-        Command::UpdateTeam { team_name, updates } => {
-            assert_eq!(team_name, "Old Team");
-            assert_eq!(updates.name, Some("New Team".to_string()));
-            assert_eq!(updates.representative, Some("Jane Doe".to_string()));
-            assert_eq!(updates.status, Some("Supporter".to_string()));
-            assert_eq!(updates.trailing_monthly_revenue, Some(vec![2000, 3000, 4000]));
-            assert_eq!(updates.address, Some("0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string()));
+    let cmd = cli.into_command().unwrap();
+    match cmd {
+        Command::CloseEpoch { epoch_name } => {
+            assert_eq!(epoch_name, None);
         },
         _ => panic!("Wrong command type")
     }
+    }
+
+    // Script Command Tests
+    #[test]
+    fn test_run_script_command() {
+    let cli = Cli::parse_from([
+        "robokitty",
+        "run-script",
+        "--script-file", "test_script.json"
+    ].iter());
+
+    let cmd = cli.into_command().unwrap();
+    match cmd {
+        Command::RunScript { script_file_path } => {
+            assert_eq!(script_file_path, Some("test_script.json".to_string()));
+        },
+        _ => panic!("Wrong command type")
+    }
+    }
+
+    #[test]
+    fn test_run_script_without_path() {
+    let cli = Cli::parse_from([
+        "robokitty",
+        "run-script"
+    ].iter());
+
+    let cmd = cli.into_command().unwrap();
+    match cmd {
+        Command::RunScript { script_file_path } => {
+            assert_eq!(script_file_path, None);
+        },
+        _ => panic!("Wrong command type")
+    }
+    }
+
+    #[test]
+    fn test_report_command_missing_required_args() {
+        // Team participation missing team name
+        let cli = Cli::parse_from([
+            "robokitty",
+            "report",
+            "team-participation"
+        ].iter());
+        assert!(cli.into_command().is_err());
+
+        // End of epoch missing epoch name
+        let cli = Cli::parse_from([
+            "robokitty", 
+            "report",
+            "end-of-epoch"
+        ].iter());
+        assert!(cli.into_command().is_err());
+    }
+
+    #[test]
+    fn test_close_epoch_invalid_state() {
+        let cli = Cli::parse_from([
+            "robokitty",
+            "epoch",
+            "close",
+        ].iter());
+        assert!(cli.into_command().is_err());
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_script_file_validation() {
+        // Invalid file path characters
+        let cli = Cli::parse_from([
+            "robokitty",
+            "run-script",
+            "--script-file", "/invalid/*/path"
+        ].iter());
+        cli.into_command().unwrap();
+    }
+
+    #[test]
+    fn test_epoch_commands_validation() {
+        // Test invalid dates
+        let cmd = Cli::parse_from([
+            "robokitty",
+            "epoch", 
+            "create",
+            "Test",
+            "invalid-date",
+            "2024-01-01"
+        ]);
+        assert!(cmd.into_command().is_err());
+
+        // Test end date before start
+        let cmd = Cli::parse_from([
+            "robokitty",
+            "epoch",
+            "create", 
+            "Test",
+            "2024-02-01",
+            "2024-01-01"
+        ]);
+        assert!(cmd.into_command().is_err());
+    }
+
+    #[test]
+    fn test_proposal_validation() {
+        // Test invalid eth address
+        let cmd = Cli::parse_from([
+            "robokitty", "proposal", "add",
+            "--title", "Test",
+            "--address", "invalid_address"
+        ]);
+        assert!(cmd.into_command().is_err());
+
+        // Test invalid amounts format
+        let cmd = Cli::parse_from([
+            "robokitty", "proposal", "add",
+            "--title", "Test", 
+            "--amounts", "ETH:invalid"
+        ]);
+        assert!(cmd.into_command().is_err());
+    }
+
+    #[test]
+    fn test_proposal_resolution_validation() {
+        let cmd = Cli::parse_from([
+            "robokitty", "proposal", "close",
+            "Test",
+            "--resolution", "Invalid_Status"
+        ]);
+        assert!(cmd.into_command().is_err());
+    }
+
+    #[test]
+    fn test_vote_validation() {
+        // Test invalid vote format
+        let cmd = Cli::parse_from([
+            "robokitty", "vote", "process",
+            "TestVote",
+            "--counted", "Team1:Maybe", // Invalid choice
+        ]);
+        assert!(cmd.into_command().is_err());
+
+        // Test invalid date format
+        let cmd = Cli::parse_from([
+            "robokitty", "vote", "process", 
+            "TestVote",
+            "--counted", "Team1:Yes",
+            "--opened", "invalid-date"
+        ]);
+        assert!(cmd.into_command().is_err());
+    }
+
+    #[test]
+    fn test_raffle_validation() {
+        // Test invalid block offset
+        let cmd = Cli::parse_from([
+            "robokitty", "raffle", "create",
+            "TestRaffle", 
+            "--block-offset", "invalid"
+        ]);
+        assert!(cmd.into_command().is_err());
+
+        // Test excluded teams format
+        let cmd = Cli::parse_from([
+            "robokitty", "raffle", "create",
+            "TestRaffle",
+            "--excluded", "Team1,,Team2" // Invalid format
+        ]);
+        assert!(cmd.into_command().is_err());
+    }
+
+    #[test]
+    fn test_report_commands() {
+        // Test missing required args
+        let cmd = Cli::parse_from([
+            "robokitty", "report", "team-participation" 
+        ]);
+        assert!(cmd.into_command().is_err());
+
+        // Test invalid output path
+        let cmd = Cli::parse_from([
+            "robokitty", "report", "unpaid-requests",
+            "--output-path", "/invalid/*/path"
+        ]);
+        assert!(cmd.into_command().is_err());
+    }
+
+    #[test]
+    fn test_import_commands() {
+        // Test invalid seats configuration
+        let cmd = Cli::parse_from([
+            "robokitty", "import", "predefined-raffle",
+            "Test",
+            "--total-counted-seats", "3",
+            "--max-earner-seats", "5" // Invalid: max > total
+        ]);
+        assert!(cmd.into_command().is_err());
+
+        // Test invalid block numbers
+        let cmd = Cli::parse_from([
+            "robokitty", "import", "historical-raffle",
+            "Test",
+            "--initiation-block", "200",
+            "--randomness-block", "100" // Invalid: random < init
+        ]);
+        assert!(cmd.into_command().is_err());
+    }
+
+    #[test]
+    fn test_import_command_validation() {
+        // Test invalid seat counts
+        let cli = Cli::parse_from([
+            "robokitty",
+            "import",
+            "predefined-raffle",
+            "--proposal-name", "Test",
+            "--counted-teams", "Team1",
+            "--uncounted-teams", "Team2", 
+            "--max-earner-seats", "8", // Greater than total seats
+            "--total-counted-seats", "7"
+        ].iter());
+        assert!(cli.into_command().is_err());
+
+        // Test invalid block numbers
+        let cli = Cli::parse_from([
+            "robokitty",
+            "import",
+            "historical-raffle",
+            "--proposal-name", "Test",
+            "--initiation-block", "200",
+            "--randomness-block", "100", // Before initiation block
+            "--team-order", "Team1,Team2"
+        ].iter());
+        assert!(cli.into_command().is_err());
+    }
+
+    #[test]
+    fn test_import_historical_vote_command() {
+        let cli = Cli::parse_from([
+            "robokitty",
+            "import",
+            "historical-vote",
+            "--proposal-name", "Test Proposal",
+            "--passed", "true",
+            "--participating-teams", "Team1,Team2",
+            "--non-participating-teams", "Team3,Team4",
+            "--counted-points", "5",
+            "--uncounted-points", "2"
+        ].iter());
+
+        let cmd = cli.into_command().unwrap();
+        match cmd {
+            Command::ImportHistoricalVote {
+                proposal_name,
+                passed,
+                participating_teams,
+                non_participating_teams,
+                counted_points,
+                uncounted_points
+            } => {
+                assert_eq!(proposal_name, "Test Proposal");
+                assert!(passed);
+                assert_eq!(participating_teams, vec!["Team1", "Team2"]);
+                assert_eq!(non_participating_teams, vec!["Team3", "Team4"]);
+                assert_eq!(counted_points, Some(5));
+                assert_eq!(uncounted_points, Some(2));
+            },
+            _ => panic!("Wrong command type")
+        }
+    }
+
+    #[test]
+    fn test_import_historical_raffle_command() {
+        let cli = Cli::parse_from([
+            "robokitty",
+            "import", 
+            "historical-raffle",
+            "--proposal-name", "Test Proposal",
+            "--initiation-block", "100",
+            "--randomness-block", "110",
+            "--team-order", "Team1,Team2",
+            "--excluded-teams", "Team3,Team4",
+            "--total-counted-seats", "7",
+            "--max-earner-seats", "5"
+        ].iter());
+
+        let cmd = cli.into_command().unwrap();
+        match cmd {
+            Command::ImportHistoricalRaffle {
+                proposal_name,
+                initiation_block,
+                randomness_block,
+                team_order,
+                excluded_teams,
+                total_counted_seats,
+                max_earner_seats
+            } => {
+                assert_eq!(proposal_name, "Test Proposal");
+                assert_eq!(initiation_block, 100);
+                assert_eq!(randomness_block, 110);
+                assert_eq!(team_order, Some(vec!["Team1".to_string(), "Team2".to_string()]));
+                assert_eq!(excluded_teams, Some(vec!["Team3".to_string(), "Team4".to_string()]));
+                assert_eq!(total_counted_seats, Some(7));
+                assert_eq!(max_earner_seats, Some(5));
+            },
+            _ => panic!("Wrong command type")
+        }
+    }
+
+    #[test]
+    fn test_import_predefined_raffle_command() {
+        let cli = Cli::parse_from([
+            "robokitty",
+            "import",
+            "predefined-raffle",
+            "--proposal-name", "Test Proposal",
+            "--counted-teams", "Team1,Team2",
+            "--uncounted-teams", "Team3,Team4",
+            "--total-counted-seats", "7",
+            "--max-earner-seats", "5"
+        ].iter());
+
+        let cmd = cli.into_command().unwrap();
+        match cmd {
+            Command::ImportPredefinedRaffle { 
+                proposal_name,
+                counted_teams,
+                uncounted_teams,
+                total_counted_seats,
+                max_earner_seats
+            } => {
+                assert_eq!(proposal_name, "Test Proposal");
+                assert_eq!(counted_teams, vec!["Team1", "Team2"]);
+                assert_eq!(uncounted_teams, vec!["Team3", "Team4"]);
+                assert_eq!(total_counted_seats, 7);
+                assert_eq!(max_earner_seats, 5);
+            },
+            _ => panic!("Wrong command type")
+        }
     }
 
 }
