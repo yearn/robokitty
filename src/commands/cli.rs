@@ -193,6 +193,14 @@ pub enum ProposalCommands {
        /// Payment address
        #[arg(long, value_name = "ADDRESS")]
        address: Option<String>,
+    
+       /// Date announced (YYYY-MM-DD)
+       #[arg(long, value_name = "ANNOUNCED")]
+       announced_at: Option<String>,
+
+       /// Date published (YYYY-MM-DD)
+       #[arg(long, value_name = "PUBLISHED")] 
+       published_at: Option<String>,
    },
 
    /// Update an existing proposal 
@@ -224,6 +232,14 @@ pub enum ProposalCommands {
        
        #[arg(long, value_name = "ADDRESS")]
        address: Option<String>,
+           
+       /// Date announced (YYYY-MM-DD)
+       #[arg(long, value_name = "ANNOUNCED")]
+       announced_at: Option<String>,
+
+       /// Date published (YYYY-MM-DD)
+       #[arg(long, value_name = "PUBLISHED")] 
+       published_at: Option<String>,
    },
 
    /// Close a proposal
@@ -454,7 +470,14 @@ impl Cli {
             },
 
             Commands::Proposal { command } => match command {
-                ProposalCommands::Add { title, url, team, amounts, start, end, loan, address } => {
+                ProposalCommands::Add { title, url, team, amounts, start, end, loan, address, announced_at, published_at } => {
+                    let published = published_at.map(|d| NaiveDate::parse_from_str(&d, "%Y-%m-%d")).transpose()?;
+                    let announced = match (announced_at, &published) {
+                        (Some(d), _) => Some(NaiveDate::parse_from_str(&d, "%Y-%m-%d")?),
+                        (None, Some(d)) => Some(*d),
+                        _ => None
+                    };
+                    
                     let budget_details = if team.is_some() || amounts.is_some() {
                         Some(BudgetRequestDetailsCommand {
                             team,
@@ -472,8 +495,8 @@ impl Cli {
                         title,
                         url,
                         budget_request_details: budget_details,
-                        announced_at: None,
-                        published_at: None,
+                        announced_at: announced,
+                        published_at: published,
                         is_historical: None,
                     })
                 },
@@ -481,8 +504,12 @@ impl Cli {
                     Ok(Command::CloseProposal { proposal_name: name, resolution })
                 },
                 ProposalCommands::Update { 
-                    name, title, url, team, amounts, start, end, loan, address 
+                    name, title, url, team, amounts, start, end, loan, address, announced_at, published_at 
                 } => {
+                    let published = published_at.map(|d| NaiveDate::parse_from_str(&d, "%Y-%m-%d")).transpose()?;
+                    let announced = announced_at.map(|d| NaiveDate::parse_from_str(&d, "%Y-%m-%d")).transpose()?;
+        
+
                     let budget_details = if team.is_some() || amounts.is_some() {
                         Some(BudgetRequestDetailsCommand {
                             team,
@@ -502,8 +529,8 @@ impl Cli {
                             title,
                             url,
                             budget_request_details: budget_details,
-                            announced_at: None,
-                            published_at: None,
+                            announced_at: announced,
+                            published_at: published,
                             resolved_at: None,
                         }
                     })
@@ -1551,6 +1578,96 @@ mod tests {
             },
             _ => panic!("Wrong command type"),
         }
+    }
+
+    #[test]
+    fn test_proposal_add_with_dates() {
+        let args = args(&[
+            "proposal", 
+            "add",
+            "--title", "Test Proposal",
+            "--announced-at", "2024-01-01",
+            "--published-at", "2024-01-15"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        match cmd {
+            Command::AddProposal { announced_at, published_at, .. } => {
+                assert_eq!(announced_at, Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()));
+                assert_eq!(published_at, Some(NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()));
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_proposal_add_published_only() {
+        let args = args(&[
+            "proposal", 
+            "add",
+            "--title", "Test Proposal",
+            "--published-at", "2024-01-15"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        match cmd {
+            Command::AddProposal { announced_at, published_at, .. } => {
+                assert_eq!(announced_at, Some(NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()));
+                assert_eq!(published_at, Some(NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()));
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_proposal_update_with_dates() {
+        let args = args(&[
+            "proposal",
+            "update",
+            "test-proposal",
+            "--announced-at", "2024-01-01",
+            "--published-at", "2024-01-15"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        match cmd {
+            Command::UpdateProposal { updates, .. } => {
+                assert_eq!(updates.announced_at, Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()));
+                assert_eq!(updates.published_at, Some(NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()));
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_proposal_update_published_only() {
+        let args = args(&[
+            "proposal",
+            "update", 
+            "test-proposal",
+            "--published-at", "2024-01-15"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        match cmd {
+            Command::UpdateProposal { updates, .. } => {
+                assert_eq!(updates.announced_at, None);
+                assert_eq!(updates.published_at, Some(NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()));
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_proposal_invalid_dates() {
+        let args = args(&[
+            "proposal",
+            "add",
+            "--title", "Test Proposal", 
+            "--announced-at", "invalid-date"
+        ]);
+
+        assert!(parse_cli_args(&args).is_err());
     }
 
 }
