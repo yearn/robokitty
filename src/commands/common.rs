@@ -123,7 +123,7 @@ pub struct UpdateTeamDetails {
     pub address: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BudgetRequestDetailsCommand {
     pub team: Option<String>,
     pub request_amounts: Option<HashMap<String, f64>>,
