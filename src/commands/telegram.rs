@@ -115,6 +115,12 @@ pub enum TelegramCommand {
         args: String,
     },
 
+    /// Log payment for proposals.
+    /// Usage: /log_payment tx:<HASH> date:<YYYY-MM-DD> proposals:<PROP1,PROP2,...>
+    LogPayment {
+        args: String, 
+    }
+
 }
 
 #[derive(Debug)]
@@ -812,6 +818,41 @@ pub async fn execute_command(
                 formatted_json
             ))
             
+        },
+
+        TelegramCommand::LogPayment { args } => {
+            let args = TelegramCommand::parse_command(&args)
+                .map_err(|e| format!("Failed to parse arguments: {}", e))?;
+        
+            let mut tx = None;
+            let mut date = None;
+            let mut proposals = None;
+        
+            for arg in args {
+                if let Some((key, value)) = arg.split_once(':') {
+                    match key.to_lowercase().as_str() {
+                        "tx" => tx = Some(value.to_string()),
+                        "date" => date = Some(NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                            .map_err(|e| format!("Invalid date format: {}", e))?),
+                        "proposals" => proposals = Some(value.split(',')
+                            .map(String::from)
+                            .collect::<Vec<String>>()),
+                        _ => return Err(format!("Unknown parameter: {}", key)),
+                    }
+                }
+            }
+        
+            let tx = tx.ok_or("Missing tx parameter")?;
+            let date = date.ok_or("Missing date parameter")?;
+            let proposals = proposals.ok_or("Missing proposals parameter")?;
+
+            budget_system.execute_command(Command::LogPayment {
+                payment_tx: tx,
+                payment_date: date,
+                proposal_names: proposals 
+            }).await
+            .map(|s| escape_markdown(&s))
+            .map_err(|e| format!("Command failed: {}", e))
         }
     }
 }
@@ -823,6 +864,8 @@ mod tests {
     use chrono::TimeZone;
 
     use crate::core::budget_system::BudgetSystem;
+    use crate::core::models::BudgetRequestDetails;
+    use crate::core::models::Resolution;
     use crate::services::ethereum::MockEthereumService;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -1661,6 +1704,84 @@ mod tests {
         
         let result = execute_command(command, &mut budget_system).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_log_payment_command() {
+        let (mut budget_system, _temp_dir) = create_test_budget_system().await;
+        
+        let start_date = Utc::now();
+        let end_date = start_date + chrono::Duration::days(30);
+        budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
+        budget_system.activate_epoch(budget_system.get_epoch_id_by_name("Test Epoch").unwrap()).unwrap();
+
+        let proposal_id = budget_system.add_proposal(
+            "Test Proposal".to_string(),
+            None,
+            Some(BudgetRequestDetails::new(
+                None,
+                [("ETH".to_string(), 100.0)].iter().cloned().collect(),
+                None,
+                None,
+                Some(false),
+                Some("0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string()),
+            ).unwrap()),
+            Some(Utc::now().date_naive()),
+            Some(Utc::now().date_naive()),
+            None,
+        ).unwrap();
+
+        // Approve the proposal
+        budget_system.close_with_reason(proposal_id, &Resolution::Approved).unwrap();
+
+        // Test command execution
+        let command = TelegramCommand::LogPayment {
+            args: "tx:0x742d35Cc6634C0532925a3b844Bc454e4438f44e4438f44e4438f44e4438f44e date:2024-01-01 proposals:Test Proposal".to_string()
+        };
+
+        let result = execute_command(command, &mut budget_system).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("Payment recorded"));
+
+        // Verify payment was recorded
+        let proposal = budget_system.get_proposal(&proposal_id).unwrap();
+        assert!(proposal.budget_request_details().unwrap().is_paid());
+    }
+
+    #[tokio::test]
+    async fn test_log_payment_missing_parameters() {
+        let (mut budget_system, _temp_dir) = create_test_budget_system().await;
+        
+        let start_date = Utc::now();
+        let end_date = start_date + chrono::Duration::days(30);
+        budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
+        budget_system.activate_epoch(budget_system.get_epoch_id_by_name("Test Epoch").unwrap()).unwrap();
+
+        let command = TelegramCommand::LogPayment {
+            args: "tx:0x742d35Cc6634C0532925a3b844Bc454e4438f44e4438f44e4438f44e4438f44e".to_string()
+        };
+
+        let result = execute_command(command, &mut budget_system).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Missing"));
+    }
+
+    #[tokio::test]
+    async fn test_log_payment_invalid_date() {
+        let (mut budget_system, _temp_dir) = create_test_budget_system().await;
+        
+        let start_date = Utc::now();
+        let end_date = start_date + chrono::Duration::days(30);
+        budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
+        budget_system.activate_epoch(budget_system.get_epoch_id_by_name("Test Epoch").unwrap()).unwrap();
+
+        let command = TelegramCommand::LogPayment {
+            args: "tx:0x742d35Cc6634C0532925a3b844Bc454e4438f44e4438f44e4438f44e4438f44e date:invalid proposals:Test Proposal".to_string()
+        };
+
+        let result = execute_command(command, &mut budget_system).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid date"));
     }
 
 }

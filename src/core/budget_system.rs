@@ -2150,6 +2150,57 @@ def hello_world():
         Ok(format!("Generated unpaid requests report at: {:?}", output_path))
     }
 
+    pub fn record_payments(
+        &mut self,
+        payment_tx: &str,
+        payment_date: NaiveDate,
+        proposal_names: &[String]
+    ) -> Result<String, Box<dyn Error>> {
+        if payment_date > Utc::now().date_naive() {
+            return Err("Payment date cannot be in the future".into());
+        }
+
+        let mut updated_proposals = Vec::new();
+
+        // Validate all proposals first
+        for name in proposal_names {
+            let proposal_id = self.get_proposal_id_by_name(name)
+                .ok_or_else(|| format!("Proposal not found: {}", name))?;
+
+            let proposal = self.get_proposal(&proposal_id)
+                .ok_or_else(|| format!("Proposal not found: {}", name))?;
+
+            if !proposal.is_approved() {
+                return Err(format!("Proposal '{}' is not approved", name).into());
+            }
+
+            if let Some(details) = proposal.budget_request_details() {
+                if details.is_paid() {
+                    return Err(format!("Proposal '{}' is already paid", name).into());
+                }
+            } else {
+                return Err(format!("Proposal '{}' has no budget request", name).into());
+            }
+        }
+
+        // Update proposals
+        for name in proposal_names {
+            let proposal_id = self.get_proposal_id_by_name(name).unwrap();
+            
+            if let Some(mut details) = self.get_proposal(&proposal_id).unwrap().budget_request_details().cloned() {
+                details.record_payment(payment_tx.to_string(), payment_date)?;
+                
+                let proposal = self.state.get_proposal_mut(&proposal_id)
+                    .ok_or_else(|| format!("Failed to get mutable reference to proposal: {}", name))?;
+                proposal.set_budget_request_details(Some(details));
+                updated_proposals.push(name.clone());
+            }
+        }
+
+        self.save_state()?;
+        Ok(format!("Payment recorded for proposals: {}", updated_proposals.join(", ")))
+    }
+
 }
 
 #[async_trait]
@@ -2420,11 +2471,6 @@ impl CommandExecutor for BudgetSystem {
                 self.close_with_reason(proposal_id, &resolution)?;
                 Ok(format!("Closed proposal '{}' with resolution: {:?}", proposal_name, resolution))
             },
-            // Command::CreateRaffle { proposal_name, block_offset, excluded_teams } => {
-            //     let mut output = Vec::new();
-            //     self.handle_create_raffle(proposal_name, block_offset, excluded_teams, &mut output).await?;
-            //     Ok(String::from_utf8(output)?)
-            // },
             Command::CreateRaffle { proposal_name, block_offset, excluded_teams } => {
                 let progress_stream = self.create_raffle_with_progress(
                     proposal_name,
@@ -2547,6 +2593,9 @@ impl CommandExecutor for BudgetSystem {
                     epoch_name.as_deref()
                 ).map(|s| format!("{}\n", s))
             },
+            Command::LogPayment { payment_tx, payment_date, proposal_names } => {
+                self.record_payments(&payment_tx, payment_date, &proposal_names)
+            }
         }
     }
 
@@ -3522,4 +3571,164 @@ mod tests {
         assert_eq!(report.unpaid_requests[0].title, "Test Proposal");
         assert_eq!(report.unpaid_requests[0].team_name, "Test Team");
     }
+
+    #[tokio::test]
+   async fn test_record_payments_success() {
+       let temp_dir = TempDir::new().unwrap();
+       let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+ 
+       let mut budget_system = create_test_budget_system(&state_file, None).await;
+    
+       // Create test epoch and activate it
+       let start_date = Utc::now();
+       let end_date = start_date + Duration::days(30);
+       let epoch_id = budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
+       budget_system.activate_epoch(epoch_id).unwrap();
+       
+       // Create test proposals with budget requests
+       let proposal1_id = create_test_proposal(&mut budget_system, "Proposal1", vec![1000.0]);
+       let proposal2_id = create_test_proposal(&mut budget_system, "Proposal2", vec![2000.0]);
+       
+       // Approve the proposals
+       budget_system.close_with_reason(proposal1_id, &Resolution::Approved).unwrap();
+       budget_system.close_with_reason(proposal2_id, &Resolution::Approved).unwrap();
+
+       // Record payments
+       let result = budget_system.record_payments(
+           "0x742d35Cc6634C0532925a3b844Bc454e4438f44e4438f44e4438f44e4438f44e",
+           Utc::now().date_naive(),
+           &vec!["Proposal1".to_string(), "Proposal2".to_string()]
+       );
+
+       assert!(result.is_ok());
+       
+       // Verify payments recorded
+       let proposal1 = budget_system.get_proposal(&proposal1_id).unwrap();
+       let proposal2 = budget_system.get_proposal(&proposal2_id).unwrap();
+       
+       assert!(proposal1.budget_request_details().unwrap().is_paid());
+       assert!(proposal2.budget_request_details().unwrap().is_paid());
+   }
+
+   #[tokio::test]
+   async fn test_record_payments_future_date() {
+       let temp_dir = TempDir::new().unwrap();
+       let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+ 
+       let mut budget_system = create_test_budget_system(&state_file, None).await;
+    
+       
+       let future_date = Utc::now().date_naive() + Duration::days(1);
+       
+       let result = budget_system.record_payments(
+           "0x742d35Cc6634C0532925a3b844Bc454e4438f44e4438f44e4438f44e4438f44e",
+           future_date,
+           &vec!["Proposal1".to_string()]
+       );
+
+       assert!(result.is_err());
+       assert!(result.unwrap_err().to_string().contains("future"));
+   }
+
+   #[tokio::test]
+   async fn test_record_payments_non_existent_proposal() {
+       let temp_dir = TempDir::new().unwrap();
+       let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+ 
+       let mut budget_system = create_test_budget_system(&state_file, None).await;
+    
+       let result = budget_system.record_payments(
+           "0x742d35Cc6634C0532925a3b844Bc454e4438f44e4438f44e4438f44e4438f44e",
+           Utc::now().date_naive(),
+           &vec!["NonExistentProposal".to_string()]
+       );
+
+       assert!(result.is_err());
+       assert!(result.unwrap_err().to_string().contains("not found"));
+   }
+
+   #[tokio::test]
+   async fn test_record_payments_not_approved() {
+       let temp_dir = TempDir::new().unwrap();
+       let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+    
+       let mut budget_system = create_test_budget_system(&state_file, None).await;
+       // Create test epoch and proposal but don't approve it
+       let epoch_id = create_test_epoch(&mut budget_system);
+       let proposal_id = create_test_proposal(&mut budget_system, "Proposal1", vec![1000.0]);
+
+       let result = budget_system.record_payments(
+           "0x742d35Cc6634C0532925a3b844Bc454e4438f44e4438f44e4438f44e4438f44e",
+           Utc::now().date_naive(),
+           &vec!["Proposal1".to_string()]
+       );
+
+       assert!(result.is_err());
+       assert!(result.unwrap_err().to_string().contains("not approved"));
+   }
+
+   #[tokio::test]
+   async fn test_record_payments_already_paid() {
+       let temp_dir = TempDir::new().unwrap();
+       let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+    
+       let mut budget_system = create_test_budget_system(&state_file, None).await;
+
+       // Create and approve proposal
+       let epoch_id = create_test_epoch(&mut budget_system);
+       let proposal_id = create_test_proposal(&mut budget_system, "Proposal1", vec![1000.0]);
+       budget_system.close_with_reason(proposal_id, &Resolution::Approved).unwrap();
+
+       // Record payment first time
+       budget_system.record_payments(
+           "0x742d35Cc6634C0532925a3b844Bc454e4438f44e4438f44e4438f44e4438f44e",
+           Utc::now().date_naive(),
+           &vec!["Proposal1".to_string()]
+       ).unwrap();
+
+       // Try to record payment second time
+       let result = budget_system.record_payments(
+           "0x742d35Cc6634C0532925a3b844Bc454e4438f44e4438f44e4438f44e4438f44e",
+           Utc::now().date_naive(),
+           &vec!["Proposal1".to_string()]
+       );
+
+       assert!(result.is_err());
+       assert!(result.unwrap_err().to_string().contains("already paid"));
+   }
+
+   // Helper functions
+
+   fn create_test_epoch(budget_system: &mut BudgetSystem) -> Uuid {
+       let start_date = Utc::now();
+       let end_date = start_date + Duration::days(30);
+       let epoch_id = budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
+       budget_system.activate_epoch(epoch_id).unwrap();
+       epoch_id
+   }
+
+   fn create_test_proposal(budget_system: &mut BudgetSystem, name: &str, amounts: Vec<f64>) -> Uuid {
+       let mut request_amounts = HashMap::new();
+       for (i, amount) in amounts.iter().enumerate() {
+           request_amounts.insert(format!("ETH{}", i), *amount);
+       }
+       
+       let budget_details = BudgetRequestDetails::new(
+           None,
+           request_amounts,
+           Some(Utc::now().date_naive()),
+           Some((Utc::now() + Duration::days(30)).date_naive()),
+           Some(false),
+           Some("0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string())
+       ).unwrap();
+
+       budget_system.add_proposal(
+           name.to_string(),
+           Some("http://example.com".to_string()),
+           Some(budget_details),
+           Some(Utc::now().date_naive()),
+           Some(Utc::now().date_naive()),
+           None
+       ).unwrap()
+   }
 }

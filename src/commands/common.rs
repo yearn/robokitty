@@ -112,6 +112,11 @@ pub enum Command {
         output_path: Option<String>,
         epoch_name: Option<String>,
     },
+    LogPayment {
+        payment_tx: String,
+        payment_date: NaiveDate,
+        proposal_names: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

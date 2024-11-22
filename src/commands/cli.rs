@@ -250,6 +250,21 @@ pub enum ProposalCommands {
        /// Resolution (Approved/Rejected/Invalid/Duplicate/Retracted)
        resolution: String,
    },
+   
+   /// Log payment for approved and unpaid proposals
+   Pay {
+    /// Proposal names to be marked as paid (comma separated)
+    #[arg(value_name = "PROPOSALS")]
+    proposals: String,
+    
+    /// Payment transaction hash
+    #[arg(long)]
+    tx: String,
+    
+    /// Payment date (YYYY-MM-DD)  
+    #[arg(long)]
+    date: String,
+}
 }
 
 #[derive(Subcommand)]
@@ -535,6 +550,15 @@ impl Cli {
                         }
                     })
                 },
+                ProposalCommands::Pay { proposals, tx, date } => {
+                    let payment_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")?;
+                    let proposal_names = proposals.split(',').map(String::from).collect();
+                    Ok(Command::LogPayment {
+                        payment_tx: tx,
+                        payment_date,
+                        proposal_names,
+                    })
+                }
             },
 
             Commands::Vote { command } => match command {
@@ -1668,6 +1692,40 @@ mod tests {
         ]);
 
         assert!(parse_cli_args(&args).is_err());
+    }
+
+    #[test]
+    fn test_proposal_pay_command() {
+    let args = args(&[
+        "proposal", 
+        "pay",
+        "proposal1,proposal2",
+        "--tx", "0x742d35Cc6634C0532925a3b844Bc454e4438f44e4438f44e4438f44e4438f44e",
+        "--date", "2024-01-01"
+    ]);
+
+    let cmd = parse_cli_args(&args).unwrap();
+    match cmd {
+        Command::LogPayment { payment_tx, payment_date, proposal_names } => {
+            assert_eq!(payment_tx, "0x742d35Cc6634C0532925a3b844Bc454e4438f44e4438f44e4438f44e4438f44e");
+            assert_eq!(payment_date, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
+            assert_eq!(proposal_names, vec!["proposal1", "proposal2"]);
+        },
+        _ => panic!("Wrong command type"),
+    }
+    }
+
+    #[test]
+    fn test_proposal_pay_invalid_date() {
+    let args = args(&[
+        "proposal",
+        "pay", 
+        "proposal1",
+        "--tx", "0x742d35Cc6634C0532925a3b844Bc454e4438f44e4438f44e4438f44e4438f44e",
+        "--date", "invalid-date"
+    ]);
+
+    assert!(parse_cli_args(&args).is_err());
     }
 
 }
