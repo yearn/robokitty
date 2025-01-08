@@ -253,7 +253,7 @@ mod tests {
 
     // Helper functions to create test entities
     fn create_test_team(name: &str) -> Team {
-        Team::new(name.to_string(), "Representative".to_string(), Some(vec![1000, 2000, 3000])).unwrap()
+        Team::new(name.to_string(), "Representative".to_string(), Some(vec![1000, 2000, 3000]), None).unwrap()
     }
 
     fn create_test_raffle() -> Raffle {

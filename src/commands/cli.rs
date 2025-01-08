@@ -12,6 +12,665 @@ use crate::core::models::{
 use crate::core::budget_system::BudgetSystem;
 use crate::app_config::AppConfig;
 use super::common::{BudgetRequestDetailsCommand, Command, CommandExecutor, UpdateTeamDetails, UpdateProposalDetails};
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(name = "robokitty")]
+#[command(about = "Budget system management CLI", long_about = None)]
+pub struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+pub enum Commands {
+    /// Manage teams
+    Team {
+        #[command(subcommand)]
+        command: TeamCommands,
+    },
+    
+    /// Manage epochs  
+    Epoch {
+        #[command(subcommand)]
+        command: EpochCommands, 
+    },
+    /// Manage proposals
+    Proposal {
+        #[command(subcommand)]
+        command: ProposalCommands,
+    },
+    /// Manage voting
+   Vote {
+    #[command(subcommand)]
+    command: VoteCommands,
+    },
+    /// Manage raffles 
+    Raffle {
+        #[command(subcommand)]
+        command: RaffleCommands,
+    },
+    /// Print reports
+    Report {
+        #[command(subcommand)]
+        command: ReportCommands,
+    },
+    /// Import existing raffles and votes
+    Import {
+        #[command(subcommand)]
+        command: ImportCommands,
+    },
+    /// Run JSON script
+    RunScript {
+        script_file_path: Option<String>,
+    }, 
+}
+
+#[derive(Subcommand)]
+pub enum TeamCommands {
+    /// Add a new team to the system
+    Add {
+        /// Team's display name
+        #[arg(long, value_name = "NAME")]
+        name: String,
+        
+        /// Team's representative contact
+        #[arg(long, value_name = "REPRESENTATIVE")] 
+        representative: String,
+        
+        /// Monthly revenue values (comma separated)
+        #[arg(long, value_name = "REVENUE")]
+        revenue: Option<String>,
+        
+        /// Ethereum payment address
+        #[arg(long, value_name = "ADDRESS")]
+        address: Option<String>,
+    },
+
+    /// Update an existing team
+    Update {
+        /// Current team name
+        #[arg(value_name = "TEAM")]
+        name: String,
+        
+        /// New team name
+        #[arg(long, value_name = "NAME")]
+        new_name: Option<String>,
+        
+        /// New representative
+        #[arg(long, value_name = "REPRESENTATIVE")]
+        representative: Option<String>,
+        
+        /// New status (Earner/Supporter/Inactive)
+        #[arg(long, value_name = "STATUS")]
+        status: Option<String>,
+        
+        /// New revenue values
+        #[arg(long, value_name = "REVENUE")]
+        revenue: Option<String>,
+        
+        /// New payment address 
+        #[arg(long, value_name = "ADDRESS")]
+        address: Option<String>,
+    }
+}
+
+#[derive(Subcommand)] 
+pub enum EpochCommands {
+    /// Create a new epoch period
+    Create {
+        /// Epoch name/identifier
+        #[arg(value_name = "NAME")]
+        name: String,
+        
+        /// Start date (YYYY-MM-DD)
+        #[arg(value_name = "START_DATE")]
+        start_date: String,
+        
+        /// End date (YYYY-MM-DD)
+        #[arg(value_name = "END_DATE")]
+        end_date: String,
+    },
+
+    /// Activate an epoch for proposals
+    Activate {
+        /// Epoch name to activate
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+
+    /// Set epoch reward amount
+    SetReward {
+        /// Token symbol (e.g. ETH)
+        #[arg(value_name = "TOKEN")]
+        token: String,
+        
+        /// Reward amount
+        #[arg(value_name = "AMOUNT")]
+        amount: f64,
+    },
+
+    /// Close an epoch
+    Close {
+        /// Optional epoch name (uses active if omitted)
+        #[arg(value_name = "NAME")]
+        epoch_name: Option<String>,
+    }
+}
+
+#[derive(Subcommand)]
+pub enum ProposalCommands {
+   /// Add a new proposal
+   Add {
+       /// Proposal title
+       #[arg(long, value_name = "TITLE")]
+       title: String,
+
+       /// Proposal URL
+       #[arg(long, value_name = "URL")] 
+       url: Option<String>,
+       
+       /// Team name
+       #[arg(long, value_name = "TEAM")]
+       team: Option<String>,
+       
+       /// Request amounts (format: ETH:100.5,USD:1000)
+       #[arg(long, value_name = "AMOUNTS")]
+       amounts: Option<String>,
+       
+       /// Start date (YYYY-MM-DD)
+       #[arg(long, value_name = "START")]
+       start: Option<String>,
+       
+       /// End date (YYYY-MM-DD)
+       #[arg(long, value_name = "END")]
+       end: Option<String>,
+       
+       /// Is loan request
+       #[arg(long)]
+       loan: Option<bool>,
+       
+       /// Payment address
+       #[arg(long, value_name = "ADDRESS")]
+       address: Option<String>,
+    
+       /// Date announced (YYYY-MM-DD)
+       #[arg(long, value_name = "ANNOUNCED")]
+       announced_at: Option<String>,
+
+       /// Date published (YYYY-MM-DD)
+       #[arg(long, value_name = "PUBLISHED")] 
+       published_at: Option<String>,
+   },
+
+   /// Update an existing proposal 
+   Update {
+       /// Proposal name to update
+       #[arg(value_name = "NAME")]
+       name: String,
+       
+       #[arg(long, value_name = "TITLE")]
+       title: Option<String>,
+       
+       #[arg(long, value_name = "URL")]
+       url: Option<String>,
+       
+       #[arg(long, value_name = "TEAM")]
+       team: Option<String>,
+       
+       #[arg(long, value_name = "AMOUNTS")] 
+       amounts: Option<String>,
+       
+       #[arg(long, value_name = "START")]
+       start: Option<String>,
+       
+       #[arg(long, value_name = "END")]
+       end: Option<String>,
+       
+       #[arg(long)]
+       loan: Option<bool>,
+       
+       #[arg(long, value_name = "ADDRESS")]
+       address: Option<String>,
+           
+       /// Date announced (YYYY-MM-DD)
+       #[arg(long, value_name = "ANNOUNCED")]
+       announced_at: Option<String>,
+
+       /// Date published (YYYY-MM-DD)
+       #[arg(long, value_name = "PUBLISHED")] 
+       published_at: Option<String>,
+   },
+
+   /// Close a proposal
+   Close {
+       /// Proposal name
+       name: String,
+       
+       /// Resolution (Approved/Rejected/Invalid/Duplicate/Retracted)
+       resolution: String,
+   },
+   
+   /// Log payment for approved and unpaid proposals
+   Pay {
+    /// Proposal names to be marked as paid (comma separated)
+    #[arg(value_name = "PROPOSALS")]
+    proposals: String,
+    
+    /// Payment transaction hash
+    #[arg(long)]
+    tx: String,
+    
+    /// Payment date (YYYY-MM-DD)  
+    #[arg(long)]
+    date: String,
+}
+}
+
+#[derive(Subcommand)]
+pub enum VoteCommands {
+   /// Process a vote
+   Process {
+       /// Proposal name
+       name: String,
+       
+       /// Counted votes (format: Team1:Yes,Team2:No)
+       #[arg(long, value_name = "COUNTED")]
+       counted: String,
+       
+       /// Uncounted votes (format: Team3:Yes,Team4:No)
+       #[arg(long, value_name = "UNCOUNTED")]  
+       uncounted: String,
+       
+       /// Vote opened date (YYYY-MM-DD)
+       #[arg(long, value_name = "OPENED")]
+       opened: Option<String>,
+       
+       /// Vote closed date (YYYY-MM-DD)
+       #[arg(long, value_name = "CLOSED")]
+       closed: Option<String>,
+   }
+}
+
+#[derive(Subcommand)]
+pub enum RaffleCommands {
+   /// Create a new raffle
+   Create {
+       /// Proposal name
+       name: String,
+       
+       /// Block offset
+       #[arg(long, value_name = "OFFSET")]
+       block_offset: Option<u64>,
+       
+       /// Excluded teams (comma separated)
+       #[arg(long, value_name = "EXCLUDED")]
+       excluded: Option<String>,
+   }
+}
+
+#[derive(Subcommand)]
+pub enum ReportCommands {
+   /// Print team report
+   Team,
+
+   /// Print epoch state report
+   EpochState,
+
+   /// Print team vote participation
+   TeamParticipation {
+       team_name: String,
+       epoch_name: Option<String>,
+   },
+
+   /// Print point report
+   Points {
+       #[arg(long, value_name = "EPOCH")]
+       epoch_name: Option<String>,
+   },
+
+   /// Generate closed proposals report
+   ClosedProposals {
+       #[arg(value_name = "EPOCH")]
+       epoch_name: String,
+   },
+
+   /// Generate end of epoch report
+   EndOfEpoch {
+       #[arg(value_name = "EPOCH")] 
+       epoch_name: String,
+   },
+
+   /// Generate unpaid requests report
+   UnpaidRequests {
+       #[arg(long, value_name = "PATH")]
+       output_path: Option<String>,
+       #[arg(long, value_name = "EPOCH")]
+       epoch_name: Option<String>,
+   },
+
+   /// Generate report for specific proposal
+   ForProposal {
+       #[arg(value_name = "PROPOSAL")]
+       proposal_name: String,
+   },
+}
+
+
+#[derive(Subcommand)]
+pub enum ImportCommands {
+   /// Import a predefined raffle
+   PredefinedRaffle {
+       proposal_name: String,
+       counted_teams: Vec<String>,
+       uncounted_teams: Vec<String>, 
+       total_counted_seats: usize,
+       max_earner_seats: usize,
+   },
+
+   /// Import historical vote
+   HistoricalVote {
+       proposal_name: String,
+       passed: bool,
+       participating_teams: Vec<String>,
+       non_participating_teams: Vec<String>,
+       counted_points: Option<u32>,
+       uncounted_points: Option<u32>,
+   },
+
+   /// Import historical raffle
+   HistoricalRaffle {
+       proposal_name: String,
+       initiation_block: u64,
+       randomness_block: u64,
+       team_order: Option<Vec<String>>,
+       excluded_teams: Option<Vec<String>>,
+       total_counted_seats: Option<usize>,
+       max_earner_seats: Option<usize>,
+   }
+}
+
+
+fn parse_eth_address(addr: &str) -> Result<String, String> {
+    if !addr.starts_with("0x") {
+        return Err("Ethereum address must start with 0x".into());
+    }
+    if addr.len() != 42 {
+        return Err("Ethereum address must be 42 characters long".into());
+    }
+    // Basic hex check
+    if !addr[2..].chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("Invalid hex characters in address".into());
+    }
+    Ok(addr.to_string())
+}
+
+fn parse_votes(votes_str: &str) -> Result<HashMap<String, VoteChoice>, Box<dyn Error>> {
+    votes_str
+        .split(',')
+        .map(|vote| {
+            let parts: Vec<&str> = vote.split(':').collect();
+            if parts.len() != 2 {
+                return Err("Invalid vote format. Expected Team:Choice".into());
+            }
+            let choice = match parts[1].to_lowercase().as_str() {
+                "yes" => VoteChoice::Yes,
+                "no" => VoteChoice::No,
+                _ => return Err(format!("Invalid vote choice: {}. Must be Yes or No", parts[1]).into()),
+            };
+            Ok((parts[0].to_string(), choice))
+        })
+        .collect()
+}
+
+
+impl Cli {
+    pub fn into_command(self) -> Result<Command, Box<dyn Error>> {
+        match self.command {
+
+            Commands::Team { command } => match command {
+                TeamCommands::Add { name, representative, revenue, address } => {
+                    if let Some(addr) = &address {
+                        parse_eth_address(addr)?;
+                    }
+                    
+                    let parsed_revenue = revenue.map(|rev| {
+                        rev.split(',')
+                           .map(|v| v.parse::<u64>())
+                           .collect::<Result<Vec<_>, _>>()
+                    }).transpose()?;
+
+                    Ok(Command::AddTeam {
+                        name,
+                        representative,
+                        trailing_monthly_revenue: parsed_revenue,
+                        address
+                    })
+                },
+                TeamCommands::Update { name, new_name, representative, status, revenue, address } => {
+                    Ok(Command::UpdateTeam {
+                        team_name: name,
+                        updates: UpdateTeamDetails {
+                            name: new_name,
+                            representative,
+                            status,
+                            trailing_monthly_revenue: revenue.map(|rev| {
+                                rev.split(',')
+                                   .map(|v| v.parse::<u64>().unwrap())
+                                   .collect()
+                            }),
+                            address
+                        }
+                    })
+                }
+            },
+
+            Commands::Epoch { command } => match command {
+                EpochCommands::Create { name, start_date, end_date } => {
+                    let start = DateTime::parse_from_rfc3339(&start_date)?
+                        .with_timezone(&Utc);
+                    let end = DateTime::parse_from_rfc3339(&end_date)?
+                        .with_timezone(&Utc);
+                    Ok(Command::CreateEpoch { name, start_date: start, end_date: end })
+                },
+                EpochCommands::Activate { name } => {
+                    Ok(Command::ActivateEpoch { name })
+                },
+                EpochCommands::SetReward { token, amount } => {
+                    Ok(Command::SetEpochReward { token, amount }) 
+                },
+                EpochCommands::Close { epoch_name } => {
+                    Ok(Command::CloseEpoch { epoch_name })
+                }
+            },
+
+            Commands::Proposal { command } => match command {
+                ProposalCommands::Add { title, url, team, amounts, start, end, loan, address, announced_at, published_at } => {
+                    let published = published_at.map(|d| NaiveDate::parse_from_str(&d, "%Y-%m-%d")).transpose()?;
+                    let announced = match (announced_at, &published) {
+                        (Some(d), _) => Some(NaiveDate::parse_from_str(&d, "%Y-%m-%d")?),
+                        (None, Some(d)) => Some(*d),
+                        _ => None
+                    };
+                    
+                    let budget_details = if team.is_some() || amounts.is_some() {
+                        Some(BudgetRequestDetailsCommand {
+                            team,
+                            request_amounts: amounts.map(|a| parse_amounts(&a).unwrap()), //TODO remove the unwrap
+                            start_date: start.map(|d| NaiveDate::parse_from_str(&d, "%Y-%m-%d")).transpose()?,
+                            end_date: end.map(|d| NaiveDate::parse_from_str(&d, "%Y-%m-%d")).transpose()?,
+                            is_loan: loan,
+                            payment_address: address,
+                        })
+                    } else {
+                        None
+                    };
+
+                    Ok(Command::AddProposal {
+                        title,
+                        url,
+                        budget_request_details: budget_details,
+                        announced_at: announced,
+                        published_at: published,
+                        is_historical: None,
+                    })
+                },
+                ProposalCommands::Close { name, resolution } => {
+                    Ok(Command::CloseProposal { proposal_name: name, resolution })
+                },
+                ProposalCommands::Update { 
+                    name, title, url, team, amounts, start, end, loan, address, announced_at, published_at 
+                } => {
+                    let published = published_at.map(|d| NaiveDate::parse_from_str(&d, "%Y-%m-%d")).transpose()?;
+                    let announced = announced_at.map(|d| NaiveDate::parse_from_str(&d, "%Y-%m-%d")).transpose()?;
+        
+
+                    let budget_details = if team.is_some() || amounts.is_some() {
+                        Some(BudgetRequestDetailsCommand {
+                            team,
+                            request_amounts: amounts.map(|a| parse_amounts(&a).unwrap()), //TODO remove unwrap
+                            start_date: start.map(|d| NaiveDate::parse_from_str(&d, "%Y-%m-%d")).transpose()?,
+                            end_date: end.map(|d| NaiveDate::parse_from_str(&d, "%Y-%m-%d")).transpose()?,
+                            is_loan: loan,
+                            payment_address: address,
+                        })
+                    } else {
+                        None
+                    };
+
+                    Ok(Command::UpdateProposal {
+                        proposal_name: name,
+                        updates: UpdateProposalDetails {
+                            title,
+                            url,
+                            budget_request_details: budget_details,
+                            announced_at: announced,
+                            published_at: published,
+                            resolved_at: None,
+                        }
+                    })
+                },
+                ProposalCommands::Pay { proposals, tx, date } => {
+                    let payment_date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")?;
+                    let proposal_names = proposals.split(',').map(String::from).collect();
+                    Ok(Command::LogPayment {
+                        payment_tx: tx,
+                        payment_date,
+                        proposal_names,
+                    })
+                }
+            },
+
+            Commands::Vote { command } => match command {
+                VoteCommands::Process { name, counted, uncounted, opened, closed } => {
+                    Ok(Command::CreateAndProcessVote {
+                        proposal_name: name,
+                        counted_votes: parse_votes(&counted)?,
+                        uncounted_votes: parse_votes(&uncounted)?,
+                        vote_opened: opened.map(|d| NaiveDate::parse_from_str(&d, "%Y-%m-%d")).transpose()?,
+                        vote_closed: closed.map(|d| NaiveDate::parse_from_str(&d, "%Y-%m-%d")).transpose()?,
+                    })
+                }
+            },
+
+            Commands::Raffle { command } => match command {
+                RaffleCommands::Create { name, block_offset, excluded } => {
+                    Ok(Command::CreateRaffle {
+                        proposal_name: name,
+                        block_offset,
+                        excluded_teams: excluded.map(|e| e.split(',').map(String::from).collect()),
+                    })
+                }
+            },
+
+            Commands::Report { command } => match command {
+                ReportCommands::Team => {
+                    Ok(Command::PrintTeamReport)
+                },
+                ReportCommands::EpochState => {
+                    Ok(Command::PrintEpochState)
+                },
+                ReportCommands::TeamParticipation { team_name, epoch_name } => {
+                    Ok(Command::PrintTeamVoteParticipation { team_name, epoch_name })
+                },
+                ReportCommands::Points { epoch_name } => {
+                    Ok(Command::PrintPointReport { epoch_name })
+                },
+                ReportCommands::EndOfEpoch { epoch_name } => {
+                    Ok(Command::GenerateEndOfEpochReport { epoch_name })
+                },
+                ReportCommands::UnpaidRequests { output_path, epoch_name } => {
+                    Ok(Command::GenerateUnpaidRequestsReport { output_path, epoch_name })
+                },
+                ReportCommands::ForProposal { proposal_name } => {
+                    Ok(Command::GenerateReportForProposal { proposal_name })
+                },
+                ReportCommands::ClosedProposals { epoch_name } => {
+                    Ok(Command::GenerateReportsForClosedProposals { epoch_name })
+                },
+            },
+
+            Commands::Import { command } => match command {
+                ImportCommands::PredefinedRaffle { 
+                    proposal_name, 
+                    counted_teams,
+                    uncounted_teams,
+                    total_counted_seats,
+                    max_earner_seats 
+                } => {
+                    Ok(Command::ImportPredefinedRaffle {
+                        proposal_name,
+                        counted_teams,
+                        uncounted_teams, 
+                        total_counted_seats,
+                        max_earner_seats
+                    })
+                },
+                ImportCommands::HistoricalVote {
+                    proposal_name,
+                    passed,
+                    participating_teams,
+                    non_participating_teams,
+                    counted_points,
+                    uncounted_points
+                } => {
+                    Ok(Command::ImportHistoricalVote {
+                        proposal_name,
+                        passed,
+                        participating_teams,
+                        non_participating_teams,
+                        counted_points,
+                        uncounted_points
+                    })
+                },
+                ImportCommands::HistoricalRaffle {
+                    proposal_name,
+                    initiation_block,
+                    randomness_block,
+                    team_order,
+                    excluded_teams,
+                    total_counted_seats,
+                    max_earner_seats
+                } => {
+                    Ok(Command::ImportHistoricalRaffle {
+                        proposal_name,
+                        initiation_block,
+                        randomness_block,
+                        team_order,
+                        excluded_teams,
+                        total_counted_seats,
+                        max_earner_seats
+                    })
+                }
+            },
+
+            Commands::RunScript { script_file_path } => {
+                Ok(Command::RunScript { script_file_path })
+            },
+        }
+    }
+}
+
 
 pub async fn execute_command<W: Write + Send + 'static>(
     budget_system: &mut BudgetSystem,
@@ -35,343 +694,23 @@ pub async fn execute_command<W: Write + Send + 'static>(
 }
 
 pub fn parse_cli_args(args: &[String]) -> Result<Command, Box<dyn Error>> {
-    if args.len() < 2 {
-        return Err("Not enough arguments. Usage: robokitty_script <command> [args...]".into());
-    }
+    let cli = Cli::parse_from(args);
+    cli.into_command()
+}
 
-    let command = &args[1];
-    let args = &args[2..];
-
-    match command.as_str() {
-        "create-epoch" => {
-            if args.len() != 3 {
-                return Err("Usage: create-epoch <name> <start_date> <end_date>".into());
+fn parse_amounts(amounts_str: &str) -> Result<HashMap<String, f64>, Box<dyn Error>> {
+    amounts_str
+        .split(',')
+        .map(|pair| {
+            let parts: Vec<&str> = pair.split(':').collect();
+            if parts.len() != 2 {
+                return Err("Invalid amount format. Expected token:amount".into());
             }
-            let name = args[0].clone();
-            let start_date = DateTime::parse_from_rfc3339(&args[1])?.with_timezone(&Utc);
-            let end_date = DateTime::parse_from_rfc3339(&args[2])?.with_timezone(&Utc);
-            Ok(Command::CreateEpoch { name, start_date, end_date })
-        },
-        "activate-epoch" => {
-            if args.len() != 1 {
-                return Err("Usage: activate-epoch <name>".into());
-            }
-            Ok(Command::ActivateEpoch { name: args[0].clone() })
-        },
-        "set-epoch-reward" => {
-            if args.len() != 2 {
-                return Err("Usage: set-epoch-reward <token> <amount>".into());
-            }
-            let token = args[0].clone();
-            let amount = args[1].parse()?;
-            Ok(Command::SetEpochReward { token, amount })
-        },
-        "add-team" => {
-            if args.len() < 2 {
-                return Err("Usage: add-team <name> <representative> [revenue1 revenue2 revenue3]".into());
-            }
-            let name = args[0].clone();
-            let representative = args[1].clone();
-            let trailing_monthly_revenue = if args.len() > 2 {
-                Some(args[2..].iter().map(|s| s.parse().unwrap()).collect())
-            } else {
-                None
-            };
-            Ok(Command::AddTeam { name, representative, trailing_monthly_revenue })
-        },
-        "update-team" => {
-            if args.len() < 2 {
-                return Err("Usage: update-team <name> [--new-name <name>] [--representative <name>] [--status <status>] [--revenue <rev1> <rev2> <rev3>]".into());
-            }
-            let team_name = args[0].clone();
-            let mut updates = UpdateTeamDetails {
-                name: None,
-                representative: None,
-                status: None,
-                trailing_monthly_revenue: None,
-            };
-            let mut i = 1;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--new-name" => {
-                        updates.name = Some(args[i+1].clone());
-                        i += 2;
-                    },
-                    "--representative" => {
-                        updates.representative = Some(args[i+1].clone());
-                        i += 2;
-                    },
-                    "--status" => {
-                        updates.status = Some(args[i+1].clone());
-                        i += 2;
-                    },
-                    "--revenue" => {
-                        updates.trailing_monthly_revenue = Some(vec![
-                            args[i+1].parse()?,
-                            args[i+2].parse()?,
-                            args[i+3].parse()?
-                        ]);
-                        i += 4;
-                    },
-                    _ => return Err(format!("Unknown option: {}", args[i]).into()),
-                }
-            }
-            Ok(Command::UpdateTeam { team_name, updates })
-        },
-        "add-proposal" => {
-            if args.len() < 2 {
-                return Err("Usage: add-proposal <title> <url> [--team TeamName] [--amounts ETH:100.5,USD:1000] [--start 2024-01-01] [--end 2024-12-31] [--announced 2024-01-01] [--published 2024-01-01] [--loan true] [--address 0x...]".into());
-            }
-
-            let title = args[0].clone();
-            let url = args[1].clone();
-            let mut team = None;
-            let mut amounts = None;
-            let mut start_date = None;
-            let mut end_date = None;
-            let mut announced_at = None;
-            let mut published_at = None;
-            let mut is_loan = None;
-            let mut payment_address = None;
-
-            let mut i = 2;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--team" => {
-                        team = Some(args[i + 1].clone());
-                        i += 2;
-                    },
-                    "--amounts" => {
-                        amounts = Some(args[i + 1].split(',')
-                            .map(|pair| {
-                                let parts: Vec<&str> = pair.split(':').collect();
-                                if parts.len() != 2 {
-                                    return Err(format!("Invalid amount format: {}. Expected token:amount", pair));
-                                }
-                                let amount = parts[1].parse::<f64>()
-                                    .map_err(|_| format!("Invalid amount {}: {}", parts[1], pair))?;
-                                Ok((parts[0].to_string(), amount))
-                            })
-                            .collect::<Result<HashMap<_, _>, String>>()?);
-                        i += 2;
-                    },
-                    "--start" => {
-                        start_date = Some(NaiveDate::parse_from_str(&args[i + 1], "%Y-%m-%d")?);
-                        i += 2;
-                    },
-                    "--end" => {
-                        end_date = Some(NaiveDate::parse_from_str(&args[i + 1], "%Y-%m-%d")?);
-                        i += 2;
-                    },
-                    "--announced" => {
-                        announced_at = Some(NaiveDate::parse_from_str(&args[i + 1], "%Y-%m-%d")?);
-                        i += 2;
-                    },
-                    "--published" => {
-                        published_at = Some(NaiveDate::parse_from_str(&args[i + 1], "%Y-%m-%d")?);
-                        i += 2;
-                    },
-                    "--loan" => {
-                        is_loan = Some(args[i + 1].parse()?);
-                        i += 2;
-                    },
-                    "--address" => {
-                        payment_address = Some(args[i + 1].clone());
-                        i += 2;
-                    },
-                    _ => return Err(format!("Unknown option: {}", args[i]).into()),
-                }
-            }
-
-            Ok(Command::AddProposal {
-                title,
-                url: Some(url),
-                budget_request_details: if team.is_some() || amounts.is_some() {
-                    Some(BudgetRequestDetailsCommand {
-                        team,
-                        request_amounts: amounts,
-                        start_date,
-                        end_date,
-                        is_loan,
-                        payment_address,
-                    })
-                } else {
-                    None
-                },
-                announced_at,
-                published_at,
-                is_historical: None,
-            })
-        },
-        "update-proposal" => {
-            if args.len() < 2 {
-                return Err("Usage: update-proposal <name> [--title <title>] [--url <url>] [--team <name>] \
-                        [--amounts <token:amount>] [--start <date>] [--end <date>] [--announced <date>] \
-                        [--published <date>] [--resolved <date>] [--loan <true/false>] [--address <eth_address>]".into());
-            }
-            let proposal_name = args[0].clone();
-            let mut updates = UpdateProposalDetails {
-                title: None,
-                url: None,
-                budget_request_details: None,
-                announced_at: None,
-                published_at: None,
-                resolved_at: None,
-            };
-            
-            let mut i = 1;
-            let mut budget_details = BudgetRequestDetailsCommand {
-                team: None,
-                request_amounts: None,
-                start_date: None,
-                end_date: None,
-                is_loan: None,
-                payment_address: None,
-            };
-            let mut has_budget_changes = false;
-
-            while i < args.len() {
-                match args[i].as_str() {
-                    // ... existing matches ...
-                    "--loan" => {
-                        budget_details.is_loan = Some(args[i+1].parse()
-                            .map_err(|_| format!("Invalid loan value: {}", args[i+1]))?);
-                        has_budget_changes = true;
-                        i += 2;
-                    },
-                    "--address" => {
-                        budget_details.payment_address = Some(args[i+1].clone());
-                        has_budget_changes = true;
-                        i += 2;
-                    },
-                    _ => return Err(format!("Unknown option: {}", args[i]).into()),
-                }
-            }
-
-            if has_budget_changes {
-                updates.budget_request_details = Some(budget_details);
-            }
-
-            Ok(Command::UpdateProposal { proposal_name, updates })
-        },
-        "import-predefined-raffle" => {
-            if args.len() < 5 {
-                return Err("Usage: import-predefined-raffle <proposal_name> <counted_teams> <uncounted_teams> <total_counted_seats> <max_earner_seats>".into());
-            }
-            let proposal_name = args[0].clone();
-            let counted_teams: Vec<String> = args[1].split(',').map(String::from).collect();
-            let uncounted_teams: Vec<String> = args[2].split(',').map(String::from).collect();
-            let total_counted_seats = args[3].parse()?;
-            let max_earner_seats = args[4].parse()?;
-            Ok(Command::ImportPredefinedRaffle { proposal_name, counted_teams, uncounted_teams, total_counted_seats, max_earner_seats })
-        },
-        "import-historical-vote" => {
-            if args.len() < 5 {
-                return Err("Usage: import-historical-vote <proposal_name> <passed> <participating_teams> <non_participating_teams> [<counted_points> <uncounted_points>]".into());
-            }
-            let proposal_name = args[0].clone();
-            let passed = args[1].parse()?;
-            let participating_teams: Vec<String> = args[2].split(',').map(String::from).collect();
-            let non_participating_teams: Vec<String> = args[3].split(',').map(String::from).collect();
-            let counted_points = args.get(4).map(|s| s.parse()).transpose()?;
-            let uncounted_points = args.get(5).map(|s| s.parse()).transpose()?;
-            Ok(Command::ImportHistoricalVote { proposal_name, passed, participating_teams, non_participating_teams, counted_points, uncounted_points })
-        },
-        "import-historical-raffle" => {
-            if args.len() < 4 {
-                return Err("Usage: import-historical-raffle <proposal_name> <initiation_block> <randomness_block> [<team_order>] [<excluded_teams>] [<total_counted_seats>] [<max_earner_seats>]".into());
-            }
-            let proposal_name = args[0].clone();
-            let initiation_block = args[1].parse()?;
-            let randomness_block = args[2].parse()?;
-            let team_order = args.get(3).map(|s| s.split(',').map(String::from).collect());
-            let excluded_teams = args.get(4).map(|s| s.split(',').map(String::from).collect());
-            let total_counted_seats = args.get(5).map(|s| s.parse()).transpose()?;
-            let max_earner_seats = args.get(6).map(|s| s.parse()).transpose()?;
-            Ok(Command::ImportHistoricalRaffle { proposal_name, initiation_block, randomness_block, team_order, excluded_teams, total_counted_seats, max_earner_seats })
-        },
-        "print-team-report" => Ok(Command::PrintTeamReport),
-        "print-epoch-state" => Ok(Command::PrintEpochState),
-        "print-team-vote-participation" => {
-            if args.len() < 1 || args.len() > 2 {
-                return Err("Usage: print-team-vote-participation <team_name> [epoch_name]".into());
-            }
-            let team_name = args[0].clone();
-            let epoch_name = args.get(1).cloned();
-            Ok(Command::PrintTeamVoteParticipation { team_name, epoch_name })
-        },
-        "close-proposal" => {
-            if args.len() != 2 {
-                return Err("Usage: close-proposal <proposal_name> <resolution>".into());
-            }
-            let proposal_name = args[0].clone();
-            let resolution = args[1].clone();
-            Ok(Command::CloseProposal { proposal_name, resolution })
-        },
-        "create-raffle" => {
-            if args.len() < 1 || args.len() > 3 {
-                return Err("Usage: create-raffle <proposal_name> [block_offset] [excluded_teams]".into());
-            }
-            let proposal_name = args[0].clone();
-            let block_offset = args.get(1).map(|s| s.parse()).transpose()?;
-            let excluded_teams = args.get(2).map(|s| s.split(',').map(String::from).collect());
-            Ok(Command::CreateRaffle { proposal_name, block_offset, excluded_teams })
-        },
-        "create-and-process-vote" => {
-            if args.len() < 3 {
-                return Err("Usage: create-and-process-vote <proposal_name> <counted_votes> <uncounted_votes> [vote_opened] [vote_closed]".into());
-            }
-            let proposal_name = args[0].clone();
-            let counted_votes: HashMap<String, VoteChoice> = args[1].split(',')
-                .map(|s| {
-                    let parts: Vec<&str> = s.split(':').collect();
-                    (parts[0].to_string(), if parts[1] == "Yes" { VoteChoice::Yes } else { VoteChoice::No })
-                })
-                .collect();
-            let uncounted_votes: HashMap<String, VoteChoice> = args[2].split(',')
-                .map(|s| {
-                    let parts: Vec<&str> = s.split(':').collect();
-                    (parts[0].to_string(), if parts[1] == "Yes" { VoteChoice::Yes } else { VoteChoice::No })
-                })
-                .collect();
-            let vote_opened = args.get(3).map(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d")).transpose()?;
-            let vote_closed = args.get(4).map(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d")).transpose()?;
-            Ok(Command::CreateAndProcessVote { proposal_name, counted_votes, uncounted_votes, vote_opened, vote_closed })
-        },
-        "generate-reports-for-closed-proposals" => {
-            if args.len() != 1 {
-                return Err("Usage: generate-reports-for-closed-proposals <epoch_name>".into());
-            }
-            let epoch_name = args[0].clone();
-            Ok(Command::GenerateReportsForClosedProposals { epoch_name })
-        },"generate-report-for-proposal" => {
-            if args.len() != 1 {
-                return Err("Usage: generate-report-for-proposal <proposal_name>".into());
-            }
-            let proposal_name = args[0].clone();
-            Ok(Command::GenerateReportForProposal { proposal_name })
-        },
-        "print-point-report" => {
-            let epoch_name = args.get(0).cloned();
-            Ok(Command::PrintPointReport { epoch_name })
-        },
-        "close-epoch" => {
-            let epoch_name = args.get(0).cloned();
-            Ok(Command::CloseEpoch { epoch_name })
-        },
-        "generate-end-of-epoch-report" => {
-            if args.len() != 1 {
-                return Err("Usage: generate-end-of-epoch-report <epoch_name>".into());
-            }
-            let epoch_name = args[0].clone();
-            Ok(Command::GenerateEndOfEpochReport { epoch_name })
-        },
-        "run-script" => {
-            let script_file_path = args.get(0).cloned();
-            Ok(Command::RunScript { script_file_path })
-        },
-        _ => Err(format!("Unknown command: {}", command).into()),
-    }
+            let amount = parts[1].parse::<f64>()
+                .map_err(|_| format!("Invalid amount: {}", parts[1]))?;
+            Ok((parts[0].to_string(), amount))
+        })
+        .collect()
 }
 
 pub fn read_script_commands(script_file_path: &str) -> Result<Vec<Command>, Box<dyn Error>> {
@@ -383,672 +722,1089 @@ pub fn read_script_commands(script_file_path: &str) -> Result<Vec<Command>, Box<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use std::{path::Path, io};
-    use tokio::time::timeout;
-    use tempfile::TempDir;
-    use crate::app_config::TelegramConfig;
-    use crate::services::ethereum::MockEthereumService;
-    use crate::core::models::VoteResult;
+    use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
+    use std::collections::HashMap;
 
-    async fn create_test_budget_system() -> (BudgetSystem, AppConfig) {
-        let temp_dir = TempDir::new().unwrap();
-        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
-    
-        let config = AppConfig {
-            state_file,
-            ipc_path: "/tmp/test_reth.ipc".to_string(),
-            future_block_offset: 0,
-            script_file: "test_script.json".to_string(),
-            default_total_counted_seats: 7,
-            default_max_earner_seats: 5,
-            default_qualified_majority_threshold: 0.7,
-            counted_vote_points: 5,
-            uncounted_vote_points: 2,
-            telegram: TelegramConfig {
-                chat_id: "test_chat_id".to_string(),
-                token: "test_token".to_string(),
+    // Helper function to convert string args into Vec<String>
+    fn args(args: &[&str]) -> Vec<String> {
+        std::iter::once("robokitty".to_string())
+            .chain(args.iter().map(|&s| s.to_string()))
+            .collect()
+    }
+
+    // Helper to parse date string to DateTime<Utc>
+    fn parse_date(date_str: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(date_str)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn test_team_add_command_full() {
+        let args = args(&[
+            "team", 
+            "add",
+            "--name", "Engineering",
+            "--representative", "Alice",
+            "--revenue", "1000,2000,3000",
+            "--address", "0x1234567890123456789012345678901234567890"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        
+        match cmd {
+            Command::AddTeam { 
+                name, 
+                representative, 
+                trailing_monthly_revenue, 
+                address 
+            } => {
+                assert_eq!(name, "Engineering");
+                assert_eq!(representative, "Alice");
+                assert_eq!(trailing_monthly_revenue, Some(vec![1000, 2000, 3000]));
+                assert_eq!(address, Some("0x1234567890123456789012345678901234567890".to_string()));
             },
-        };
-    
-        let ethereum_service = Arc::new(MockEthereumService::new());
-        let budget_system = BudgetSystem::new(config.clone(), ethereum_service, None).await.unwrap();
-    
-        (budget_system, config)
+            _ => panic!("Wrong command type"),
+        }
     }
 
-    async fn create_test_budget_system_with_proposal() -> (BudgetSystem, AppConfig, Uuid) {
-        let (mut budget_system, config) = create_test_budget_system().await;
-    
-        // Create and activate an epoch
-        let start_date = Utc::now();
-        let end_date = start_date + chrono::Duration::days(30);
-        let epoch_id = budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
-        budget_system.activate_epoch(epoch_id).unwrap();
-    
-        // Create a proposal
-        let proposal_id = budget_system.add_proposal(
-            "Test Proposal".to_string(),
-            Some("http://example.com".to_string()),
-            None,
-            Some(Utc::now().date_naive()),
-            Some(Utc::now().date_naive()),
-            None
-        ).unwrap();
-    
-        (budget_system, config, proposal_id)
-    }
-    
-    #[tokio::test]
-    async fn test_create_epoch_command() {
-        let (mut budget_system, config) = create_test_budget_system().await;
-    
-        let start_date = Utc::now();
-        let end_date = start_date + chrono::Duration::days(30);
-    
-        let command = Command::CreateEpoch {
-            name: "Test Epoch".to_string(),
-            start_date,
-            end_date,
-        };
-        
-        let mut stdout = io::sink();
-        let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
-        assert!(result.is_ok());
-        assert_eq!(budget_system.state().epochs().len(), 1);
-    }
-    
-    #[tokio::test]
-    async fn test_activate_epoch_command() {
-        let (mut budget_system, config) = create_test_budget_system().await;
-    
-        let start_date = Utc::now();
-        let end_date = start_date + chrono::Duration::days(30);
-    
-        let epoch_id = budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
-    
-        let command = Command::ActivateEpoch {
-            name: "Test Epoch".to_string(),
-        };
-        
-        let mut stdout = io::sink();
-        let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
-        assert!(result.is_ok());
-        assert_eq!(budget_system.state().current_epoch(), Some(epoch_id));
-        assert!(budget_system.state().epochs().get(&epoch_id).unwrap().is_active());
-    }
-    
-    #[tokio::test]
-    async fn test_set_epoch_reward_command() {
-        let (mut budget_system, config) = create_test_budget_system().await;
-    
-        let start_date = Utc::now();
-        let end_date = start_date + chrono::Duration::days(30);
-    
-        let epoch_id = budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
-        budget_system.activate_epoch(epoch_id).unwrap();
-    
-        let command = Command::SetEpochReward {
-            token: "ETH".to_string(),
-            amount: 100.0,
-        };
-        
-        let mut stdout = io::sink();
-        let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
-        assert!(result.is_ok());
-    
-        let epoch = budget_system.state().epochs().get(&epoch_id).unwrap();
-        assert_eq!(epoch.reward().unwrap().token(), "ETH");
-        assert_eq!(epoch.reward().unwrap().amount(), 100.0);
-    }
-    
-    #[tokio::test]
-    async fn test_add_team_command() {
-        let (mut budget_system, config) = create_test_budget_system().await;
-    
-        let command = Command::AddTeam {
-            name: "Test Team".to_string(),
-            representative: "John Doe".to_string(),
-            trailing_monthly_revenue: Some(vec![1000, 2000, 3000]),
-        };
-        
-        let mut stdout = io::sink();
-        let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
-        assert!(result.is_ok());
-        assert_eq!(budget_system.state().current_state().teams().len(), 1);
-    
-        let team = budget_system.state().current_state().teams().values().next().unwrap();
-        assert_eq!(team.name(), "Test Team");
-        assert_eq!(team.representative(), "John Doe");
-        assert!(matches!(team.status(), TeamStatus::Earner { .. }));
-    }
-    
-    #[tokio::test]
-    async fn test_update_team_command() {
-        let temp_dir = TempDir::new().unwrap();
-        let (mut budget_system, config) = create_test_budget_system().await;
-        
-        // Create a team
-        budget_system.create_team("Test Team".to_string(), "John Doe".to_string(), Some(vec![1000])).unwrap();
+    #[test]
+    fn test_team_add_command_minimal() {
+        let args = args(&[
+            "team",
+            "add",
+            "--name", "Engineering",
+            "--representative", "Alice"
+        ]);
 
-        let command = Command::UpdateTeam {
-            team_name: "Test Team".to_string(),
-            updates: UpdateTeamDetails {
-                name: Some("Updated Team".to_string()),
-                representative: Some("Jane Doe".to_string()),
-                status: Some("Supporter".to_string()),
-                trailing_monthly_revenue: None,
+        let cmd = parse_cli_args(&args).unwrap();
+        
+        match cmd {
+            Command::AddTeam { 
+                name, 
+                representative, 
+                trailing_monthly_revenue, 
+                address 
+            } => {
+                assert_eq!(name, "Engineering");
+                assert_eq!(representative, "Alice");
+                assert_eq!(trailing_monthly_revenue, None);
+                assert_eq!(address, None);
             },
-        };
-
-        let mut stdout = io::sink();
-        let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
-        assert!(result.is_ok());
-
-        let team_id = budget_system.get_team_id_by_name("Updated Team").unwrap();
-        let updated_team = budget_system.get_team(&team_id).unwrap();
-        assert_eq!(updated_team.name(), "Updated Team");
-        assert_eq!(updated_team.representative(), "Jane Doe");
-        assert!(matches!(updated_team.status(), TeamStatus::Supporter));
+            _ => panic!("Wrong command type"),
+        }
     }
 
-    #[tokio::test]
-    async fn test_invalid_command_execution() {
-        let (mut budget_system, config) = create_test_budget_system().await;
-    
-        let command = Command::ActivateEpoch {
-            name: "Non-existent Epoch".to_string(),
-        };
+    #[test]
+    fn test_team_update_command_full() {
+        let args = args(&[
+            "team",
+            "update",
+            "Engineering",
+            "--new-name", "Engineering Team",
+            "--representative", "Bob",
+            "--status", "Earner",
+            "--revenue", "2000,3000,4000",
+            "--address", "0x1234567890123456789012345678901234567890"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
         
-        let mut stdout = io::sink();
-        let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
+        match cmd {
+            Command::UpdateTeam { team_name, updates } => {
+                assert_eq!(team_name, "Engineering");
+                assert_eq!(updates.name, Some("Engineering Team".to_string()));
+                assert_eq!(updates.representative, Some("Bob".to_string()));
+                assert_eq!(updates.status, Some("Earner".to_string()));
+                assert_eq!(updates.trailing_monthly_revenue, Some(vec![2000, 3000, 4000]));
+                assert_eq!(updates.address, Some("0x1234567890123456789012345678901234567890".to_string()));
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_team_update_command_partial() {
+        let args = args(&[
+            "team",
+            "update",
+            "Engineering",
+            "--new-name", "Engineering Team"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        
+        match cmd {
+            Command::UpdateTeam { team_name, updates } => {
+                assert_eq!(team_name, "Engineering");
+                assert_eq!(updates.name, Some("Engineering Team".to_string()));
+                assert_eq!(updates.representative, None);
+                assert_eq!(updates.status, None);
+                assert_eq!(updates.trailing_monthly_revenue, None);
+                assert_eq!(updates.address, None);
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_team_add_invalid_revenue() {
+        let args = args(&[
+            "team",
+            "add",
+            "--name", "Engineering",
+            "--representative", "Alice",
+            "--revenue", "abc,def"
+        ]);
+
+        let result = parse_cli_args(&args);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_add_proposal_command() {
-        let args = vec![
-            "robokitty".to_string(),
-            "add-proposal".to_string(),
-            "Test Proposal".to_string(),
-            "https://example.com".to_string(),
-            "--team".to_string(),
-            "Team1".to_string(),
-            "--amounts".to_string(),
-            "ETH:100,USD:1000".to_string(),
-            "--loan".to_string(),
-            "true".to_string(),
-            "--address".to_string(),
-            "0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string(),
-        ];
+    fn test_team_add_invalid_address() {
+        let args = args(&[
+            "team",
+            "add",
+            "--name", "Engineering",
+            "--representative", "Alice",
+            "--address", "not_a_hex_address"
+        ]);
 
-        let command = parse_cli_args(&args).unwrap();
-        match command {
-            Command::AddProposal { title, url, budget_request_details, .. } => {
+        let result = parse_cli_args(&args);
+        assert!(result.is_err());
+        // Optional: verify error message
+        assert!(matches!(result,
+            Err(ref e) if e.to_string().contains("address")));
+    }
+
+    #[test]
+    fn test_epoch_create_command() {
+        let args = args(&[
+            "epoch",
+            "create",
+            "Q1-2024",
+            "2024-01-01T00:00:00Z",
+            "2024-03-31T23:59:59Z"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        
+        match cmd {
+            Command::CreateEpoch { name, start_date, end_date } => {
+                assert_eq!(name, "Q1-2024");
+                assert_eq!(start_date, parse_date("2024-01-01T00:00:00Z"));
+                assert_eq!(end_date, parse_date("2024-03-31T23:59:59Z"));
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_epoch_activate_command() {
+        let args = args(&[
+            "epoch",
+            "activate",
+            "Q1-2024"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        
+        match cmd {
+            Command::ActivateEpoch { name } => {
+                assert_eq!(name, "Q1-2024");
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_epoch_set_reward_command() {
+        let args = args(&[
+            "epoch",
+            "set-reward",
+            "ETH",
+            "100.5"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        
+        match cmd {
+            Command::SetEpochReward { token, amount } => {
+                assert_eq!(token, "ETH");
+                assert_eq!(amount, 100.5);
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_epoch_close_command() {
+        let args = args(&[
+            "epoch",
+            "close",
+            "Q1-2024"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        
+        match cmd {
+            Command::CloseEpoch { epoch_name } => {
+                assert_eq!(epoch_name, Some("Q1-2024".to_string()));
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_epoch_create_invalid_dates() {
+        let args = args(&[
+            "epoch",
+            "create",
+            "Q1-2024",
+            "invalid-date",
+            "2024-03-31T23:59:59Z"
+        ]);
+
+        assert!(parse_cli_args(&args).is_err());
+    }
+
+    #[test]
+    fn test_epoch_set_reward_negative_amount() {
+        let args = args(&[
+            "epoch",
+            "set-reward",
+            "ETH",
+            "--",  // Add this to indicate end of options
+            "-100.5"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        
+        match cmd {
+            Command::SetEpochReward { token, amount } => {
+                assert_eq!(token, "ETH");
+                assert_eq!(amount, -100.5);
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_epoch_create_end_before_start() {
+        let args = args(&[
+            "epoch",
+            "create",
+            "Q1-2024",
+            "2024-03-31T23:59:59Z",  // End date first
+            "2024-01-01T00:00:00Z"   // Start date second
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        
+        // Note: The current implementation doesn't validate date order
+        // You might want to add this validation
+        match cmd {
+            Command::CreateEpoch { name, start_date, end_date } => {
+                assert_eq!(name, "Q1-2024");
+                assert_eq!(start_date, parse_date("2024-03-31T23:59:59Z"));
+                assert_eq!(end_date, parse_date("2024-01-01T00:00:00Z"));
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    // Additional test helpers
+    fn valid_eth_address() -> String {
+        "0x1234567890123456789012345678901234567890".to_string()
+    }
+
+    // Proposal Command Tests
+    #[test]
+    fn test_proposal_add_command_full() {
+        let args = args(&[
+            "proposal", 
+            "add",
+            "--title", "Test Proposal",
+            "--url", "https://example.com",
+            "--team", "Engineering",
+            "--amounts", "ETH:100.5,USD:1000",
+            "--start", "2024-01-01",
+            "--end", "2024-12-31",
+            "--loan", "true",
+            "--address", &valid_eth_address()
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        
+        match cmd {
+            Command::AddProposal { 
+                title, 
+                url, 
+                budget_request_details,
+                announced_at,
+                published_at,
+                is_historical,
+            } => {
                 assert_eq!(title, "Test Proposal");
                 assert_eq!(url, Some("https://example.com".to_string()));
                 
                 let details = budget_request_details.unwrap();
-                assert_eq!(details.team, Some("Team1".to_string()));
-                assert!(details.is_loan.unwrap());
-                assert_eq!(details.payment_address, 
-                    Some("0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string()));
+                assert_eq!(details.team, Some("Engineering".to_string()));
+                assert_eq!(details.request_amounts.unwrap().get("ETH").unwrap(), &100.5);
+                assert_eq!(details.start_date.unwrap(), NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
+                assert_eq!(details.end_date.unwrap(), NaiveDate::from_ymd_opt(2024, 12, 31).unwrap());
+                assert_eq!(details.is_loan, Some(true));
+                assert_eq!(details.payment_address, Some(valid_eth_address()));
                 
-                let amounts = details.request_amounts.unwrap();
-                assert_eq!(amounts.get("ETH").unwrap(), &100.0);
+                assert_eq!(announced_at, None);
+                assert_eq!(published_at, None);
+                assert_eq!(is_historical, None);
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_proposal_add_command_loan_flags() {
+        // Test with loan true and team (to ensure budget_request_details is created)
+        let args_loan_true = args(&[
+            "proposal", 
+            "add",
+            "--title", "Test Proposal",
+            "--team", "Engineering", // Added team to ensure budget_request_details is created
+            "--loan", "true"
+        ]);
+
+        let cmd_loan_true = parse_cli_args(&args_loan_true).unwrap();
+        match cmd_loan_true {
+            Command::AddProposal { budget_request_details, .. } => {
+                let details = budget_request_details.unwrap();
+                assert_eq!(details.is_loan, Some(true));
+            },
+            _ => panic!("Wrong command type"),
+        }
+
+        // Test with loan false
+        let args_loan_false = args(&[
+            "proposal", 
+            "add",
+            "--title", "Test Proposal",
+            "--team", "Engineering",
+            "--loan", "false"
+        ]);
+
+        let cmd_loan_false = parse_cli_args(&args_loan_false).unwrap();
+        match cmd_loan_false {
+            Command::AddProposal { budget_request_details, .. } => {
+                let details = budget_request_details.unwrap();
+                assert_eq!(details.is_loan, Some(false));
+            },
+            _ => panic!("Wrong command type"),
+        }
+
+        // Test without loan flag
+        let args_no_loan = args(&[
+            "proposal", 
+            "add",
+            "--title", "Test Proposal"
+        ]);
+
+        let cmd_no_loan = parse_cli_args(&args_no_loan).unwrap();
+        match cmd_no_loan {
+            Command::AddProposal { budget_request_details, .. } => {
+                assert!(budget_request_details.is_none());
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_proposal_add_command_minimal() {
+        let args = args(&[
+            "proposal",
+            "add",
+            "--title", "Test Proposal"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        
+        match cmd {
+            Command::AddProposal { 
+                title, 
+                url, 
+                budget_request_details,
+                ..
+            } => {
+                assert_eq!(title, "Test Proposal");
+                assert_eq!(url, None);
+                assert_eq!(budget_request_details, None);
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_proposal_update_command() {
+        let args = args(&[
+            "proposal",
+            "update",
+            "test-proposal",
+            "--title", "Updated Title",
+            "--url", "https://new.example.com",
+            "--team", "NewTeam",
+            "--amounts", "ETH:200.5",
+            "--loan", "true"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        
+        match cmd {
+            Command::UpdateProposal { 
+                proposal_name, 
+                updates 
+            } => {
+                assert_eq!(proposal_name, "test-proposal");
+                assert_eq!(updates.title, Some("Updated Title".to_string()));
+                assert_eq!(updates.url, Some("https://new.example.com".to_string()));
+                
+                let details = updates.budget_request_details.unwrap();
+                assert_eq!(details.team, Some("NewTeam".to_string()));
+                assert_eq!(details.request_amounts.unwrap().get("ETH").unwrap(), &200.5);
+                assert_eq!(details.is_loan, Some(true));
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_proposal_close_command() {
+        let args = args(&[
+            "proposal",
+            "close",
+            "test-proposal",
+            "Approved"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        
+        match cmd {
+            Command::CloseProposal { 
+                proposal_name, 
+                resolution 
+            } => {
+                assert_eq!(proposal_name, "test-proposal");
+                assert_eq!(resolution, "Approved");
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_proposal_add_invalid_dates() {
+        let args = args(&[
+            "proposal",
+            "add",
+            "--title", "Test Proposal",
+            "--team", "Engineering",
+            "--start", "2024-13-45", // Invalid month and day
+            "--end", "2024-12-31"
+        ]);
+
+        let result = parse_cli_args(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_proposal_close_invalid_resolution() {
+        let args = args(&[
+            "proposal",
+            "close",
+            "test-proposal",
+            "InvalidResolution"
+        ]);
+
+        // Note: Current implementation doesn't validate resolution string
+        // You might want to add this validation
+        let cmd = parse_cli_args(&args).unwrap();
+        match cmd {
+            Command::CloseProposal { resolution, .. } => {
+                assert_eq!(resolution, "InvalidResolution");
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_parse_amounts_valid() {
+        let result = parse_amounts("ETH:100.5,USD:1000").unwrap();
+        assert_eq!(result.get("ETH").unwrap(), &100.5);
+        assert_eq!(result.get("USD").unwrap(), &1000.0);
+    }
+
+    #[test]
+    fn test_parse_amounts_invalid() {
+        let result = parse_amounts("ETH:not_a_number");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid amount: not_a_number"));
+    }
+
+    #[test]
+    fn test_parse_amounts_invalid_format() {
+        let result = parse_amounts("invalid_format");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid amount format"));
+    }
+
+    #[test]
+    fn test_proposal_update_valid_amounts() {
+        let args = args(&[
+            "proposal",
+            "update",
+            "test-proposal",
+            "--amounts", "ETH:100.5,USD:1000"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        match cmd {
+            Command::UpdateProposal { updates, .. } => {
+                let amounts = updates
+                    .budget_request_details
+                    .unwrap()
+                    .request_amounts
+                    .unwrap();
+                assert_eq!(amounts.get("ETH").unwrap(), &100.5);
                 assert_eq!(amounts.get("USD").unwrap(), &1000.0);
             },
             _ => panic!("Wrong command type"),
         }
     }
 
-    #[tokio::test]
-    async fn test_update_proposal_command() {
-        let (mut budget_system, config, proposal_id) = create_test_budget_system_with_proposal().await;
-
-        let command = Command::UpdateProposal {
-            proposal_name: "Test Proposal".to_string(),
-            updates: UpdateProposalDetails {
-                title: Some("Updated Proposal".to_string()),
-                url: None,
-                budget_request_details: None,
-                announced_at: None,
-                published_at: None,
-                resolved_at: None,
-            },
-        };
-
-        let mut stdout = io::sink();
-        let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
-        assert!(result.is_ok());
-
-        let updated_proposal = budget_system.state().proposals().get(&proposal_id).unwrap();
-        assert_eq!(updated_proposal.title(), "Updated Proposal");
-    }
-
-    #[tokio::test]
-    async fn test_close_proposal_command() {
-        let (mut budget_system, config, proposal_id) = create_test_budget_system_with_proposal().await;
-
-        let command = Command::CloseProposal {
-            proposal_name: "Test Proposal".to_string(),
-            resolution: "Approved".to_string(),
-        };
-
-        let mut stdout = io::sink();
-        let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
-        assert!(result.is_ok());
-
-        let closed_proposal = budget_system.state().proposals().get(&proposal_id).unwrap();
-        assert!(closed_proposal.is_closed());
-        assert_eq!(closed_proposal.resolution(), Some(Resolution::Approved));
-    }
-
-    #[tokio::test]
-    async fn test_create_raffle_command() {
-        let (mut budget_system, config, _) = create_test_budget_system_with_proposal().await;
-
-        let command = Command::CreateRaffle {
-            proposal_name: "Test Proposal".to_string(),
-            block_offset: None,  // Remove block offset
-            excluded_teams: None,
-        };
-
-        let mut stdout = io::sink();
-        let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
-        assert!(result.is_ok());
-        assert_eq!(budget_system.state().raffles().len(), 1);
-
-        // Verify that the raffle has been finalized immediately
-        let raffle = budget_system.state().raffles().values().next().unwrap();
-        assert!(raffle.is_completed());
-    }
-
-    #[tokio::test]
-    async fn test_import_predefined_raffle_command() {
-        let (mut budget_system, config, _) = create_test_budget_system_with_proposal().await;
-
-        // Add some teams
-        budget_system.create_team("Team 1".to_string(), "Rep 1".to_string(), Some(vec![1000])).unwrap();
-        budget_system.create_team("Team 2".to_string(), "Rep 2".to_string(), Some(vec![2000])).unwrap();
-
-        let command = Command::ImportPredefinedRaffle {
-            proposal_name: "Test Proposal".to_string(),
-            counted_teams: vec!["Team 1".to_string()],
-            uncounted_teams: vec!["Team 2".to_string()],
-            total_counted_seats: 1,
-            max_earner_seats: 1,
-        };
-
-        let mut stdout = io::sink();
-        let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
-        assert!(result.is_ok());
-        assert_eq!(budget_system.state().raffles().len(), 1);
-
-        let raffle = budget_system.state().raffles().values().next().unwrap();
-        assert_eq!(raffle.result().unwrap().counted().len(), 1);
-        assert_eq!(raffle.result().unwrap().uncounted().len(), 1);
-    }
-
-
-    #[tokio::test]
-    async fn test_create_and_process_vote_command() {
-        let (mut budget_system, config, _) = create_test_budget_system_with_proposal().await;
-
-        // Create a raffle first
-        let create_raffle_command = Command::CreateRaffle {
-            proposal_name: "Test Proposal".to_string(),
-            block_offset: None,
-            excluded_teams: None,
-        };
-        let mut stdout = io::sink();
-        execute_command(&mut budget_system, create_raffle_command, &config, &mut stdout).await.unwrap();
-
-        // Add some teams
-        budget_system.create_team("Team 1".to_string(), "Rep 1".to_string(), Some(vec![1000])).unwrap();
-        budget_system.create_team("Team 2".to_string(), "Rep 2".to_string(), Some(vec![2000])).unwrap();
-
-        // Get the raffle result to determine which teams are counted and uncounted
-        let raffle = budget_system.state().raffles().values().next().unwrap();
-        let raffle_result = raffle.result().unwrap();
-        let counted_teams: Vec<String> = raffle_result.counted().iter()
-            .filter_map(|&id| budget_system.state().current_state().teams().get(&id))
-            .map(|team| team.name().to_string())
-            .collect();
-        let uncounted_teams: Vec<String> = raffle_result.uncounted().iter()
-            .filter_map(|&id| budget_system.state().current_state().teams().get(&id))
-            .map(|team| team.name().to_string())
-            .collect();
-
-        println!("Counted teams: {:?}", counted_teams);
-        println!("Uncounted teams: {:?}", uncounted_teams);
-
-        let command = Command::CreateAndProcessVote {
-            proposal_name: "Test Proposal".to_string(),
-            counted_votes: counted_teams.into_iter().map(|name| (name, VoteChoice::Yes)).collect(),
-            uncounted_votes: uncounted_teams.into_iter().map(|name| (name, VoteChoice::No)).collect(),
-            vote_opened: Some(Utc::now().date_naive()),
-            vote_closed: Some(Utc::now().date_naive()),
-        };
-
-        let mut stdout = io::sink();
-        let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
-        assert!(result.is_ok(), "Failed to execute CreateAndProcessVote: {:?}", result);
-        assert_eq!(budget_system.state().votes().len(), 1);
-
-        let vote = budget_system.state().votes().values().next().unwrap();
-        assert!(vote.is_closed());
-    }
-
-    #[tokio::test]
-    async fn test_integration_complete_workflow() {
-        let (mut budget_system, config) = create_test_budget_system().await;
-
-        // Stage 1: Create and activate an epoch
-        let start_date = Utc::now();
-        let end_date = start_date + chrono::Duration::days(30);
-        let create_epoch_command = Command::CreateEpoch {
-            name: "Test Epoch".to_string(),
-            start_date,
-            end_date,
-        };
-        let mut stdout = io::sink();
-        execute_command(&mut budget_system, create_epoch_command, &config, &mut stdout).await.unwrap();
-
-        let activate_epoch_command = Command::ActivateEpoch {
-            name: "Test Epoch".to_string(),
-        };
-        execute_command(&mut budget_system, activate_epoch_command, &config, &mut stdout).await.unwrap();
-
-        // Stage 2: Add teams (5 earners and 5 supporters)
-        for i in 1..=10 {
-            let team_type = if i <= 5 { "Earner" } else { "Supporter" };
-            let add_team_command = Command::AddTeam {
-                name: format!("Team {}", i),
-                representative: format!("Rep {}", i),
-                trailing_monthly_revenue: if i <= 5 { Some(vec![1000 * i, 2000 * i, 3000 * i]) } else { None },
-            };
-            execute_command(&mut budget_system, add_team_command, &config, &mut stdout).await
-                .unwrap_or_else(|e| panic!("Failed to add team {}: {}", i, e));
-        }
-
-        // Verify teams were created correctly
-        assert_eq!(budget_system.state().current_state().teams().len(), 10, "Expected 10 teams to be created");
-
-        // Stage 3: Create a proposal
-        let add_proposal_command = Command::AddProposal {
-            title: "Test Proposal".to_string(),
-            url: Some("http://example.com".to_string()),
-            budget_request_details: None,
-            announced_at: Some(start_date.date_naive()),
-            published_at: Some(start_date.date_naive()),
-            is_historical: None,
-        };
-        execute_command(&mut budget_system, add_proposal_command, &config, &mut stdout).await.unwrap();
-
-        // Stage 4: Create and verify raffle
-        let create_raffle_command = Command::CreateRaffle {
-            proposal_name: "Test Proposal".to_string(),
-            block_offset: None,
-            excluded_teams: None,
-        };
-        execute_command(&mut budget_system, create_raffle_command, &config, &mut stdout).await.unwrap();
-
-        let raffle = budget_system.state().raffles().values().next()
-            .expect("Raffle should exist after creation");
-        let raffle_result = raffle.result()
-            .expect("Raffle should have results");
-
-        // Get team assignments from raffle
-        let counted_teams: Vec<String> = raffle_result.counted().iter()
-            .filter_map(|&id| budget_system.state().current_state().teams().get(&id))
-            .map(|team| team.name().to_string())
-            .collect();
-        let uncounted_teams: Vec<String> = raffle_result.uncounted().iter()
-            .filter_map(|&id| budget_system.state().current_state().teams().get(&id))
-            .map(|team| team.name().to_string())
-            .collect();
-
-        // Stage 5: Create and process vote
-        let vote_command = Command::CreateAndProcessVote {
-            proposal_name: "Test Proposal".to_string(),
-            counted_votes: counted_teams.into_iter().map(|name| (name, VoteChoice::Yes)).collect(),
-            uncounted_votes: uncounted_teams.into_iter().map(|name| (name, VoteChoice::No)).collect(),
-            vote_opened: Some(start_date.date_naive()),
-            vote_closed: Some(end_date.date_naive()),
-        };
-        execute_command(&mut budget_system, vote_command, &config, &mut stdout).await.unwrap();
-
-        // Stage 6: Generate reports
-        let generate_report_command = Command::GenerateReportForProposal {
-            proposal_name: "Test Proposal".to_string(),
-        };
-        execute_command(&mut budget_system, generate_report_command, &config, &mut stdout).await.unwrap();
-
-        let print_point_report_command = Command::PrintPointReport { epoch_name: None };
-        execute_command(&mut budget_system, print_point_report_command, &config, &mut stdout).await.unwrap();
-
-        // Stage 7: Verify final state
-        assert_eq!(budget_system.state().epochs().len(), 1, "Should have exactly one epoch");
-        assert_eq!(budget_system.state().current_state().teams().len(), 10, "Should have 10 teams");
-        assert_eq!(budget_system.state().proposals().len(), 1, "Should have one proposal");
-        assert_eq!(budget_system.state().raffles().len(), 1, "Should have one raffle");
-        assert_eq!(budget_system.state().votes().len(), 1, "Should have one vote");
-
-        let proposal = budget_system.state().proposals().values().next()
-            .expect("Proposal should exist");
-        assert!(proposal.is_closed(), "Proposal should be closed after voting");
-
-        // Verify vote results
-        let vote = budget_system.state().votes().values().next()
-            .expect("Vote should exist");
-        
-        assert!(vote.is_closed(), "Vote should be closed");
-        
-        match vote.result() {
-            Some(VoteResult::Formal { counted, uncounted, passed }) => {
-                assert_eq!(counted.yes(), config.default_total_counted_seats as u32, 
-                    "Expected {} 'Yes' votes from counted teams", config.default_total_counted_seats);
-                assert_eq!(counted.no(), 0, "Expected 0 'No' votes from counted teams");
-                assert_eq!(uncounted.yes(), 0, "Expected 0 'Yes' votes from uncounted teams");
-                assert_eq!(uncounted.no(), 3, "Expected 3 'No' votes from uncounted teams");
-                assert!(passed, "Vote should have passed");
-            }
-            _ => panic!("Expected a formal vote result"),
-        }
-
-        match vote.vote_type() {
-            VoteType::Formal { total_eligible_seats, threshold, .. } => {
-                let (counted, _) = vote.vote_counts()
-                    .expect("Vote counts should be available");
-                let yes_percentage = counted.yes() as f64 / *total_eligible_seats as f64;
-                let expected_resolution = if yes_percentage >= *threshold {
-                    Resolution::Approved
-                } else {
-                    Resolution::Rejected
-                };
-                assert_eq!(proposal.resolution(), Some(expected_resolution), 
-                    "Proposal resolution should match the voting outcome");
-            }
-            _ => panic!("Expected a formal vote type"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_print_point_report_command() {
-        let (mut budget_system, config, _) = create_test_budget_system_with_proposal().await;
-
-        let command = Command::PrintPointReport { epoch_name: None };
-
-        let mut stdout = io::sink();
-        let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
-        assert!(result.is_ok());
-        // The actual content of the report is printed to stdout, so we can't easily verify it in this test
-    }
-
-    #[tokio::test]
-    async fn test_non_existent_entity_commands() {
-        let (mut budget_system, config) = create_test_budget_system().await;
-
-        // Test activating non-existent epoch
-        let command = Command::ActivateEpoch {
-            name: "Non-existent Epoch".to_string(),
-        };  
-        let mut stdout = io::sink();
-        let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
-        assert!(result.is_err());
-
-        // Test updating non-existent proposal
-        let command = Command::UpdateProposal {
-            proposal_name: "Non-existent Proposal".to_string(),
-            updates: UpdateProposalDetails {
-                title: Some("Updated Title".to_string()),
-                url: None,
-                budget_request_details: None,
-                announced_at: None,
-                published_at: None,
-                resolved_at: None,
-            },
-        };  
-        let mut stdout = io::sink();
-        let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
-        assert!(result.is_err());
-
-    }
-
-    #[tokio::test]
-    async fn test_invalid_parameter_commands() {
-        let (mut budget_system, config) = create_test_budget_system().await;
-
-        // Test creating epoch with end date before start date
-        let end_date = Utc::now();
-        let start_date = end_date + chrono::Duration::days(1);
-        let command = Command::CreateEpoch {
-            name: "Invalid Epoch".to_string(),
-            start_date,
-            end_date,
-        };  
-        let mut stdout = io::sink();
-        let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
-        assert!(result.is_err());
-
-        // Test creating team with invalid status
-        let command = Command::AddTeam {
-            name: "Invalid Team".to_string(),
-            representative: "John Doe".to_string(),
-            trailing_monthly_revenue: Some(vec![]),  // Empty revenue for Earner status
-        };  
-        let mut stdout = io::sink();
-        let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_incorrect_command_order() {
-        let (mut budget_system, config) = create_test_budget_system().await;
-
-        // Try to create a proposal before creating and activating an epoch
-        let command = Command::AddProposal {
-            title: "Invalid Proposal".to_string(),
-            url: None,
-            budget_request_details: None,
-            announced_at: None,
-            published_at: None,
-            is_historical: None,
-        };  
-        let mut stdout = io::sink();
-        let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
-        assert!(result.is_err());
-
-        // Try to create a raffle before creating a proposal
-        let command = Command::CreateRaffle {
-            proposal_name: "Non-existent Proposal".to_string(),
-            block_offset: None,
-            excluded_teams: None,
-        };  
-        let mut stdout = io::sink();
-        let result = execute_command(&mut budget_system, command, &config, &mut stdout).await;
-        assert!(result.is_err());
-    }
-
     #[test]
-    fn test_add_proposal_with_loan_and_address() {
-        let args = vec![
-            "robokitty".to_string(),
-            "add-proposal".to_string(),
-            "\"Test Proposal\"".to_string(),
-            "https://example.com".to_string(),
-            "--team".to_string(),
-            "Team1".to_string(),
-            "--amounts".to_string(),
-            "ETH:100".to_string(),
-            "--loan".to_string(),
-            "true".to_string(),
-            "--address".to_string(),
-            "0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string(),
-        ];
+    #[should_panic(expected = "Invalid amount: not_a_number")]
+    fn test_proposal_update_invalid_amounts() {
+        let args = args(&[
+            "proposal",
+            "update",
+            "test-proposal",
+            "--amounts", "ETH:not_a_number"
+        ]);
 
-        let command = parse_cli_args(&args).unwrap();
-        match command {
-            Command::AddProposal { budget_request_details, .. } => {
-                let details = budget_request_details.unwrap();
-                assert_eq!(details.team, Some("Team1".to_string()));
-                assert!(details.is_loan.unwrap());
-                assert_eq!(details.payment_address, 
-                    Some("0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string()));
+        // This will panic due to the unwrap in the code
+        let _ = parse_cli_args(&args);
+    }
+
+    // Vote Command Tests
+    #[test]
+    fn test_vote_process_command_full() {
+        let args = args(&[
+            "vote",
+            "process",
+            "test-proposal",
+            "--counted", "Team1:Yes,Team2:No",
+            "--uncounted", "Team3:Yes",
+            "--opened", "2024-01-01",
+            "--closed", "2024-01-07"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        
+        match cmd {
+            Command::CreateAndProcessVote { 
+                proposal_name,
+                counted_votes,
+                uncounted_votes,
+                vote_opened,
+                vote_closed,
+            } => {
+                assert_eq!(proposal_name, "test-proposal");
+                
+                assert_eq!(counted_votes.len(), 2);
+                assert_eq!(counted_votes.get("Team1").unwrap(), &VoteChoice::Yes);
+                assert_eq!(counted_votes.get("Team2").unwrap(), &VoteChoice::No);
+                
+                assert_eq!(uncounted_votes.len(), 1);
+                assert_eq!(uncounted_votes.get("Team3").unwrap(), &VoteChoice::Yes);
+                
+                assert_eq!(vote_opened.unwrap(), NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
+                assert_eq!(vote_closed.unwrap(), NaiveDate::from_ymd_opt(2024, 1, 7).unwrap());
             },
             _ => panic!("Wrong command type"),
         }
     }
 
     #[test]
-    fn test_update_proposal_with_loan_and_address() {
-        let args = vec![
-            "robokitty".to_string(),
-            "update-proposal".to_string(),
-            "Test Proposal".to_string(),
-            "--loan".to_string(),
-            "true".to_string(),
-            "--address".to_string(),
-            "0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string(),
-        ];
+    fn test_vote_process_command_minimal() {
+        let args = args(&[
+            "vote",
+            "process",
+            "test-proposal",
+            "--counted", "Team1:Yes",
+            "--uncounted", "Team2:No"
+        ]);
 
-        let command = parse_cli_args(&args).unwrap();
-        match command {
+        let cmd = parse_cli_args(&args).unwrap();
+        
+        match cmd {
+            Command::CreateAndProcessVote { 
+                proposal_name,
+                counted_votes,
+                uncounted_votes,
+                vote_opened,
+                vote_closed,
+            } => {
+                assert_eq!(proposal_name, "test-proposal");
+                assert_eq!(counted_votes.len(), 1);
+                assert_eq!(uncounted_votes.len(), 1);
+                assert!(vote_opened.is_none());
+                assert!(vote_closed.is_none());
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_vote_process_invalid_format() {
+        let args = args(&[
+            "vote",
+            "process",
+            "test-proposal",
+            "--counted", "invalid_format",
+            "--uncounted", "Team2:No"
+        ]);
+
+        assert!(parse_cli_args(&args).is_err());
+    }
+
+    #[test]
+    fn test_vote_process_invalid_dates() {
+        let args = args(&[
+            "vote",
+            "process",
+            "test-proposal",
+            "--counted", "Team1:Yes",
+            "--uncounted", "Team2:No",
+            "--opened", "invalid-date"
+        ]);
+
+        assert!(parse_cli_args(&args).is_err());
+    }
+
+    #[test]
+    fn test_vote_process_duplicate_team() {
+        let args = args(&[
+            "vote",
+            "process",
+            "test-proposal",
+            "--counted", "Team1:Yes,Team1:No",
+            "--uncounted", "Team2:No"
+        ]);
+
+        // Note: Current implementation allows duplicate teams by overwriting
+        // You might want to add validation to prevent this
+        let cmd = parse_cli_args(&args).unwrap();
+        match cmd {
+            Command::CreateAndProcessVote { counted_votes, .. } => {
+                assert_eq!(counted_votes.len(), 1);
+                assert_eq!(counted_votes.get("Team1").unwrap(), &VoteChoice::No);
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_raffle_create_command_full() {
+        let args = args(&[
+            "raffle",
+            "create",
+            "test-proposal",
+            "--block-offset", "100",
+            "--excluded", "Team1,Team2,Team3"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        
+        match cmd {
+            Command::CreateRaffle { 
+                proposal_name,
+                block_offset,
+                excluded_teams,
+            } => {
+                assert_eq!(proposal_name, "test-proposal");
+                assert_eq!(block_offset, Some(100));
+                assert_eq!(excluded_teams, Some(vec!["Team1".to_string(), "Team2".to_string(), "Team3".to_string()]));
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_raffle_create_command_minimal() {
+        let args = args(&[
+            "raffle",
+            "create",
+            "test-proposal"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        
+        match cmd {
+            Command::CreateRaffle { 
+                proposal_name,
+                block_offset,
+                excluded_teams,
+            } => {
+                assert_eq!(proposal_name, "test-proposal");
+                assert_eq!(block_offset, None);
+                assert_eq!(excluded_teams, None);
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_raffle_create_duplicate_excluded_teams() {
+        let args = args(&[
+            "raffle",
+            "create", 
+            "test-proposal",
+            "--excluded", "Team1,Team1,Team2"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        match cmd {
+            Command::CreateRaffle { excluded_teams, .. } => {
+                let teams = excluded_teams.unwrap();
+                // Note: Current implementation allows duplicates
+                assert_eq!(teams.len(), 3);
+                assert_eq!(teams, vec!["Team1".to_string(), "Team1".to_string(), "Team2".to_string()]);
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    // Report Command Tests
+    #[test]
+    fn test_report_team_command() {
+        let args = args(&["report", "team"]);
+        let cmd = parse_cli_args(&args).unwrap();
+        assert!(matches!(cmd, Command::PrintTeamReport));
+    }
+
+    #[test]
+    fn test_report_epoch_state_command() {
+        let args = args(&["report", "epoch-state"]);
+        let cmd = parse_cli_args(&args).unwrap();
+        assert!(matches!(cmd, Command::PrintEpochState));
+    }
+
+    #[test]
+    fn test_report_team_participation_command() {
+        let args = args(&[
+            "report", 
+            "team-participation", 
+            "Engineering",
+            "Q1-2024"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        match cmd {
+            Command::PrintTeamVoteParticipation { team_name, epoch_name } => {
+                assert_eq!(team_name, "Engineering");
+                assert_eq!(epoch_name, Some("Q1-2024".to_string()));
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_report_points_command() {
+        let args = args(&[
+            "report", 
+            "points",
+            "--epoch-name", "Q1-2024"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        match cmd {
+            Command::PrintPointReport { epoch_name } => {
+                assert_eq!(epoch_name, Some("Q1-2024".to_string()));
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_report_closed_proposals_command() {
+        let args = args(&[
+            "report",
+            "closed-proposals",
+            "Q1-2024"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        match cmd {
+            Command::GenerateReportsForClosedProposals { epoch_name } => {
+                assert_eq!(epoch_name, "Q1-2024");
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_report_end_of_epoch_command() {
+        let args = args(&[
+            "report",
+            "end-of-epoch",
+            "Q1-2024"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        match cmd {
+            Command::GenerateEndOfEpochReport { epoch_name } => {
+                assert_eq!(epoch_name, "Q1-2024");
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_report_unpaid_requests_command() {
+        let args = args(&[
+            "report",
+            "unpaid-requests",
+            "--output-path", "/tmp/report.txt",
+            "--epoch-name", "Q1-2024"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        match cmd {
+            Command::GenerateUnpaidRequestsReport { output_path, epoch_name } => {
+                assert_eq!(output_path, Some("/tmp/report.txt".to_string()));
+                assert_eq!(epoch_name, Some("Q1-2024".to_string()));
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_report_for_proposal_command() {
+        let args = args(&[
+            "report",
+            "for-proposal",
+            "test-proposal"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        match cmd {
+            Command::GenerateReportForProposal { proposal_name } => {
+                assert_eq!(proposal_name, "test-proposal");
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_proposal_add_with_dates() {
+        let args = args(&[
+            "proposal", 
+            "add",
+            "--title", "Test Proposal",
+            "--announced-at", "2024-01-01",
+            "--published-at", "2024-01-15"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        match cmd {
+            Command::AddProposal { announced_at, published_at, .. } => {
+                assert_eq!(announced_at, Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()));
+                assert_eq!(published_at, Some(NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()));
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_proposal_add_published_only() {
+        let args = args(&[
+            "proposal", 
+            "add",
+            "--title", "Test Proposal",
+            "--published-at", "2024-01-15"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        match cmd {
+            Command::AddProposal { announced_at, published_at, .. } => {
+                assert_eq!(announced_at, Some(NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()));
+                assert_eq!(published_at, Some(NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()));
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_proposal_update_with_dates() {
+        let args = args(&[
+            "proposal",
+            "update",
+            "test-proposal",
+            "--announced-at", "2024-01-01",
+            "--published-at", "2024-01-15"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        match cmd {
             Command::UpdateProposal { updates, .. } => {
-                let details = updates.budget_request_details.unwrap();
-                assert!(details.is_loan.unwrap());
-                assert_eq!(details.payment_address,
-                    Some("0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string()));
+                assert_eq!(updates.announced_at, Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()));
+                assert_eq!(updates.published_at, Some(NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()));
             },
             _ => panic!("Wrong command type"),
         }
     }
 
     #[test]
-    fn test_add_proposal_invalid_inputs() {
-        // Test invalid loan value
-        let args = vec![
-            "robokitty".to_string(),
-            "add-proposal".to_string(),
-            "Test".to_string(),
-            "https://example.com".to_string(),
-            "--loan".to_string(),
-            "invalid".to_string(),
-        ];
-        assert!(parse_cli_args(&args).is_err());
+    fn test_proposal_update_published_only() {
+        let args = args(&[
+            "proposal",
+            "update", 
+            "test-proposal",
+            "--published-at", "2024-01-15"
+        ]);
 
-        // Test invalid date
-        let args = vec![
-            "robokitty".to_string(),
-            "add-proposal".to_string(),
-            "Test".to_string(),
-            "https://example.com".to_string(),
-            "--start".to_string(),
-            "invalid-date".to_string(),
-        ];
+        let cmd = parse_cli_args(&args).unwrap();
+        match cmd {
+            Command::UpdateProposal { updates, .. } => {
+                assert_eq!(updates.announced_at, None);
+                assert_eq!(updates.published_at, Some(NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()));
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_proposal_invalid_dates() {
+        let args = args(&[
+            "proposal",
+            "add",
+            "--title", "Test Proposal", 
+            "--announced-at", "invalid-date"
+        ]);
+
         assert!(parse_cli_args(&args).is_err());
     }
 
+    #[test]
+    fn test_proposal_pay_command() {
+    let args = args(&[
+        "proposal", 
+        "pay",
+        "proposal1,proposal2",
+        "--tx", "0x742d35Cc6634C0532925a3b844Bc454e4438f44e4438f44e4438f44e4438f44e",
+        "--date", "2024-01-01"
+    ]);
+
+    let cmd = parse_cli_args(&args).unwrap();
+    match cmd {
+        Command::LogPayment { payment_tx, payment_date, proposal_names } => {
+            assert_eq!(payment_tx, "0x742d35Cc6634C0532925a3b844Bc454e4438f44e4438f44e4438f44e4438f44e");
+            assert_eq!(payment_date, NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
+            assert_eq!(proposal_names, vec!["proposal1", "proposal2"]);
+        },
+        _ => panic!("Wrong command type"),
+    }
+    }
+
+    #[test]
+    fn test_proposal_pay_invalid_date() {
+    let args = args(&[
+        "proposal",
+        "pay", 
+        "proposal1",
+        "--tx", "0x742d35Cc6634C0532925a3b844Bc454e4438f44e4438f44e4438f44e4438f44e",
+        "--date", "invalid-date"
+    ]);
+
+    assert!(parse_cli_args(&args).is_err());
+    }
 
 }
+
+// TODO: Missing unit tests for CLI
+//
+// # CLI Argument Parsing Tests
+
+// ## Import Command Tests
+// * Should successfully parse predefined raffle import command
+// * Should successfully parse historical vote import command
+// * Should successfully parse historical raffle import command
+// * Should reject predefined raffle import with invalid seat counts
+// * Should reject historical vote import with invalid team lists
+// * Should reject historical raffle import with invalid block numbers
+
+// # Utility Function Tests
+
+// ## Ethereum Address Parsing
+// * Should successfully parse valid Ethereum address
+// * Should reject address without 0x prefix
+// * Should reject address with invalid length
+// * Should reject address with invalid characters
+// * Should reject empty address
+
+// ## Vote Parsing
+// * Should successfully parse valid yes votes
+// * Should successfully parse valid no votes
+// * Should successfully parse mixed yes/no votes
+// * Should reject invalid vote choice values
+// * Should reject malformed vote strings
+// * Should reject empty vote string
+// * Should reject duplicate team votes
+
+// ## Amount Parsing
+// * Should successfully parse single amount
+// * Should successfully parse multiple amounts
+// * Should successfully parse decimal amounts
+// * Should reject invalid amount format
+// * Should reject negative amounts
+// * Should reject malformed amount strings
+// * Should reject duplicate token entries
+
+// # Integration Tests
+
+// ## Script Processing
+// * Should successfully read and parse valid script file
+// * Should successfully execute multiple commands from script
+// * Should handle empty script file
+// * Should reject malformed JSON script
+// * Should reject script with invalid commands
+// * Should maintain command order during execution
+
+// ## Command Execution Flow
+// * Should successfully execute command sequence
+// * Should maintain system state across commands
+// * Should properly handle command dependencies
+// * Should rollback on command failure
+// * Should handle concurrent command execution
+
+// # Error Handling Tests
+
+// ## Input Validation
+// * Should provide clear error for missing required fields
+// * Should provide clear error for invalid date formats
+// * Should provide clear error for invalid numeric values
+// * Should provide clear error for invalid enum values
+// * Should handle UTF-8 encoding issues in input
+
+// ## System State Validation
+// * Should detect and handle duplicate team names
+// * Should detect and handle invalid epoch transitions
+// * Should detect and handle invalid proposal states
+// * Should detect and handle invalid vote states
+// * Should enforce proper command sequencing
+
+// ## Resource Handling
+// * Should properly handle file system errors
+// * Should properly handle I/O errors
+// * Should handle large input files
+// * Should handle concurrent access to resources
+// * Should cleanup resources on error

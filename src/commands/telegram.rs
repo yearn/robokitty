@@ -109,13 +109,26 @@ pub enum TelegramCommand {
         args: String,
     },
 
+    /// Generate unpaid requests report. 
+    /// Usage: /generate_unpaid_report [epoch_name]
+    GenerateUnpaidReport {
+        args: String,
+    },
+
+    /// Log payment for proposals.
+    /// Usage: /log_payment tx:<HASH> date:<YYYY-MM-DD> proposals:<PROP1,PROP2,...>
+    LogPayment {
+        args: String, 
+    }
+
 }
 
 #[derive(Debug)]
 struct AddTeamArgs {
     name: String,
     representative: String,
-    revenue: Option<Vec<u64>>
+    revenue: Option<Vec<u64>>,
+    address: Option<String>,
 }
 
 #[derive(Debug)]
@@ -124,7 +137,8 @@ struct UpdateTeamArgs {
     new_name: Option<String>,
     representative: Option<String>,
     status: Option<String>,
-    revenue: Option<Vec<u64>>
+    revenue: Option<Vec<u64>>,
+    address: Option<String>,
 }
 
 #[derive(Debug)]
@@ -226,12 +240,13 @@ impl TelegramCommand {
 
     fn parse_add_team(args: &[String]) -> Result<AddTeamArgs, String> {
         if args.len() < 2 {
-            return Err("Usage: /add_team <name> <representative> revenue1 revenue2 revenue3".to_string());
+            return Err("Usage: /add_team name:<name> rep:<representative> rev:<revenue1,revenue2,revenue3> addy:<default_payment_address>".to_string());
         }
 
         let mut name = None;
         let mut representative = None;
         let mut revenue = None;
+        let mut address = None;
 
         for arg in args {
             if let Some((key, value)) = arg.split_once(':') {
@@ -244,6 +259,7 @@ impl TelegramCommand {
                             .collect::<Result<Vec<_>, _>>()
                             .map_err(|e| format!("Invalid revenue format: {}", e))?)
                     },
+                    "addy" => address = Some(value.to_string()),
                     _ => return Err(format!("Unknown parameter: {}", key))
                 }
             }
@@ -253,6 +269,7 @@ impl TelegramCommand {
             name: name.ok_or("Missing name parameter")?,
             representative: representative.ok_or("Missing rep parameter")?,
             revenue,
+            address,
         })
     }
 
@@ -262,6 +279,7 @@ impl TelegramCommand {
         let mut representative = None;
         let mut status = None;
         let mut revenue = None;
+        let mut address = None;
 
         for arg in args {
             if let Some((key, value)) = arg.split_once(':') {
@@ -282,6 +300,7 @@ impl TelegramCommand {
                             .collect::<Result<Vec<_>, _>>()
                             .map_err(|e| format!("Invalid revenue format: {}", e))?)
                     },
+                    "address" => address = Some(value.to_string()),
                     _ => return Err(format!("Unknown parameter: {}", key))
                 }
             }
@@ -293,6 +312,7 @@ impl TelegramCommand {
             representative,
             status,
             revenue,
+            address
         })
     }
 
@@ -604,6 +624,7 @@ pub async fn execute_command(
                 name: team_args.name,
                 representative: team_args.representative,
                 trailing_monthly_revenue: team_args.revenue,
+                address: team_args.address,
             }).await
             .map(|s| escape_markdown(&s))
             .map_err(|e| format!("Command failed: {}", e))
@@ -633,6 +654,7 @@ pub async fn execute_command(
                     representative: update_args.representative,
                     status: update_args.status,
                     trailing_monthly_revenue: update_args.revenue,
+                    address: update_args.address,
                 }
             }).await
             .map(|s| escape_markdown(&s))
@@ -763,6 +785,75 @@ pub async fn execute_command(
             .map(|s| escape_markdown(&s))
             .map_err(|e| format!("Command failed: {}", e))
         },
+
+        TelegramCommand::GenerateUnpaidReport { args } => {
+            let epoch_name = if args.is_empty() {
+                None
+            } else {
+                Some(args)
+            };
+        
+            let temp_dir = std::env::temp_dir();
+            let output_path = temp_dir.join(format!("unpaid_report_{}.json", Utc::now().timestamp()));
+            
+            // First generate the report file
+            budget_system.generate_unpaid_requests_report(
+                Some(output_path.to_str().unwrap()),
+                epoch_name.as_deref()
+            ).map_err(|e| e.to_string())?;
+        
+            // Read and format the JSON
+            let json_content = std::fs::read_to_string(&output_path)
+                .map_err(|e| format!("Failed to read report: {}", e))?;
+            
+            // Parse and re-serialize to ensure proper formatting
+            let json_value: serde_json::Value = serde_json::from_str(&json_content)
+                .map_err(|e| format!("Failed to parse JSON: {}", e))?;
+            let formatted_json = serde_json::to_string_pretty(&json_value)
+                .map_err(|e| format!("Failed to format JSON: {}", e))?;
+            
+            // Return the formatted message
+            Ok(format!("{}\n\n```json\n\n{}\n\n```", 
+                escape_markdown("Unpaid Requests Report:"),
+                formatted_json
+            ))
+            
+        },
+
+        TelegramCommand::LogPayment { args } => {
+            let args = TelegramCommand::parse_command(&args)
+                .map_err(|e| format!("Failed to parse arguments: {}", e))?;
+        
+            let mut tx = None;
+            let mut date = None;
+            let mut proposals = None;
+        
+            for arg in args {
+                if let Some((key, value)) = arg.split_once(':') {
+                    match key.to_lowercase().as_str() {
+                        "tx" => tx = Some(value.to_string()),
+                        "date" => date = Some(NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                            .map_err(|e| format!("Invalid date format: {}", e))?),
+                        "proposals" => proposals = Some(value.split(',')
+                            .map(String::from)
+                            .collect::<Vec<String>>()),
+                        _ => return Err(format!("Unknown parameter: {}", key)),
+                    }
+                }
+            }
+        
+            let tx = tx.ok_or("Missing tx parameter")?;
+            let date = date.ok_or("Missing date parameter")?;
+            let proposals = proposals.ok_or("Missing proposals parameter")?;
+
+            budget_system.execute_command(Command::LogPayment {
+                payment_tx: tx,
+                payment_date: date,
+                proposal_names: proposals 
+            }).await
+            .map(|s| escape_markdown(&s))
+            .map_err(|e| format!("Command failed: {}", e))
+        }
     }
 }
 
@@ -773,6 +864,8 @@ mod tests {
     use chrono::TimeZone;
 
     use crate::core::budget_system::BudgetSystem;
+    use crate::core::models::BudgetRequestDetails;
+    use crate::core::models::Resolution;
     use crate::services::ethereum::MockEthereumService;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -1550,6 +1643,145 @@ mod tests {
         let args = TelegramCommand::parse_command(input).unwrap();
         let result = TelegramCommand::parse_update_proposal(&args);
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_generate_unpaid_report_command() {
+        use crate::core::models::BudgetRequestDetails;
+        use crate::core::models::Resolution;
+
+        let (mut budget_system, _temp_dir) = create_test_budget_system().await;
+        let start_date = Utc::now();
+        let end_date = start_date + chrono::Duration::days(30);
+        budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
+        budget_system.activate_epoch(budget_system.get_epoch_id_by_name("Test Epoch").unwrap()).unwrap();
+
+        let team_id = budget_system.create_team(
+            "Test Team".to_string(),
+            "Representative".to_string(),
+            Some(vec![1000]),
+            None
+        ).unwrap();
+
+        let mut amounts = HashMap::new();
+        amounts.insert("ETH".to_string(), 100.0);
+        
+        let proposal_id = budget_system.add_proposal(
+            "Test Proposal".to_string(),
+            None,
+            Some(BudgetRequestDetails::new(
+                Some(team_id),
+                amounts,
+                None,
+                None,
+                Some(false),
+                Some("0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string()),
+            ).unwrap()),
+            Some(Utc::now().date_naive()),
+            Some(Utc::now().date_naive()),
+            None,
+        ).unwrap();
+
+        budget_system.close_with_reason(proposal_id, &Resolution::Approved).unwrap();
+
+        // Test command without epoch name
+        let command = TelegramCommand::GenerateUnpaidReport { 
+            args: "".to_string() 
+        };
+        
+        let result = execute_command(command, &mut budget_system).await;
+        assert!(result.is_ok());
+        
+        let response = result.unwrap();
+        assert!(response.contains("```json"));
+        assert!(response.contains("Test Proposal"));
+        assert!(response.contains("Test Team"));
+
+        // Test with epoch name
+        let command = TelegramCommand::GenerateUnpaidReport { 
+            args: "Test Epoch".to_string() 
+        };
+        
+        let result = execute_command(command, &mut budget_system).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_log_payment_command() {
+        let (mut budget_system, _temp_dir) = create_test_budget_system().await;
+        
+        let start_date = Utc::now();
+        let end_date = start_date + chrono::Duration::days(30);
+        budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
+        budget_system.activate_epoch(budget_system.get_epoch_id_by_name("Test Epoch").unwrap()).unwrap();
+
+        let proposal_id = budget_system.add_proposal(
+            "Test Proposal".to_string(),
+            None,
+            Some(BudgetRequestDetails::new(
+                None,
+                [("ETH".to_string(), 100.0)].iter().cloned().collect(),
+                None,
+                None,
+                Some(false),
+                Some("0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string()),
+            ).unwrap()),
+            Some(Utc::now().date_naive()),
+            Some(Utc::now().date_naive()),
+            None,
+        ).unwrap();
+
+        // Approve the proposal
+        budget_system.close_with_reason(proposal_id, &Resolution::Approved).unwrap();
+
+        // Test command execution
+        let command = TelegramCommand::LogPayment {
+            args: "tx:0x742d35Cc6634C0532925a3b844Bc454e4438f44e4438f44e4438f44e4438f44e date:2024-01-01 proposals:Test Proposal".to_string()
+        };
+
+        let result = execute_command(command, &mut budget_system).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("Payment recorded"));
+
+        // Verify payment was recorded
+        let proposal = budget_system.get_proposal(&proposal_id).unwrap();
+        assert!(proposal.budget_request_details().unwrap().is_paid());
+    }
+
+    #[tokio::test]
+    async fn test_log_payment_missing_parameters() {
+        let (mut budget_system, _temp_dir) = create_test_budget_system().await;
+        
+        let start_date = Utc::now();
+        let end_date = start_date + chrono::Duration::days(30);
+        budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
+        budget_system.activate_epoch(budget_system.get_epoch_id_by_name("Test Epoch").unwrap()).unwrap();
+
+        let command = TelegramCommand::LogPayment {
+            args: "tx:0x742d35Cc6634C0532925a3b844Bc454e4438f44e4438f44e4438f44e4438f44e".to_string()
+        };
+
+        let result = execute_command(command, &mut budget_system).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Missing"));
+    }
+
+    #[tokio::test]
+    async fn test_log_payment_invalid_date() {
+        let (mut budget_system, _temp_dir) = create_test_budget_system().await;
+        
+        let start_date = Utc::now();
+        let end_date = start_date + chrono::Duration::days(30);
+        budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
+        budget_system.activate_epoch(budget_system.get_epoch_id_by_name("Test Epoch").unwrap()).unwrap();
+
+        let command = TelegramCommand::LogPayment {
+            args: "tx:0x742d35Cc6634C0532925a3b844Bc454e4438f44e4438f44e4438f44e4438f44e date:invalid proposals:Test Proposal".to_string()
+        };
+
+        let result = execute_command(command, &mut budget_system).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid date"));
     }
 
 }

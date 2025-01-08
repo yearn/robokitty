@@ -26,6 +26,7 @@ pub enum Command {
         name: String,
         representative: String,
         trailing_monthly_revenue: Option<Vec<u64>>,
+        address: Option<String>,
     },
     UpdateTeam {
         team_name: String,
@@ -107,6 +108,15 @@ pub enum Command {
     RunScript {
         script_file_path: Option<String>,
     },
+    GenerateUnpaidRequestsReport {
+        output_path: Option<String>,
+        epoch_name: Option<String>,
+    },
+    LogPayment {
+        payment_tx: String,
+        payment_date: NaiveDate,
+        proposal_names: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,9 +125,10 @@ pub struct UpdateTeamDetails {
     pub representative: Option<String>,
     pub status: Option<String>,
     pub trailing_monthly_revenue: Option<Vec<u64>>,
+    pub address: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BudgetRequestDetailsCommand {
     pub team: Option<String>,
     pub request_amounts: Option<HashMap<String, f64>>,

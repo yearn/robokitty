@@ -161,7 +161,8 @@ mod tests {
         let team = Team::new(
             "Test Team".to_string(),
             "John Doe".to_string(),
-            Some(vec![1000, 2000, 3000])
+            Some(vec![1000, 2000, 3000]),
+            None
         ).unwrap();
         state.add_team(team);
         state
@@ -250,6 +251,7 @@ mod tests {
             let new_team = Team::new(
                 "New Team".to_string(),
                 "Jane Doe".to_string(),
+                None,
                 None
             ).unwrap();
             new_state.add_team(new_team);
@@ -612,7 +614,7 @@ mod tests {
             let mut budget_system = create_mock_budget_system(&temp_dir).await;
 
             // Modify the state
-            budget_system.create_team("Test Team".to_string(), "John Doe".to_string(), Some(vec![1000, 2000, 3000])).unwrap();
+            budget_system.create_team("Test Team".to_string(), "John Doe".to_string(), Some(vec![1000, 2000, 3000]), None).unwrap();
 
             // Save the state
             budget_system.save_state().unwrap();
@@ -631,7 +633,7 @@ mod tests {
             let mut initial_budget_system = create_mock_budget_system(&temp_dir).await;
 
             // Modify and save the initial state
-            initial_budget_system.create_team("Existing Team".to_string(), "Jane Doe".to_string(), None).unwrap();
+            initial_budget_system.create_team("Existing Team".to_string(), "Jane Doe".to_string(), None, None).unwrap();
             initial_budget_system.save_state().unwrap();
 
             // Initialize a new budget system with the existing state
