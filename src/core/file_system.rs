@@ -11,8 +11,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::error::Error;
-use log::{debug, info, error};
-use uuid::Uuid;
 
 pub struct FileSystem;
 
@@ -68,19 +66,12 @@ impl FileSystem {
             .map(|date| date.format("%Y%m%d").to_string())
             .unwrap_or_else(|| "00000000".to_string());
     
-        let team_part = proposal.budget_request_details()
-            .as_ref()
-            .and_then(|details| details.team())
-            .map(|team_id| format!("-{}", Self::sanitize_filename(&team_id.to_string())))
-            .unwrap_or_default();
-    
         let sanitized_title = Self::sanitize_filename(proposal.title());
     
         // Calculate the maximum length for the title
         let max_title_length = 255 
             - reports_dir.as_os_str().len() 
             - date.len() 
-            - team_part.len() 
             - 5; // 5 for the dash, file extension (.md), and some buffer
     
         let truncated_title = if sanitized_title.len() > max_title_length {
@@ -89,7 +80,7 @@ impl FileSystem {
             sanitized_title
         };
     
-        let file_name = format!("{}{}-{}.md", date, team_part, truncated_title);
+        let file_name = format!("{}-{}.md", date, truncated_title);
         reports_dir.join(file_name)
     }
 
@@ -143,14 +134,10 @@ impl FileSystem {
 mod tests {
     use super::*;
     use tempfile::TempDir;
-    use chrono::{Utc, NaiveDate};
-    use crate::core::models::{Proposal, Team, TeamStatus};
+    use chrono::Utc;
+    use crate::core::models::{Proposal, Team};
     use crate::app_config::AppConfig;
-    use std::collections::HashMap;
-    use std::path::Path;
-    use std::fs::File;
-    use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
+    use uuid::Uuid;
 
     fn setup_temp_dir() -> TempDir {
         TempDir::new().expect("Failed to create temp dir")
@@ -276,9 +263,11 @@ mod tests {
 
             let path = FileSystem::generate_report_file_path(&proposal, epoch_name, &state_file);
 
+            let file_name = path.file_name().unwrap().to_str().unwrap();
+            assert!(file_name.contains("Test_Proposal"));
             assert!(path.to_str().unwrap().contains("Test_Epoch"));
-            assert!(path.to_str().unwrap().contains("Test_Proposal"));
-            assert!(path.extension().unwrap() == "md");
+            assert!(file_name.matches('-').count() == 1); // Only one hyphen between date and title
+            assert!(file_name.ends_with(".md"));
         }
 
         #[test]

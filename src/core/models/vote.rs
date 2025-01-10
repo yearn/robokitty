@@ -324,7 +324,6 @@ impl Default for VoteCount {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
     use uuid::Uuid;
 
     // Helper function to create a test vote

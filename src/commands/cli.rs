@@ -1,14 +1,9 @@
 // src/commands/cli.rs
 use chrono::{DateTime, NaiveDate, Utc};
-use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, io::Write};
 use std::{fs, error::Error};
-use uuid::Uuid;
-use tokio::time::Duration;
 
-use crate::core::models::{
-    BudgetRequestDetails, Resolution, TeamStatus, VoteChoice, VoteType, VoteParticipation, NameMatches
-};
+use crate::core::models::VoteChoice;
 use crate::core::budget_system::BudgetSystem;
 use crate::app_config::AppConfig;
 use super::common::{BudgetRequestDetailsCommand, Command, CommandExecutor, UpdateTeamDetails, UpdateProposalDetails};
@@ -349,6 +344,17 @@ pub enum ReportCommands {
        epoch_name: Option<String>,
    },
 
+   /// Generate epoch payments report
+   EpochPayments {
+        /// Epoch name
+        #[arg(value_name = "EPOCH")]
+        epoch_name: String,
+        
+        /// Output file path
+        #[arg(long, value_name = "PATH")]
+        output: Option<String>,
+    },
+
    /// Generate report for specific proposal
    ForProposal {
        #[arg(value_name = "PROPOSAL")]
@@ -602,6 +608,12 @@ impl Cli {
                 ReportCommands::UnpaidRequests { output_path, epoch_name } => {
                     Ok(Command::GenerateUnpaidRequestsReport { output_path, epoch_name })
                 },
+                ReportCommands::EpochPayments { epoch_name, output } => {
+                    Ok(Command::GenerateEpochPaymentsReport { 
+                        epoch_name, 
+                        output_path: output 
+                    })
+                },
                 ReportCommands::ForProposal { proposal_name } => {
                     Ok(Command::GenerateReportForProposal { proposal_name })
                 },
@@ -722,8 +734,7 @@ pub fn read_script_commands(script_file_path: &str) -> Result<Vec<Command>, Box<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
-    use std::collections::HashMap;
+    use chrono::{DateTime, Utc};
 
     // Helper function to convert string args into Vec<String>
     fn args(args: &[&str]) -> Vec<String> {
@@ -1726,6 +1737,43 @@ mod tests {
     ]);
 
     assert!(parse_cli_args(&args).is_err());
+    }
+
+    #[test]
+    fn test_epoch_payments_command() {
+        let args = args(&[
+            "report",
+            "epoch-payments",
+            "Q1-2024",
+            "--output", "payments.json"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        match cmd {
+            Command::GenerateEpochPaymentsReport { epoch_name, output_path } => {
+                assert_eq!(epoch_name, "Q1-2024");
+                assert_eq!(output_path, Some("payments.json".to_string()));
+            },
+            _ => panic!("Wrong command type"),
+        }
+    }
+
+    #[test]
+    fn test_epoch_payments_command_no_output() {
+        let args = args(&[
+            "report",
+            "epoch-payments",
+            "Q1-2024"
+        ]);
+
+        let cmd = parse_cli_args(&args).unwrap();
+        match cmd {
+            Command::GenerateEpochPaymentsReport { epoch_name, output_path } => {
+                assert_eq!(epoch_name, "Q1-2024");
+                assert_eq!(output_path, None);
+            },
+            _ => panic!("Wrong command type"),
+        }
     }
 
 }

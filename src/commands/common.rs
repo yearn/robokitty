@@ -1,7 +1,6 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, io::Write};
-use uuid::Uuid;
 use async_trait::async_trait;
 
 use crate::core::models::VoteChoice;
@@ -116,6 +115,10 @@ pub enum Command {
         payment_tx: String,
         payment_date: NaiveDate,
         proposal_names: Vec<String>,
+    },
+    GenerateEpochPaymentsReport {
+        epoch_name: String,
+        output_path: Option<String>,
     },
 }
 

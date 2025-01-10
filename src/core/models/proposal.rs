@@ -1,7 +1,7 @@
 use crate::commands::common::{UpdateProposalDetails, BudgetRequestDetailsCommand};
 use super::common::NameMatches;
 use uuid::Uuid;
-use chrono::{Utc, NaiveDate};
+use chrono::NaiveDate;
 use std::{collections::HashMap, str::FromStr};
 use serde::{Serialize, Deserialize};
 use ethers::types::{Address, H256};
@@ -472,7 +472,7 @@ impl BudgetRequestDetails {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveDate;
+    use chrono::{Utc, NaiveDate};
 
     // Helper function to create a basic proposal
     fn create_test_proposal() -> Proposal {

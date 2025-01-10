@@ -44,10 +44,10 @@ mod tests {
 
         // Capture stderr output
         let stderr = std::io::stderr();
-        let mut handle = stderr.lock();
+        let mut _handle = stderr.lock();
         let mut output = Vec::new();
 
-        let result = rt.block_on(async {
+        let _result = rt.block_on(async {
             robokitty::initialize_environment();
             let _ = mock_run_telegram_bot().map_err(|e| {
                 // Redirect error output to our buffer

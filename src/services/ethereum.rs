@@ -46,19 +46,6 @@ impl EthereumService {
             .map(|hash| format!("0x{:x}", hash))
     }
 
-    async fn get_raffle_randomness(&self) -> Result<(u64, u64, String), Box<dyn std::error::Error>> {
-        let initiation_block = self.get_current_block().await?;
-        let randomness_block = initiation_block + self.future_block_offset;
-
-        // Wait for the randomness block
-        while self.get_current_block().await? < randomness_block {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-
-        let randomness = self.get_randomness(randomness_block).await?;
-
-        Ok((initiation_block, randomness_block, randomness))
-    }
 }
 
 impl MockEthereumService {

@@ -6,7 +6,7 @@ use teloxide::{
     types::{LinkPreviewOptions, ParseMode},
     dispatching::{
         UpdateFilterExt,
-        dialogue::{InMemStorage, Storage},
+        dialogue::InMemStorage,
     },
 };
 use tokio::sync::{mpsc, oneshot};
