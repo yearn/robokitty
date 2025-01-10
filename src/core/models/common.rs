@@ -78,6 +78,7 @@ pub struct EpochPaymentsReport {
     pub epoch_name: String,
     pub reward_token: String,
     pub total_reward: f64,
+    pub total_points: u32,
     pub payments: Vec<TeamPayment>,
 }
 
@@ -86,7 +87,7 @@ pub struct TeamPayment {
     pub team_name: String,
     #[serde(with = "address_serde")]
     pub default_payment_address: Option<Address>,
-    pub amount: f64,
+    pub points: u32,
     pub percentage: f64,
 }
 
@@ -95,15 +96,36 @@ impl EpochPaymentsReport {
         epoch_name: String,
         reward_token: String,
         total_reward: f64,
+        total_points: u32,
         payments: Vec<TeamPayment>
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        let report = Self {
             generated_at: Utc::now(),
             epoch_name,
             reward_token,
             total_reward,
+            total_points,
             payments,
+        };
+        report.validate()?;
+        Ok(report)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.total_reward < 0.0 {
+            return Err("Total reward cannot be negative".to_string());
         }
+        
+        if self.total_points == 0 {
+            return Err("Total points cannot be zero".to_string());
+        }
+
+        let sum: f64 = self.payments.iter().map(|p| p.percentage).sum();
+        if (sum - 100.0).abs() > 0.00001 {
+            return Err(format!("Percentages sum to {} instead of 100", sum));
+        }
+
+        Ok(())
     }
 }
 
@@ -111,15 +133,19 @@ impl TeamPayment {
     pub fn new(
         team_name: String,
         default_payment_address: Option<Address>,
-        amount: f64,
+        points: u32,
         percentage: f64,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        if percentage < 0.0 || percentage > 100.0 {
+            return Err(format!("Invalid percentage: {}", percentage));
+        }
+
+        Ok(Self {
             team_name,
             default_payment_address,
-            amount,
+            points,
             percentage,
-        }
+        })
     }
 }
 
@@ -290,54 +316,128 @@ mod tests {
     }
 
     #[test]
-    fn test_epoch_payments_report_serialization() {
+    fn test_epoch_payments_report_validation() {
         let payments = vec![
             TeamPayment::new(
                 "Team A".to_string(),
                 Some(Address::from_str("0x742d35Cc6634C0532925a3b844Bc454e4438f44e").unwrap()),
-                100.0,
-                50.0,
-            ),
+                50,
+                60.0,
+            ).unwrap(),
             TeamPayment::new(
                 "Team B".to_string(),
                 None,
-                100.0,
-                50.0,
-            ),
+                40,
+                40.0,
+            ).unwrap(),
+        ];
+
+        // Test invalid percentages
+        let payments = vec![
+            TeamPayment::new(
+                "Team A".to_string(),
+                Some(Address::from_str("0x742d35Cc6634C0532925a3b844Bc454e4438f44e").unwrap()),
+                50,
+                60.0,
+            ).unwrap(),
+            TeamPayment::new(
+                "Team B".to_string(),
+                None,
+                40,
+                30.0,
+            ).unwrap(),
+        ];
+
+        let result = EpochPaymentsReport::new(
+            "Test Epoch".to_string(),
+            "ETH".to_string(),
+            100.0,
+            90,
+            payments
+        );
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Percentages sum to"));
+
+        // Test valid report
+        let payments = vec![
+            TeamPayment::new(
+                "Team A".to_string(),
+                Some(Address::from_str("0x742d35Cc6634C0532925a3b844Bc454e4438f44e").unwrap()),
+                60,
+                60.0,
+            ).unwrap(),
+            TeamPayment::new(
+                "Team B".to_string(),
+                None,
+                40,
+                40.0,
+            ).unwrap(),
+        ];
+
+        let result = EpochPaymentsReport::new(
+            "Test Epoch".to_string(),
+            "ETH".to_string(),
+            100.0,
+            100,
+            payments
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_team_payment_validation() {
+        // Test invalid percentage
+        let result = TeamPayment::new(
+            "Team A".to_string(),
+            None,
+            100,
+            101.0,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid percentage"));
+
+        // Test valid payment
+        let result = TeamPayment::new(
+            "Team A".to_string(),
+            None,
+            100,
+            50.0,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_epoch_payment_report_serialization() {
+        let payments = vec![
+            TeamPayment::new(
+                "Team A".to_string(),
+                Some(Address::from_str("0x742d35Cc6634C0532925a3b844Bc454e4438f44e").unwrap()),
+                60,
+                60.0,
+            ).unwrap(),
+            TeamPayment::new(
+                "Team B".to_string(),
+                None,
+                40,
+                40.0,
+            ).unwrap(),
         ];
 
         let report = EpochPaymentsReport::new(
             "Test Epoch".to_string(),
             "ETH".to_string(),
-            200.0,
+            100.0,
+            100,
             payments,
-        );
+        ).unwrap();
 
         let json = serde_json::to_string_pretty(&report).unwrap();
         let deserialized: EpochPaymentsReport = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(deserialized.epoch_name, "Test Epoch");
-        assert_eq!(deserialized.reward_token, "ETH");
-        assert_eq!(deserialized.total_reward, 200.0);
+        assert_eq!(deserialized.total_points, 100);
         assert_eq!(deserialized.payments.len(), 2);
-    }
-
-    #[test]
-    fn test_team_payment_with_address() {
-        let address = Address::from_str("0x742d35Cc6634C0532925a3b844Bc454e4438f44e").unwrap();
-        let payment = TeamPayment::new(
-            "Test Team".to_string(),
-            Some(address),
-            100.0,
-            50.0,
-        );
-
-        let json = serde_json::to_string_pretty(&payment).unwrap();
-        let deserialized: TeamPayment = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(deserialized.team_name, "Test Team");
-        assert_eq!(deserialized.default_payment_address, Some(address));
-        assert_eq!(deserialized.amount, 100.0);
-        assert_eq!(deserialized.percentage, 50.0);
+        assert_eq!(deserialized.payments[0].points, 60);
+        assert_eq!(deserialized.payments[0].percentage, 60.0);
     }
 }

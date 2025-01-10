@@ -2264,35 +2264,50 @@ def hello_world():
             .values()
             .find(|e| e.name() == epoch_name)
             .ok_or_else(|| format!("Epoch not found: {}", epoch_name))?;
-
+    
         if !epoch.is_closed() {
             return Err("Cannot generate payments report: Epoch is not closed".into());
         }
-
+    
         let reward = epoch.reward()
             .ok_or("Epoch has no reward configured")?;
-
-        // Build payments list
-        let payments = epoch.team_rewards()
-            .iter()
-            .filter_map(|(&team_id, team_reward)| {
-                let team = self.state.current_state().teams().get(&team_id)?;
-                Some(TeamPayment::new(
+    
+        // Calculate total points and team points
+        let total_points: u32 = self.state.current_state().teams().keys()
+            .map(|team_id| self.calculate_team_points_for_epoch(*team_id, epoch.id()))
+            .sum();
+    
+        if total_points == 0 {
+            return Err("No points earned in this epoch".into());
+        }
+    
+        // Calculate team payments
+        let mut payments: Vec<TeamPayment> = Vec::new();
+        for (team_id, team) in self.state.current_state().teams() {
+            let team_points = self.calculate_team_points_for_epoch(*team_id, epoch.id());
+            if team_points > 0 {
+                let percentage = (team_points as f64 / total_points as f64) * 100.0;
+                let payment = TeamPayment::new(
                     team.name().to_string(),
                     team.payment_address().cloned(),
-                    team_reward.amount(),
-                    team_reward.percentage(),
-                ))
-            })
-            .collect();
-
+                    team_points,
+                    percentage,
+                )?;
+                payments.push(payment);
+            }
+        }
+    
+        // Sort payments by points (descending) for consistent output
+        payments.sort_by(|a, b| b.points.cmp(&a.points));
+    
         let report = EpochPaymentsReport::new(
             epoch.name().to_string(),
             reward.token().to_string(),
             reward.amount(),
+            total_points,
             payments,
-        );
-
+        )?;
+    
         // Generate output path and save report
         if let Some(path) = output_path {
             let json = serde_json::to_string_pretty(&report)?;
