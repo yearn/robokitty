@@ -4,7 +4,6 @@ use serde::Deserialize;
 use std::env;
 use config::{Config, ConfigError, File};
 use std::convert::TryFrom;
-use std::path::PathBuf;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct AppConfig {

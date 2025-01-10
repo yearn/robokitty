@@ -1,14 +1,9 @@
 // src/commands/cli.rs
 use chrono::{DateTime, NaiveDate, Utc};
-use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, io::Write};
 use std::{fs, error::Error};
-use uuid::Uuid;
-use tokio::time::Duration;
 
-use crate::core::models::{
-    BudgetRequestDetails, Resolution, TeamStatus, VoteChoice, VoteType, VoteParticipation, NameMatches
-};
+use crate::core::models::VoteChoice;
 use crate::core::budget_system::BudgetSystem;
 use crate::app_config::AppConfig;
 use super::common::{BudgetRequestDetailsCommand, Command, CommandExecutor, UpdateTeamDetails, UpdateProposalDetails};
@@ -739,8 +734,7 @@ pub fn read_script_commands(script_file_path: &str) -> Result<Vec<Command>, Box<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
-    use std::collections::HashMap;
+    use chrono::{DateTime, Utc};
 
     // Helper function to convert string args into Vec<String>
     fn args(args: &[&str]) -> Vec<String> {

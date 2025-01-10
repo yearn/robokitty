@@ -2,10 +2,10 @@
 
 use crate::core::state::BudgetSystemState;
 use crate::core::models::{
-    Team, TeamStatus, Epoch, EpochStatus, EpochReward, TeamReward,
+    Team, TeamStatus, Epoch, EpochStatus, TeamReward,
     Proposal, ProposalStatus, Resolution, BudgetRequestDetails,
     Raffle, RaffleConfig, RaffleResult, RaffleTicket,
-    Vote, VoteType, VoteStatus, VoteChoice, VoteCount, VoteParticipation, VoteResult, get_id_by_name
+    Vote, VoteType, VoteChoice, VoteCount, VoteParticipation, VoteResult, get_id_by_name
 };
 use crate::core::progress::raffle::{RaffleProgress, RaffleCreationError};
 use crate::core::models::common::{NameMatches, UnpaidRequest, UnpaidRequestsReport, TeamPayment, EpochPaymentsReport};
@@ -20,7 +20,6 @@ use crate::escape_markdown;
 use chrono::{DateTime, NaiveDate, Utc, TimeZone};
 use uuid::Uuid;
 use std::{
-    cell::RefCell,
     collections::{HashMap, HashSet},
     error::Error, fmt,
     fs,
@@ -28,14 +27,11 @@ use std::{
     path::{Path, PathBuf},
     str,
     sync::Arc,
-    task::{Context, Poll},
-    pin::Pin
 };
-use log::{info, debug, error};
+use log::debug;
 use async_trait::async_trait;
-use tokio::{time::Duration, sync::mpsc};
-use futures::{pin_mut, Stream, StreamExt, stream::unfold};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::time::Duration;
+use futures::{pin_mut, Stream, StreamExt};
 use async_stream::try_stream;
 
 
@@ -116,13 +112,13 @@ impl BudgetSystem {
     pub fn create_team(&mut self, name: String, representative: String, trailing_monthly_revenue: Option<Vec<u64>>, address: Option<String>) -> Result<Uuid, Box<dyn Error>> {
         let team = Team::new(name, representative, trailing_monthly_revenue, address)?;
         let id = self.state.add_team(team);
-        self.save_state()?;
+        let _ = self.save_state()?;
         Ok(id)
     }
 
     pub fn remove_team(&mut self, team_id: Uuid) -> Result<(), Box<dyn Error>> {
         self.state.remove_team(team_id).ok_or("Team not found")?;
-        self.save_state()?;
+        let _ = self.save_state()?;
         Ok(())
     }
 
@@ -158,10 +154,10 @@ impl BudgetSystem {
         }
 
         if let Some(address) = updates.address {
-            team.set_payment_address(Some(address));
+            let _ = team.set_payment_address(Some(address));
         }
         
-        self.save_state()?;
+        let _ = self.save_state()?;
         Ok(())
     }
 
@@ -215,7 +211,7 @@ impl BudgetSystem {
             return Err("Current epoch not found");
         }
 
-        self.save_state();
+        let _ = self.save_state();
         Ok(proposal_id)
     }
 
@@ -231,7 +227,7 @@ impl BudgetSystem {
             }
             proposal.set_resolution(Some(resolution.clone()));
             proposal.set_status(ProposalStatus::Closed);
-            self.save_state();
+            let _ = self.save_state();
             Ok(())
         } else {
             Err("Proposal not found")
@@ -252,7 +248,7 @@ impl BudgetSystem {
         )
     }
 
-    pub fn create_formal_vote(&mut self, proposal_id: Uuid, raffle_id: Uuid, threshold: Option<f64>) -> Result<Uuid, &'static str> {
+    pub fn create_formal_vote(&mut self, proposal_id: Uuid, raffle_id: Uuid, _threshold: Option<f64>) -> Result<Uuid, &'static str> {
         let proposal = self.state.get_proposal_mut(&proposal_id)
             .ok_or("Proposal not found")?;
 
@@ -283,7 +279,7 @@ impl BudgetSystem {
 
 
         let vote_id = self.state.add_vote(&vote);
-        self.save_state();
+        let _ = self.save_state();
         Ok(vote_id)
     }
 
@@ -300,7 +296,7 @@ impl BudgetSystem {
         let vote = Vote::new(proposal_id, epoch_id, VoteType::Informal, false);
 
         let vote_id = self.state.add_vote(&vote);
-        self.save_state();
+        let _ = self.save_state();
         Ok(vote_id)
     }
 
@@ -323,7 +319,7 @@ impl BudgetSystem {
             }
         }
     
-        self.save_state();
+        let _ = self.save_state();
         Ok(())
     }
 
@@ -342,7 +338,7 @@ impl BudgetSystem {
             None => return Err("Vote result not available"),
         };
 
-        self.save_state();
+        let _ = self.save_state();
         Ok(result)
     }
 
@@ -358,7 +354,7 @@ impl BudgetSystem {
         }
 
         let epoch_id = self.state.add_epoch(&new_epoch);
-        self.save_state();
+        let _ = self.save_state();
         Ok(epoch_id)
     }
 
@@ -369,9 +365,9 @@ impl BudgetSystem {
 
         let epoch = self.state.get_epoch_mut(&epoch_id).ok_or("Epoch not found")?;
 
-        epoch.activate();
+        let _ = epoch.activate();
         self.state.set_current_epoch(Some(epoch_id));
-        self.save_state();
+        let _ = self.save_state();
         Ok(())
     }
 
@@ -379,8 +375,8 @@ impl BudgetSystem {
         let epoch_id = self.state.current_epoch().ok_or("No active epoch")?;
         let epoch = self.state.get_epoch_mut(&epoch_id).ok_or("Epoch not found")?;
         
-        epoch.set_reward(token.to_string(), amount);
-        self.save_state();
+        let _ = epoch.set_reward(token.to_string(), amount);
+        let _ = self.save_state();
         Ok(())
     }
 
@@ -414,7 +410,7 @@ impl BudgetSystem {
             return Err("Can only modify dates of planned epochs");
         }
 
-        epoch.set_dates(new_start, new_end);
+        let _ = epoch.set_dates(new_start, new_end);
 
         Ok(())
     }
@@ -487,7 +483,7 @@ impl BudgetSystem {
         raffle.set_result(RaffleResult::new(counted_team_ids, uncounted_team_ids));
 
         let raffle_id = self.state.add_raffle(&raffle);
-        self.save_state()?;
+        let _ = self.save_state()?;
 
         Ok(raffle_id)
     }
@@ -571,7 +567,7 @@ impl BudgetSystem {
         }
         proposal.set_status(ProposalStatus::Closed);
     
-        self.save_state()?;
+        let _ = self.save_state()?;
     
         Ok(vote_id)
     }
@@ -853,7 +849,7 @@ impl BudgetSystem {
         let raffle = Raffle::new(raffle_config, &self.state.current_state().teams())?;
         let tickets = raffle.tickets().to_vec();
         let raffle_id = self.state.add_raffle(&raffle);
-        self.save_state()?;
+        let _ = self.save_state()?;
 
         Ok((raffle_id, tickets))
     }
@@ -914,7 +910,7 @@ impl BudgetSystem {
         raffle.select_deciding_teams();
     
         let raffle_id = self.state.add_raffle(&raffle);
-        self.save_state()?;
+        let _ = self.save_state()?;
     
         Ok((raffle_id, raffle))
     }
@@ -931,7 +927,7 @@ impl BudgetSystem {
         raffle.select_deciding_teams();
     
         let raffle_clone = raffle.clone();
-        self.save_state()?;
+        let _ = self.save_state()?;
     
         Ok(raffle_clone)
     }
@@ -1007,7 +1003,7 @@ impl BudgetSystem {
             .map_err(|e| format!("Failed to update vote dates: {}", e))?;
     
         // Close vote and update proposal
-        let passed = self.close_vote_and_update_proposal(vote_id, proposal_id, vote_closed)
+        let _passed = self.close_vote_and_update_proposal(vote_id, proposal_id, vote_closed)
             .map_err(|e| format!("Failed to close vote or update proposal: {}", e))?;
 
         // Generate report
@@ -1093,7 +1089,7 @@ impl BudgetSystem {
                 }
                 println!("Proposal status after update: {:?}", proposal.status());
                 println!("Proposal resolution after update: {:?}", proposal.resolution());
-                self.save_state()?;
+                let _ = self.save_state()?;
                 Ok(passed)
             },
             Err(e) => {
@@ -1238,7 +1234,7 @@ impl BudgetSystem {
     
         proposal.update(updates, team_id)?;
     
-        self.save_state();
+        let _ = self.save_state();
         Ok(())
     }
 
@@ -1598,7 +1594,7 @@ def hello_world():
     }
 
     pub fn generate_point_report(&self, epoch_name: Option<&str>) -> Result<String, &'static str> {
-        let (epoch, epoch_id) = self.get_current_or_specified_epoch(epoch_name)?;
+        let (_epoch, epoch_id) = self.get_current_or_specified_epoch(epoch_name)?;
         self.generate_point_report_for_epoch(epoch_id)
     }
 
@@ -1747,7 +1743,7 @@ def hello_world():
             self.state.set_current_epoch(None);
         }
 
-        self.save_state()?;
+        let _ = self.save_state()?;
 
         Ok(())
     }
@@ -1883,7 +1879,7 @@ def hello_world():
                         .and_then(|id| self.state.current_state().teams().get(&id))
                         .map_or("N/A".to_string(), |t| t.name().to_string());
 
-                    let payment_date = proposal.budget_request_details()
+                    let _payment_date = proposal.budget_request_details()
                     .and_then(|d| d.payment_date())
                     .map_or_else(
                         || {
@@ -2254,7 +2250,7 @@ def hello_world():
             }
         }
 
-        self.save_state()?;
+        let _ = self.save_state()?;
         Ok(format!("Payment recorded for proposals: {}", updated_proposals.join(", ")))
     }
 
@@ -2417,7 +2413,7 @@ impl CommandExecutor for BudgetSystem {
                 )?;
             
                 let vote = self.state().votes().get(&vote_id).unwrap();
-                let proposal = self.state().proposals().get(&vote.proposal_id()).unwrap();
+                let _proposal = self.state().proposals().get(&vote.proposal_id()).unwrap();
             
                 let mut output = format!("Imported historical vote for proposal '{}' (Vote ID: {})\n", proposal_name, vote_id);
                 output += &format!("Vote passed: {}\n", passed);
@@ -2762,9 +2758,7 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
     use uuid::Uuid;
-    use async_trait::async_trait;
     use futures::pin_mut;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use crate::app_config::TelegramConfig;
     use crate::services::ethereum::MockEthereumService;
     use tokio::time::Duration as Dur;
@@ -3093,8 +3087,8 @@ mod tests {
         let mut budget_system = create_test_budget_system(&state_file, None).await;
 
         // Create an active epoch and a proposal
-        let epoch_id = create_active_epoch(&mut budget_system).await;
-        let proposal_id = budget_system.add_proposal(
+        let _epoch_id = create_active_epoch(&mut budget_system).await;
+        let _proposal_id = budget_system.add_proposal(
             "Test Proposal".to_string(),
             None,
             None,
@@ -3138,7 +3132,7 @@ mod tests {
         assert_eq!(imported_raffle.result().unwrap().uncounted(), &[team_id2]);
 
         // Test importing a historical raffle
-        let (historical_raffle_id, historical_raffle) = budget_system.import_historical_raffle(
+        let (_historical_raffle_id, historical_raffle) = budget_system.import_historical_raffle(
             "Test Proposal",
             12345,
             12355,
@@ -3380,7 +3374,7 @@ mod tests {
         assert!(budget_system.activate_epoch(epoch2_id).is_err());
 
         // Test closing an epoch with open proposals
-        let proposal_id = budget_system.add_proposal("Test Proposal".to_string(), None, None, None, None, None).unwrap();
+        let _proposal_id = budget_system.add_proposal("Test Proposal".to_string(), None, None, None, None, None).unwrap();
         assert!(budget_system.close_epoch(None).is_err());
 
         // Test updating a non-existent proposal
@@ -3438,14 +3432,11 @@ mod tests {
     #[tokio::test]
     async fn test_raffle_creation_stream() {
         use futures::pin_mut;
-        use std::sync::atomic::{AtomicU64, Ordering};
         use std::time::Duration;
         use std::sync::Arc;
 
         // Create mock service
-        let mock_service = Arc::new(MockEthereumService::new());
-        let mock_service_clone = Arc::clone(&mock_service);
-        
+        let mock_service = Arc::new(MockEthereumService::new());        
 
         let temp_dir = TempDir::new().unwrap();
         
@@ -3635,7 +3626,7 @@ mod tests {
         let mut budget_system = create_test_budget_system(&state_file, None).await;
 
         // Create an epoch
-        let epoch_id = create_active_epoch(&mut budget_system).await;
+        let _epoch_id = create_active_epoch(&mut budget_system).await;
 
         // Create a team
         let team_id = budget_system.create_team(
@@ -3768,8 +3759,8 @@ mod tests {
     
        let mut budget_system = create_test_budget_system(&state_file, None).await;
        // Create test epoch and proposal but don't approve it
-       let epoch_id = create_test_epoch(&mut budget_system);
-       let proposal_id = create_test_proposal(&mut budget_system, "Proposal1", vec![1000.0]);
+       let _epoch_id = create_test_epoch(&mut budget_system);
+       let _proposal_id = create_test_proposal(&mut budget_system, "Proposal1", vec![1000.0]);
 
        let result = budget_system.record_payments(
            "0x742d35Cc6634C0532925a3b844Bc454e4438f44e4438f44e4438f44e4438f44e",
@@ -3789,7 +3780,7 @@ mod tests {
        let mut budget_system = create_test_budget_system(&state_file, None).await;
 
        // Create and approve proposal
-       let epoch_id = create_test_epoch(&mut budget_system);
+       let _epoch_id = create_test_epoch(&mut budget_system);
        let proposal_id = create_test_proposal(&mut budget_system, "Proposal1", vec![1000.0]);
        budget_system.close_with_reason(proposal_id, &Resolution::Approved).unwrap();
 
@@ -3960,7 +3951,7 @@ mod tests {
         let mut budget_system = create_test_budget_system(&state_file, None).await;
         
         // Create and close an epoch
-        let epoch_id = create_test_epoch(&mut budget_system);
+        let _epoch_id = create_test_epoch(&mut budget_system);
         budget_system.close_epoch(None).unwrap();
         
         budget_system.generate_end_of_epoch_report("Test Epoch").unwrap();

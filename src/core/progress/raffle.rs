@@ -41,14 +41,14 @@ impl RaffleProgress {
                 }
                 msg
             },
-            RaffleProgress::WaitingForBlock { proposal_name, current_block, target_block, .. } => {
+            RaffleProgress::WaitingForBlock { current_block, target_block, .. } => {
                 format!(
                     "Current block number: {}\n\
                      Target block for randomness: {}\n\
                      Latest observed block: {}", 
                     current_block, target_block, current_block)
             },
-            RaffleProgress::RandomnessAcquired { proposal_name, current_block, target_block, randomness, .. } => {
+            RaffleProgress::RandomnessAcquired { target_block, randomness, .. } => {
                 format!(
                     "Block randomness: {}\n\
                      Etherscan URL: https://etherscan.io/block/{}#consensusinfo",
@@ -112,14 +112,14 @@ impl RaffleProgress {
                 }
                 msg
             },
-            RaffleProgress::WaitingForBlock { proposal_name, current_block, target_block, .. } => {
+            RaffleProgress::WaitingForBlock { current_block, target_block, .. } => {
                 format!(
                     "Current block number: `{}`\n\
                      Target block for randomness: `{}`\n\
                      Latest observed block: `{}`", 
                     current_block, target_block, current_block)
             },
-            RaffleProgress::RandomnessAcquired { proposal_name, current_block, target_block, randomness, .. } => {
+            RaffleProgress::RandomnessAcquired { target_block, randomness, .. } => {
                 format!(
                     "Block randomness: `{}`\n\
                      Etherscan URL: https://etherscan\\.io/block/{}\\#consensusinfo",

@@ -191,7 +191,7 @@ impl Raffle {
         }
 
         // Select supporter teams
-        let supporter_seats = self.config.total_counted_seats.saturating_sub(counted.len());
+        let _supporter_seats = self.config.total_counted_seats.saturating_sub(counted.len());
         for ticket in supporter_tickets.iter() {
             if counted.len() < self.config.total_counted_seats && !counted.contains(&ticket.team_id) {
                 counted.push(ticket.team_id);

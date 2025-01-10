@@ -1,4 +1,4 @@
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 
@@ -44,6 +44,7 @@ pub fn remove_lock_file_at(path: &Path) -> Result<(), Error> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+    use std::fs::File;
 
     fn setup_test_environment() -> TempDir {
         TempDir::new().unwrap()

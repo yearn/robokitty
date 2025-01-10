@@ -5,8 +5,6 @@ use crate::core::models::VoteChoice;
 use crate::commands::common::{Command, CommandExecutor, BudgetRequestDetailsCommand, UpdateProposalDetails, UpdateTeamDetails};
 use chrono::{NaiveDate, DateTime, Utc, TimeZone};
 use std::collections::HashMap;
-use futures::pin_mut;
-use tokio_stream::StreamExt;
 
 /// These commands are supported:
 #[derive(BotCommands, Clone)]
@@ -224,7 +222,6 @@ impl TelegramCommand {
                 // If we have a pending arg, push it
                 if !current_arg.is_empty() {
                     args.push(current_arg);
-                    current_arg = String::new();
                 }
                 current_arg = part.to_string();
             } else if !current_arg.is_empty() {
@@ -884,8 +881,6 @@ mod tests {
     use crate::services::ethereum::MockEthereumService;
     use std::sync::Arc;
     use tempfile::TempDir;
-    use downcast_rs::Downcast;
-    use tokio::time::Duration;
 
     async fn create_test_budget_system() -> (BudgetSystem, TempDir) {
         let temp_dir = TempDir::new().unwrap();
@@ -907,23 +902,6 @@ mod tests {
         let ethereum_service = Arc::new(MockEthereumService::new());
         let budget_system = BudgetSystem::new(config, ethereum_service, None).await.unwrap();
         (budget_system, temp_dir)
-    }
-
-    fn get_mock_service(budget_system: &BudgetSystem) -> Option<Arc<MockEthereumService>> {
-        budget_system.ethereum_service()
-            .clone() // Clone the Arc before downcasting
-            .downcast_arc::<MockEthereumService>()
-            .ok()
-    }
-
-    async fn setup_block_progression(mock_service: Arc<MockEthereumService>) {
-        let service = mock_service.clone();
-        tokio::spawn(async move {
-            for _ in 0..5 {
-                service.increment_block();
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        });
     }
 
     #[test]
@@ -1113,14 +1091,14 @@ mod tests {
         let start_result = TelegramCommand::parse_start_date("2024-01-01").unwrap();
         assert_eq!(
             start_result,
-            Utc.ymd(2024, 1, 1).and_hms(0, 0, 0)
+            Utc.ymd(2024, 1, 1).and_hms_opt(0, 0, 0).unwrap()
         );
 
         // Test end date parsing (23:59:59 UTC)
         let end_result = TelegramCommand::parse_end_date("2024-01-01").unwrap();
         assert_eq!(
             end_result,
-            Utc.ymd(2024, 1, 1).and_hms(23, 59, 59)
+            Utc.ymd(2024, 1, 1).and_hms_opt(23, 59, 59).unwrap()
         );
 
         // Test invalid dates

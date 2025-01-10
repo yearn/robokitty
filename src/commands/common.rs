@@ -1,7 +1,6 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, io::Write};
-use uuid::Uuid;
 use async_trait::async_trait;
 
 use crate::core::models::VoteChoice;

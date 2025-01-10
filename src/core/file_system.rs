@@ -11,8 +11,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::error::Error;
-use log::{debug, info, error};
-use uuid::Uuid;
 
 pub struct FileSystem;
 
@@ -136,14 +134,10 @@ impl FileSystem {
 mod tests {
     use super::*;
     use tempfile::TempDir;
-    use chrono::{Utc, NaiveDate};
-    use crate::core::models::{Proposal, Team, TeamStatus};
+    use chrono::Utc;
+    use crate::core::models::{Proposal, Team};
     use crate::app_config::AppConfig;
-    use std::collections::HashMap;
-    use std::path::Path;
-    use std::fs::File;
-    use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
+    use uuid::Uuid;
 
     fn setup_temp_dir() -> TempDir {
         TempDir::new().expect("Failed to create temp dir")
