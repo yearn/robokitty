@@ -68,19 +68,12 @@ impl FileSystem {
             .map(|date| date.format("%Y%m%d").to_string())
             .unwrap_or_else(|| "00000000".to_string());
     
-        let team_part = proposal.budget_request_details()
-            .as_ref()
-            .and_then(|details| details.team())
-            .map(|team_id| format!("-{}", Self::sanitize_filename(&team_id.to_string())))
-            .unwrap_or_default();
-    
         let sanitized_title = Self::sanitize_filename(proposal.title());
     
         // Calculate the maximum length for the title
         let max_title_length = 255 
             - reports_dir.as_os_str().len() 
             - date.len() 
-            - team_part.len() 
             - 5; // 5 for the dash, file extension (.md), and some buffer
     
         let truncated_title = if sanitized_title.len() > max_title_length {
@@ -89,7 +82,7 @@ impl FileSystem {
             sanitized_title
         };
     
-        let file_name = format!("{}{}-{}.md", date, team_part, truncated_title);
+        let file_name = format!("{}-{}.md", date, truncated_title);
         reports_dir.join(file_name)
     }
 
@@ -276,9 +269,11 @@ mod tests {
 
             let path = FileSystem::generate_report_file_path(&proposal, epoch_name, &state_file);
 
+            let file_name = path.file_name().unwrap().to_str().unwrap();
+            assert!(file_name.contains("Test_Proposal"));
             assert!(path.to_str().unwrap().contains("Test_Epoch"));
-            assert!(path.to_str().unwrap().contains("Test_Proposal"));
-            assert!(path.extension().unwrap() == "md");
+            assert!(file_name.matches('-').count() == 1); // Only one hyphen between date and title
+            assert!(file_name.ends_with(".md"));
         }
 
         #[test]
