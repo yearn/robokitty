@@ -72,6 +72,57 @@ impl UnpaidRequest {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EpochPaymentsReport {
+    pub generated_at: DateTime<Utc>,
+    pub epoch_name: String,
+    pub reward_token: String,
+    pub total_reward: f64,
+    pub payments: Vec<TeamPayment>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TeamPayment {
+    pub team_name: String,
+    #[serde(with = "address_serde")]
+    pub default_payment_address: Option<Address>,
+    pub amount: f64,
+    pub percentage: f64,
+}
+
+impl EpochPaymentsReport {
+    pub fn new(
+        epoch_name: String,
+        reward_token: String,
+        total_reward: f64,
+        payments: Vec<TeamPayment>
+    ) -> Self {
+        Self {
+            generated_at: Utc::now(),
+            epoch_name,
+            reward_token,
+            total_reward,
+            payments,
+        }
+    }
+}
+
+impl TeamPayment {
+    pub fn new(
+        team_name: String,
+        default_payment_address: Option<Address>,
+        amount: f64,
+        percentage: f64,
+    ) -> Self {
+        Self {
+            team_name,
+            default_payment_address,
+            amount,
+            percentage,
+        }
+    }
+}
+
 // Custom serialization for Ethereum address
 pub mod address_serde {
     use super::*;
@@ -138,6 +189,9 @@ pub mod tx_hash_serde {
 mod tests {
     use super::*;
     use chrono::NaiveDate;
+    use ethers::types::Address;
+    use std::str::FromStr;
+    use serde::{Serialize, Deserialize};
 
     #[test]
     fn test_unpaid_request_serialization() {
@@ -193,11 +247,6 @@ mod tests {
         assert_eq!(deserialized.unpaid_requests.len(), 1);
     }
 
-    #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde::{Serialize, Deserialize};
-
     #[derive(Serialize, Deserialize)]
     struct TestStruct {
         #[serde(with = "address_serde")]
@@ -239,5 +288,56 @@ mod tests {
         assert_eq!(format!("{:?}", test_struct.hash.unwrap()), hash_str);
         assert_eq!(format!("{:?}", deserialized.hash.unwrap()), hash_str);
     }
-}
+
+    #[test]
+    fn test_epoch_payments_report_serialization() {
+        let payments = vec![
+            TeamPayment::new(
+                "Team A".to_string(),
+                Some(Address::from_str("0x742d35Cc6634C0532925a3b844Bc454e4438f44e").unwrap()),
+                100.0,
+                50.0,
+            ),
+            TeamPayment::new(
+                "Team B".to_string(),
+                None,
+                100.0,
+                50.0,
+            ),
+        ];
+
+        let report = EpochPaymentsReport::new(
+            "Test Epoch".to_string(),
+            "ETH".to_string(),
+            200.0,
+            payments,
+        );
+
+        let json = serde_json::to_string_pretty(&report).unwrap();
+        let deserialized: EpochPaymentsReport = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.epoch_name, "Test Epoch");
+        assert_eq!(deserialized.reward_token, "ETH");
+        assert_eq!(deserialized.total_reward, 200.0);
+        assert_eq!(deserialized.payments.len(), 2);
+    }
+
+    #[test]
+    fn test_team_payment_with_address() {
+        let address = Address::from_str("0x742d35Cc6634C0532925a3b844Bc454e4438f44e").unwrap();
+        let payment = TeamPayment::new(
+            "Test Team".to_string(),
+            Some(address),
+            100.0,
+            50.0,
+        );
+
+        let json = serde_json::to_string_pretty(&payment).unwrap();
+        let deserialized: TeamPayment = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.team_name, "Test Team");
+        assert_eq!(deserialized.default_payment_address, Some(address));
+        assert_eq!(deserialized.amount, 100.0);
+        assert_eq!(deserialized.percentage, 50.0);
+    }
 }

@@ -8,7 +8,7 @@ use crate::core::models::{
     Vote, VoteType, VoteStatus, VoteChoice, VoteCount, VoteParticipation, VoteResult, get_id_by_name
 };
 use crate::core::progress::raffle::{RaffleProgress, RaffleCreationError};
-use crate::core::models::common::{NameMatches, UnpaidRequest, UnpaidRequestsReport};
+use crate::core::models::common::{NameMatches, UnpaidRequest, UnpaidRequestsReport, TeamPayment, EpochPaymentsReport};
 use crate::services::ethereum::EthereumServiceTrait;
 use crate::commands::common::{ 
     UpdateProposalDetails, UpdateTeamDetails, Command, CommandExecutor
@@ -2201,6 +2201,60 @@ def hello_world():
         Ok(format!("Payment recorded for proposals: {}", updated_proposals.join(", ")))
     }
 
+    pub fn generate_epoch_payments_report(
+        &self,
+        epoch_name: &str,
+        output_path: Option<&str>
+    ) -> Result<String, Box<dyn Error>> {
+        // Find epoch and validate it's closed
+        let epoch = self.state.epochs()
+            .values()
+            .find(|e| e.name() == epoch_name)
+            .ok_or_else(|| format!("Epoch not found: {}", epoch_name))?;
+
+        if !epoch.is_closed() {
+            return Err("Cannot generate payments report: Epoch is not closed".into());
+        }
+
+        let reward = epoch.reward()
+            .ok_or("Epoch has no reward configured")?;
+
+        // Build payments list
+        let payments = epoch.team_rewards()
+            .iter()
+            .filter_map(|(&team_id, team_reward)| {
+                let team = self.state.current_state().teams().get(&team_id)?;
+                Some(TeamPayment::new(
+                    team.name().to_string(),
+                    team.payment_address().cloned(),
+                    team_reward.amount(),
+                    team_reward.percentage(),
+                ))
+            })
+            .collect();
+
+        let report = EpochPaymentsReport::new(
+            epoch.name().to_string(),
+            reward.token().to_string(),
+            reward.amount(),
+            payments,
+        );
+
+        // Generate output path and save report
+        if let Some(path) = output_path {
+            let json = serde_json::to_string_pretty(&report)?;
+            let output_path = PathBuf::from(path);
+            if let Some(parent) = output_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&output_path, json)?;
+            Ok(format!("Generated epoch payments report at: {:?}", output_path))
+        } else {
+            let json = serde_json::to_string_pretty(&report)?;
+            Ok(json)
+        }
+    }
+
 }
 
 #[async_trait]
@@ -2595,7 +2649,10 @@ impl CommandExecutor for BudgetSystem {
             },
             Command::LogPayment { payment_tx, payment_date, proposal_names } => {
                 self.record_payments(&payment_tx, payment_date, &proposal_names)
-            }
+            },
+            Command::GenerateEpochPaymentsReport { epoch_name, output_path } => {
+                self.generate_epoch_payments_report(&epoch_name, output_path.as_deref())
+            },
         }
     }
 
@@ -3731,4 +3788,101 @@ mod tests {
            None
        ).unwrap()
    }
+
+   #[tokio::test]
+    async fn test_generate_epoch_payments_report() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
+
+        // Create and setup epoch
+        let start_date = Utc::now();
+        let end_date = start_date + Duration::days(30);
+        let epoch_id = budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
+        budget_system.activate_epoch(epoch_id).unwrap();
+        budget_system.set_epoch_reward("ETH", 1000.0).unwrap();
+
+        // Add team with payment address
+        let team_id = budget_system.create_team(
+            "Test Team".to_string(),
+            "Representative".to_string(),
+            Some(vec![1000]),
+            Some("0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string())
+        ).unwrap();
+
+        // Create a proposal and setup voting to generate some team rewards
+        let proposal_id = budget_system.add_proposal(
+            "Test Proposal".to_string(),
+            None,
+            None,
+            Some(Utc::now().date_naive()),
+            Some(Utc::now().date_naive()),
+            None
+        ).unwrap();
+
+        // Create and complete raffle
+        let config = budget_system.config().clone();
+        let (raffle_id, _) = budget_system.prepare_raffle("Test Proposal", None, &config).unwrap();
+        budget_system.finalize_raffle(
+            raffle_id,
+            12345,
+            12355,
+            "mock_randomness".to_string()
+        ).await.unwrap();
+
+        // Create and process vote
+        let vote_id = budget_system.create_formal_vote(proposal_id, raffle_id, None).unwrap();
+        budget_system.cast_votes(vote_id, vec![(team_id, VoteChoice::Yes)]).unwrap();
+        budget_system.close_vote(vote_id).unwrap();
+
+        // Close proposal and epoch
+        budget_system.close_with_reason(proposal_id, &Resolution::Approved).unwrap();
+        budget_system.close_epoch(None).unwrap();
+
+        // Generate report
+        let report = budget_system.generate_epoch_payments_report("Test Epoch", None).unwrap();
+        let parsed: EpochPaymentsReport = serde_json::from_str(&report).unwrap();
+
+        assert_eq!(parsed.epoch_name, "Test Epoch");
+        assert_eq!(parsed.reward_token, "ETH");
+        assert_eq!(parsed.total_reward, 1000.0);
+        assert_eq!(parsed.payments.len(), 1);
+        assert_eq!(parsed.payments[0].team_name, "Test Team");
+        assert!(parsed.payments[0].default_payment_address.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_generate_epoch_payments_report_not_closed() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
+
+        // Create active epoch but don't close it
+        let start_date = Utc::now();
+        let end_date = start_date + Duration::days(30);
+        let epoch_id = budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
+        budget_system.activate_epoch(epoch_id).unwrap();
+
+        let result = budget_system.generate_epoch_payments_report("Test Epoch", None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not closed"));
+    }
+
+    #[tokio::test]
+    async fn test_generate_epoch_payments_report_no_reward() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
+
+        // Create epoch and close it but don't set reward
+        let start_date = Utc::now();
+        let end_date = start_date + Duration::days(30);
+        let epoch_id = budget_system.create_epoch("Test Epoch", start_date, end_date).unwrap();
+        budget_system.activate_epoch(epoch_id).unwrap();
+        budget_system.close_epoch(None).unwrap();
+
+        let result = budget_system.generate_epoch_payments_report("Test Epoch", None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("no reward"));
+    }
 }

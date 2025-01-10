@@ -117,6 +117,10 @@ pub enum Command {
         payment_date: NaiveDate,
         proposal_names: Vec<String>,
     },
+    GenerateEpochPaymentsReport {
+        epoch_name: String,
+        output_path: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

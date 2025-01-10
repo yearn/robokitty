@@ -115,6 +115,12 @@ pub enum TelegramCommand {
         args: String,
     },
 
+    /// Generate epoch payments report.
+    /// Usage: /epoch_payments <epoch_name>
+    EpochPayments {
+        epoch_name: String,
+    },
+
     /// Log payment for proposals.
     /// Usage: /log_payment tx:<HASH> date:<YYYY-MM-DD> proposals:<PROP1,PROP2,...>
     LogPayment {
@@ -818,6 +824,15 @@ pub async fn execute_command(
                 formatted_json
             ))
             
+        },
+
+        TelegramCommand::EpochPayments { epoch_name } => {
+            budget_system.execute_command(Command::GenerateEpochPaymentsReport { 
+                epoch_name, 
+                output_path: None 
+            }).await
+            .map(|s| escape_markdown(&s))
+            .map_err(|e| format!("Command failed: {}", e))
         },
 
         TelegramCommand::LogPayment { args } => {
