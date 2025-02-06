@@ -193,11 +193,29 @@ impl BudgetSystem {
         let current_epoch_id = self.state.current_epoch()
             .ok_or("No active epoch")?;
 
+        let updated_details = budget_request_details.map(|details| {
+            if details.payment_address().is_none() {
+                // Try to get team's default address
+                if let Some(team_id) = details.team() {
+                    if let Some(team) = self.state.current_state().teams().get(&team_id) {
+                        if let Some(addr) = team.payment_address() {
+                            let mut new_details = details.clone();
+                            // Try to set team's address, fall back to original if it fails
+                            if new_details.set_payment_address(Some(format!("0x{:x}", addr))).is_ok() {
+                                return new_details;
+                            }
+                        }
+                    }
+                }
+            }
+            details
+        });
+
         let proposal = Proposal::new(
             current_epoch_id,
             title,
             url,
-            budget_request_details,
+            updated_details,
             announced_at,
             published_at,
             is_historical
@@ -4006,6 +4024,108 @@ mod tests {
         
         // Check rejected proposals table doesn't have Paid column
         assert!(tables.contains("| Name | URL | Team | Amounts | Start Date | End Date | Announced | Resolved | Report |"));
+    }
+
+    #[tokio::test]
+    async fn test_proposal_payment_address_inheritance() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
+    
+        // Create an epoch
+        let _epoch_id = create_active_epoch(&mut budget_system).await;
+    
+        let team_address = "0x742d35Cc6634C0532925a3b844Bc454e4438f44e";
+        // Create a team with default payment address
+        let team_id = budget_system.create_team(
+            "Test Team".to_string(),
+            "Representative".to_string(),
+            Some(vec![1000]),
+            Some(team_address.to_string())
+        ).unwrap();
+    
+        // Verify team was created with correct address
+        let team = budget_system.state.current_state().teams().get(&team_id).unwrap();
+        println!("Created team address: {:?}", team.payment_address());
+        assert!(team.payment_address().is_some());
+    
+        // Create a proposal without specifying payment address
+        let mut amounts = HashMap::new();
+        amounts.insert("ETH".to_string(), 100.0);
+        
+        let proposal_id = budget_system.add_proposal(
+            "Test Proposal".to_string(),
+            None,
+            Some(BudgetRequestDetails::new(
+                Some(team_id),
+                amounts,
+                None,
+                None,
+                Some(false),
+                None, // No specific payment address
+            ).unwrap()),
+            Some(Utc::now().date_naive()),
+            Some(Utc::now().date_naive()),
+            None,
+        ).unwrap();
+    
+        // Verify the proposal inherited the team's payment address
+        let proposal = budget_system.get_proposal(&proposal_id).unwrap();
+        let budget_details = proposal.budget_request_details().unwrap();
+        println!("Proposal payment address: {:?}", budget_details.payment_address());
+        
+        let expected_address = team_address.to_lowercase();
+        assert_eq!(
+            budget_details.payment_address().map(|addr| format!("0x{:x}", addr)),
+            Some(expected_address)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_proposal_payment_address_override() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("test_state.json").to_str().unwrap().to_string();
+        let mut budget_system = create_test_budget_system(&state_file, None).await;
+
+        // Create an epoch
+        let _epoch_id = create_active_epoch(&mut budget_system).await;
+
+        // Create a team with default payment address
+        let team_id = budget_system.create_team(
+            "Test Team".to_string(),
+            "Representative".to_string(),
+            Some(vec![1000]),
+            Some("0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string())
+        ).unwrap();
+
+        // Create a proposal with a specific payment address
+        let mut amounts = HashMap::new();
+        amounts.insert("ETH".to_string(), 100.0);
+        
+        let specific_address = "0x123456789012345678901234567890123456789a";
+        let proposal_id = budget_system.add_proposal(
+            "Test Proposal".to_string(),
+            None,
+            Some(BudgetRequestDetails::new(
+                Some(team_id),
+                amounts,
+                None,
+                None,
+                Some(false),
+                Some(specific_address.to_string()),
+            ).unwrap()),
+            Some(Utc::now().date_naive()),
+            Some(Utc::now().date_naive()),
+            None,
+        ).unwrap();
+
+        // Verify the proposal uses the specific address, not the team's default
+        let proposal = budget_system.get_proposal(&proposal_id).unwrap();
+        let budget_details = proposal.budget_request_details().unwrap();
+        assert_eq!(
+            budget_details.payment_address().map(|addr| format!("{:?}", addr)),
+            Some(specific_address.to_string().to_lowercase())
+        );
     }
 
 }
