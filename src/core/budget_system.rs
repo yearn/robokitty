@@ -2828,23 +2828,39 @@ impl CommandExecutor for BudgetSystem {
                 self.generate_epoch_payments_report(&epoch_name, output_path.as_deref())
             },
             Command::GenerateAllEpochsReport { output_path, only_closed } => {
-                // Generate the report content using the (currently placeholder) function
-                let report_content = self.generate_all_epochs_report(only_closed)?;
-
-                // Handle file output or return string
-                if let Some(path_str) = output_path {
-                    let path = Path::new(&path_str);
-                    // Ensure parent directory exists
-                    if let Some(parent) = path.parent() {
-                        fs::create_dir_all(parent)?;
+                // 1. Determine the final output path
+                let final_path = match output_path {
+                    Some(path_str) => PathBuf::from(path_str),
+                    None => {
+                        // Generate default path using the state file from config
+                        let state_file_path = Path::new(&self.config.state_file);
+                        FileSystem::generate_default_all_epochs_report_path(state_file_path)
                     }
-                    // Write the report to the specified file
-                    fs::write(path, &report_content)?;
-                    Ok(format!("Generated All Epochs Summary Report at: {:?}", path))
+                };
+                debug!("Determined report output path: {:?}", final_path);
+
+                // 2. Generate the report content
+                let report_content = self.generate_all_epochs_report(only_closed)?;
+                debug!("Generated report content (length: {} bytes)", report_content.len());
+
+
+                // 3. Ensure parent directory exists
+                if let Some(parent) = final_path.parent() {
+                    fs::create_dir_all(parent)?;
+                    debug!("Ensured parent directory exists: {:?}", parent);
                 } else {
-                    // Return the report content as a string
-                    Ok(report_content)
+                     debug!("No parent directory found for path: {:?}", final_path);
+                     // Decide if this is an error or ok (e.g. writing to current dir)
+                     // For now, let's proceed, fs::write will handle root paths etc.
                 }
+
+                // 4. Write the report to the file
+                fs::write(&final_path, &report_content)?;
+                debug!("Successfully wrote report to {:?}", final_path);
+
+
+                // 5. Always return the confirmation message
+                Ok(format!("Generated All Epochs Summary Report at: {:?}", final_path))
             }
         }
     }
