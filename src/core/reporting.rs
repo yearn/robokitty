@@ -6,6 +6,7 @@ use chrono::{NaiveDate, Utc, DateTime};
 use std::collections::HashMap;
 use uuid::Uuid;
 use std::error::Error;
+use itertools::Itertools;
 
 // --- Structs for Aggregated Data ---
 
@@ -71,24 +72,35 @@ pub struct PaidFundingData {
     pub grand_totals: HashMap<String, f64>, // Token -> Grand Total Amount
 }
 
-// Placeholder for formatting functions (Step 5)
+/// Formats the complete All Epochs Summary report.
 pub fn format_report(
     stats: OverallStats,
     epoch_stats: Vec<EpochStats>,
     team_stats: Vec<TeamPerformanceSummary>,
     paid_funding: PaidFundingData,
     scope: &str,
+    // Pass necessary state components for formatting section IV
+    teams: &HashMap<Uuid, Team>,
+    selected_epochs: &[&Epoch],
 ) -> String {
-    // TODO: Implement Markdown formatting in Step 5
-    format!(
-        "# All Epochs Summary Report ({})\n\n**Generated:** {}\n\n*Data Aggregated. Formatting pending Step 5.*\n\nOverall Stats: {:?}\n\nEpoch Stats: {:?}\n\nTeam Stats: {:?}\n\nPaid Funding: {:?}",
-        scope,
-        Utc::now().to_rfc3339(),
-        stats,
-        epoch_stats,
-        team_stats,
-        paid_funding,
-    )
+    let mut report = String::new();
+
+    report.push_str(&format!("# RoboKitty Budget System - All Epochs Summary Report\n\n"));
+    report.push_str(&format!("**Generated:** {}\n\n", Utc::now().format("%Y-%m-%d %H:%M:%S UTC")));
+    if scope == "All Epochs" {
+         report.push_str("This report summarizes key financial, performance, and voting metrics across all relevant epochs managed by the RoboKitty budget system. By default, all epochs (Active and Closed) are included. Use the `--only-closed` flag to view data for completed epochs only.\n\n");
+    } else {
+         report.push_str("This report summarizes key financial, performance, and voting metrics across all **completed (Closed)** epochs managed by the RoboKitty budget system.\n\n");
+    }
+    report.push_str("---\n\n");
+
+    // Append sections
+    report.push_str(&format_section_i(&stats, scope));
+    report.push_str(&format_section_ii(&epoch_stats, scope));
+    report.push_str(&format_section_iii(&team_stats, scope));
+    report.push_str(&format_section_iv(&paid_funding, selected_epochs, teams, scope)); // Pass teams and epochs
+
+    report
 }
 
 // --- End Structs ---
@@ -448,4 +460,270 @@ pub fn calculate_paid_funding_per_team_epoch(
     }
 
     PaidFundingData { funding, team_totals, epoch_totals, grand_totals }
+}
+
+/// Formats a map of tokens and amounts into a string (e.g., "ETH: 10.50, USD: 5000.00")
+fn format_token_amounts(amounts: &HashMap<String, f64>) -> String {
+    if amounts.is_empty() {
+        return "N/A".to_string();
+    }
+    amounts.iter()
+        .sorted_by_key(|(token, _)| *token) // Sort for consistent output
+        .map(|(token, amount)| format!("{}: {:.2}", token, amount))
+        .join(", ")
+}
+
+/// Formats an optional f64, often used for averages or rates.
+fn format_optional_f64(value: Option<f64>, suffix: &str) -> String {
+    value.map_or("N/A".to_string(), |v| format!("{:.2}{}", v, suffix))
+}
+
+/// Formats an optional f64 representing days.
+fn format_optional_days(value: Option<f64>) -> String {
+    value.map_or("N/A".to_string(), |v| format!("{:.1}", v)) // One decimal place for days
+}
+
+/// Formats an optional average vote count.
+fn format_optional_avg_votes(value: Option<f64>) -> String {
+     value.map_or("N/A".to_string(), |v| format!("{:.1}", v)) // One decimal place for votes
+}
+
+// --- NEW: Section Formatting Functions ---
+
+fn format_section_i(stats: &OverallStats, scope: &str) -> String {
+    let mut section = format!("## I. Overall Summary ({})\n\n", scope);
+
+    section.push_str(&format!(
+        "*   **Epochs Included:** {} ({} Active/Planned, {} Closed)\n",
+        stats.total_epochs_included, stats.num_active_planned, stats.num_closed
+    ));
+
+    let time_span = match (stats.first_epoch_start_date, stats.latest_epoch_end_date) {
+        (Some(start), Some(end)) => format!("{} to {}", start.format("%Y-%m-%d"), end.format("%Y-%m-%d")),
+        _ => "N/A".to_string(),
+    };
+    section.push_str(&format!("*   **Overall Time Span:** {}\n", time_span));
+
+    section.push_str("*   **Total Budget Allocated (Epoch Rewards):**\n");
+    if stats.total_allocated_budget.is_empty() {
+        section.push_str("    *   N/A\n");
+    } else {
+        for (token, amount) in stats.total_allocated_budget.iter().sorted_by_key(|(t, _)| *t) {
+            section.push_str(&format!("    *   {}: {:.2}\n", token, amount));
+        }
+    }
+
+    section.push_str("*   **Total Budget Requested (Approved Proposals):**\n");
+     if stats.total_requested_budget.is_empty() {
+        section.push_str("    *   N/A\n");
+    } else {
+        for (token, amount) in stats.total_requested_budget.iter().sorted_by_key(|(t, _)| *t) {
+            section.push_str(&format!("    *   {}: {:.2}\n", token, amount));
+        }
+    }
+
+    section.push_str("*   **Total Budget Paid (Approved & Paid Proposals):**\n");
+    if stats.total_paid_budget.is_empty() {
+        section.push_str("    *   N/A\n");
+    } else {
+        for (token, amount) in stats.total_paid_budget.iter().sorted_by_key(|(t, _)| *t) {
+            section.push_str(&format!("    *   {}: {:.2}\n", token, amount));
+        }
+    }
+
+    section.push_str(&format!("*   **Total Proposals Submitted:** {}\n", stats.total_proposals));
+    section.push_str(&format!("*   **Total Proposals Resolved:** {}\n", stats.total_resolved_proposals));
+    section.push_str(&format!("*   **Total Proposals Approved:** {}\n", stats.total_approved_proposals));
+    section.push_str(&format!("*   **Total Proposals Paid:** {}\n", stats.total_paid_proposals));
+    section.push_str(&format!("*   **Overall Approval Rate:** {}\n", format_optional_f64(stats.overall_approval_rate, "%")));
+    section.push_str(&format!("*   **Overall Avg. Resolution Time:** {} days\n", format_optional_days(stats.overall_avg_resolution_time_days)));
+    section.push_str(&format!("*   **Overall Avg. Payment Time (Post-Approval):** {} days\n", format_optional_days(stats.overall_avg_payment_time_days)));
+    section.push_str(&format!("*   **Overall Avg. 'Yes' Votes (Passed Proposals):** {}\n", format_optional_avg_votes(stats.overall_avg_yes_votes_passed)));
+    section.push_str(&format!("*   **Overall Avg. 'No' Votes (Rejected Proposals):** {}\n", format_optional_avg_votes(stats.overall_avg_no_votes_rejected)));
+    section.push_str(&format!("*   **Total Active Teams (Current):** {}\n", stats.total_active_teams_current));
+
+    section.push_str("\n---\n\n");
+    section
+}
+
+
+fn format_section_ii(epoch_stats: &[EpochStats], scope: &str) -> String {
+    let mut section = format!("## II. Epoch-by-Epoch Summary ({})\n\n", scope);
+    section.push_str("This table shows key metrics for each epoch included in the report scope. Epochs marked with `*` are currently Active or Planned.\n\n");
+
+    section.push_str("| Epoch Name      | Status  | Dates (Start-End) | Allocated Budget | Requested Budget (Approved) | Paid Budget | # Proposals | # Resolved | # Approved | Approval Rate (%) | Avg. Res. Time (Days) | Avg. Pay Time (Days) | Avg. Yes (Passed) | Avg. No (Failed) |\n");
+    section.push_str("| :-------------- | :------ | :---------------- | :--------------- | :-------------------------- | :---------- | :---------- | :--------- | :--------- | :---------------- | :-------------------- | :------------------- | :---------------- | :--------------- |\n");
+
+    let mut total_proposals = 0;
+    let mut total_resolved = 0;
+    let mut total_approved = 0;
+    let mut total_allocated = HashMap::new();
+    let mut total_requested = HashMap::new();
+    let mut total_paid = HashMap::new();
+
+    for stats in epoch_stats {
+        let name_marker = if stats.status == "Closed" { stats.name.clone() } else { format!("{}*", stats.name) };
+        let dates = format!("{} - {}", stats.start_date.format("%Y-%m-%d"), stats.end_date.format("%Y-%m-%d"));
+
+        section.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            name_marker,
+            stats.status,
+            dates,
+            format_token_amounts(&stats.allocated_budget),
+            format_token_amounts(&stats.requested_budget),
+            format_token_amounts(&stats.paid_budget),
+            stats.num_proposals,
+            stats.num_resolved,
+            stats.num_approved,
+            format_optional_f64(stats.approval_rate, "%"),
+            format_optional_days(stats.avg_resolution_time_days),
+            format_optional_days(stats.avg_payment_time_days),
+            format_optional_avg_votes(stats.avg_yes_votes_passed),
+            format_optional_avg_votes(stats.avg_no_votes_rejected)
+        ));
+
+        // Accumulate totals
+        total_proposals += stats.num_proposals;
+        total_resolved += stats.num_resolved;
+        total_approved += stats.num_approved;
+        for (token, amount) in &stats.allocated_budget { *total_allocated.entry(token.clone()).or_insert(0.0) += amount; }
+        for (token, amount) in &stats.requested_budget { *total_requested.entry(token.clone()).or_insert(0.0) += amount; }
+        for (token, amount) in &stats.paid_budget { *total_paid.entry(token.clone()).or_insert(0.0) += amount; }
+    }
+
+    // Add Totals Row
+    section.push_str(&format!(
+        "| **Totals**      |         |                   | **{}** | **{}**           | **{}** | **{}** | **{}** | **{}** |                   |                       |                      |                   |                  |\n",
+        format_token_amounts(&total_allocated),
+        format_token_amounts(&total_requested),
+        format_token_amounts(&total_paid),
+        total_proposals,
+        total_resolved,
+        total_approved
+    ));
+
+    section.push_str("\n*Notes:*\n");
+    section.push_str("*   Data includes epochs based on the selected scope (`All Epochs` or `Completed Epochs Only`).\n");
+    section.push_str("*   Financial amounts (`Allocated`, `Requested`, `Paid`) are aggregated per token. Totals show combined aggregates per token across included epochs.\n");
+    section.push_str("*   `# Resolved`: Number of proposals within the epoch that have a resolution (Approved, Rejected, Invalid, Duplicate, Retracted).\n");
+    section.push_str("*   `Approval Rate`: (# Approved / # Resolved) * 100 for the epoch.\n");
+    section.push_str("*   `Avg. Res. Time`: Average days from proposal `published_at` (or `announced_at`) to `resolved_at` for resolved proposals in the epoch.\n");
+    section.push_str("*   `Avg. Pay Time`: Average days from proposal `resolved_at` to `payment_date` for approved *and paid* budget requests in the epoch.\n");
+    section.push_str("*   `Avg. Yes (Passed)`: Average number of 'Yes' votes in the *counted* group for formal votes on proposals that were ultimately *Approved* during the epoch.\n");
+    section.push_str("*   `Avg. No (Failed)`: Average number of 'No' votes in the *counted* group for formal votes on proposals that were ultimately *Rejected* during the epoch.\n");
+    section.push_str("*   Averages are displayed as 'N/A' if no relevant data exists for the calculation.\n");
+
+    section.push_str("\n---\n\n");
+    section
+}
+
+
+fn format_section_iii(team_stats: &[TeamPerformanceSummary], scope: &str) -> String {
+    let mut section = format!("## III. Team Performance Summary ({})\n\n", scope);
+    section.push_str("This table summarizes the overall activity for each team across the epochs included in this report.\n\n");
+
+    section.push_str("| Team Name        | Status (Current) | Total Proposals Submitted | Total Proposals Approved | Total Budget Paid | Total Points Earned |\n");
+    section.push_str("| :--------------- | :--------------- | :------------------------ | :----------------------- | :---------------- | :------------------ |\n");
+
+    for stats in team_stats {
+        section.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} |\n",
+            stats.team_name,
+            stats.current_status,
+            stats.total_proposals_submitted,
+            stats.total_proposals_approved,
+            format_token_amounts(&stats.total_budget_paid),
+            stats.total_points_earned
+        ));
+    }
+
+    section.push_str("\n*Notes:*\n");
+    section.push_str("*   *Status* reflects the team's status at the time the report was generated.\n");
+    section.push_str("*   *Total Proposals Submitted/Approved* count proposals linked to the team via `BudgetRequestDetails` across the included epochs.\n");
+    section.push_str("*   *Total Budget Paid* sums `request_amounts` from proposals submitted by the team, *approved*, and marked as *paid* across the included epochs (aggregated per token).\n");
+    section.push_str("*   *Total Points Earned* sums points awarded for voting participation across the included epochs.\n");
+
+    section.push_str("\n---\n\n");
+    section
+}
+
+
+fn format_section_iv(
+    paid_funding: &PaidFundingData,
+    selected_epochs: &[&Epoch],
+    teams: &HashMap<Uuid, Team>, // Need teams to get names
+    scope: &str,
+) -> String {
+    let mut section = format!("## IV. Detailed Team Funding Paid per Epoch ({})\n\n", scope);
+    section.push_str("This section breaks down the *paid* funding amounts for each team within each epoch included in this report.\n\n");
+    section.push_str("*(Note: A separate table is generated for each major token involved in paid budget requests.)*\n\n");
+
+    if paid_funding.funding.is_empty() {
+        section.push_str("No paid funding data found for the selected epochs.\n");
+        section.push_str("\n---\n\n");
+        return section;
+    }
+
+    // Sort tokens for consistent table order
+    let sorted_tokens: Vec<&String> = paid_funding.funding.keys().sorted().collect();
+
+    for token in sorted_tokens {
+        section.push_str(&format!("**Token: {}**\n\n", token));
+
+        // Header
+        section.push_str("| Team Name        ");
+        for epoch in selected_epochs {
+            section.push_str(&format!("| {} Paid ", epoch.name()));
+        }
+        section.push_str("| **Total Paid** |\n");
+
+        // Separator
+        section.push_str("| :--------------- ");
+        for _ in selected_epochs {
+            section.push_str("| :---------------------- ");
+        }
+        section.push_str("| :------------- |\n");
+
+        // Team Rows - Sort teams by name
+        let sorted_team_ids: Vec<&Uuid> = teams.keys().sorted_by_key(|id| teams.get(id).map(|t| t.name()).unwrap_or("")).collect();
+
+        for team_id in sorted_team_ids {
+            let team_name = teams.get(team_id).map_or("Unknown Team", |t| t.name());
+            section.push_str(&format!("| {} ", team_name));
+
+            for epoch in selected_epochs {
+                let amount = paid_funding.funding.get(token)
+                    .and_then(|epoch_map| epoch_map.get(&epoch.id()))
+                    .and_then(|team_map| team_map.get(team_id))
+                    .unwrap_or(&0.0);
+                section.push_str(&format!("| {:.2} ", amount));
+            }
+
+            // Team Total
+            let team_total = paid_funding.team_totals.get(token)
+                .and_then(|team_map| team_map.get(team_id))
+                .unwrap_or(&0.0);
+            section.push_str(&format!("| **{:.2}** |\n", team_total));
+        }
+
+        // Totals Row
+        section.push_str("| **Totals**       ");
+        for epoch in selected_epochs {
+            let epoch_total = paid_funding.epoch_totals.get(token)
+                .and_then(|epoch_map| epoch_map.get(&epoch.id()))
+                .unwrap_or(&0.0);
+            section.push_str(&format!("| **{:.2}** ", epoch_total));
+        }
+        let grand_total = paid_funding.grand_totals.get(token).unwrap_or(&0.0);
+        section.push_str(&format!("| **{:.2}** |\n", grand_total));
+
+        section.push_str("\n"); // Space before next token table or notes
+    }
+
+    section.push_str("*Notes:*\n");
+    section.push_str("*   Table shows the sum of `request_amounts` for the specified token from proposals submitted by the team that were *approved* and marked as *paid* during that specific epoch.\n");
+    section.push_str("*   Amounts are shown for the specified token only.\n");
+    section.push_str("\n---\n\n");
+    section
 }

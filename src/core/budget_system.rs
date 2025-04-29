@@ -2414,7 +2414,7 @@ def hello_world():
         );
          debug!("Calculated paid funding data.");
 
-        // 4. Format the report (using placeholder formatter for now)
+        // 4. Format the report
         let scope = if only_closed { "Completed Epochs Only" } else { "All Epochs" };
         let report_content = reporting::format_report(
             overall_stats,
@@ -2422,6 +2422,8 @@ def hello_world():
             team_stats,
             paid_funding,
             scope,
+            self.state.current_state().teams(), // Pass current teams map
+            &selected_epochs,                 // Pass selected epochs slice
         );
 
         Ok(report_content)
