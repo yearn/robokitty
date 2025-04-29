@@ -7,6 +7,10 @@ use crate::core::models::{
     Raffle, RaffleConfig, RaffleResult, RaffleTicket,
     Vote, VoteType, VoteChoice, VoteCount, VoteParticipation, VoteResult, get_id_by_name
 };
+use crate::core::reporting::{
+    self,
+    OverallStats, EpochStats, TeamPerformanceSummary, PaidFundingData,
+};
 use crate::core::progress::raffle::{RaffleProgress, RaffleCreationError};
 use crate::core::models::common::{NameMatches, UnpaidRequest, UnpaidRequestsReport, TeamPayment, EpochPaymentsReport};
 use crate::services::ethereum::EthereumServiceTrait;
@@ -2341,6 +2345,92 @@ def hello_world():
         }
     }
 
+    /// Generates the All Epochs Summary Report content.
+    pub fn generate_all_epochs_report(
+        &self,
+        only_closed: bool,
+    ) -> Result<String, Box<dyn Error>> {
+        debug!("Generating all epochs report. Only closed: {}", only_closed);
+
+        // 1. Select and sort epochs
+        let selected_epochs = reporting::select_epochs(&self.state, only_closed);
+        debug!("Selected {} epochs.", selected_epochs.len());
+
+        if selected_epochs.is_empty() {
+            return Ok(format!(
+                "# All Epochs Summary Report ({})\n\nNo epochs found matching the criteria.",
+                if only_closed { "Completed Epochs Only" } else { "All Epochs" }
+            ));
+        }
+        let selected_epoch_ids: Vec<Uuid> = selected_epochs.iter().map(|e| e.id()).collect();
+
+        // 2. Get relevant data slices
+        let relevant_proposals = reporting::get_relevant_proposals(&self.state, &selected_epoch_ids);
+        let relevant_proposal_ids: Vec<Uuid> = relevant_proposals.iter().map(|p| p.id()).collect();
+        let relevant_votes = reporting::get_relevant_votes(&self.state, &relevant_proposal_ids);
+        debug!("Found {} relevant proposals and {} relevant votes.", relevant_proposals.len(), relevant_votes.len());
+
+        let mut team_total_points_map: HashMap<Uuid, u32> = HashMap::new();
+        for team_id in self.state.current_state().teams().keys() {
+            let mut total_points_for_team = 0;
+            for epoch_id in &selected_epoch_ids {
+                // Call the method within BudgetSystem directly
+                total_points_for_team += self.calculate_team_points_for_epoch(*team_id, *epoch_id);
+            }
+            team_total_points_map.insert(*team_id, total_points_for_team);
+        }
+        debug!("Calculated total points for {} teams.", team_total_points_map.len());
+
+        // 3. Calculate aggregated stats (Pass points map to team summary calc)
+        let overall_stats = reporting::calculate_overall_summary_stats(
+            &self.state,
+            &selected_epochs,
+            &relevant_proposals,
+            &relevant_votes,
+        );
+        debug!("Calculated overall stats: {:?}", overall_stats);
+
+        let epoch_stats = reporting::calculate_epoch_by_epoch_stats(
+             &self.state,
+             &selected_epochs,
+             &relevant_proposals,
+             &relevant_votes,
+         );
+        debug!("Calculated {} epoch-by-epoch stats.", epoch_stats.len());
+
+        // Pass state and the calculated points map
+        let team_stats = reporting::calculate_team_performance_summary(
+            &self.state, // Pass state
+            &selected_epochs,
+            &relevant_proposals,
+            &team_total_points_map, // Pass pre-calculated points
+        );
+        debug!("Calculated {} team performance summaries.", team_stats.len());
+
+        // Calculate paid funding (now returns a tuple)
+        let (paid_funding_data, paid_loan_data) = reporting::calculate_paid_funding_per_team_epoch(
+            &self.state,
+            &selected_epochs,
+            &relevant_proposals,
+        );
+         debug!("Calculated paid funding and loan data.");
+
+        // 4. Format the report (pass both funding and loan data)
+        let scope = if only_closed { "Completed Epochs Only" } else { "All Epochs" };
+        let report_content = reporting::format_report(
+            overall_stats,
+            epoch_stats,
+            team_stats,
+            paid_funding_data, // Pass funding data
+            paid_loan_data,    // Pass loan data
+            scope,
+            self.state.current_state().teams(),
+            &selected_epochs,
+        ); // Update format_report signature later
+
+        Ok(report_content)
+    }
+
 }
 
 #[async_trait]
@@ -2739,6 +2829,41 @@ impl CommandExecutor for BudgetSystem {
             Command::GenerateEpochPaymentsReport { epoch_name, output_path } => {
                 self.generate_epoch_payments_report(&epoch_name, output_path.as_deref())
             },
+            Command::GenerateAllEpochsReport { output_path, only_closed } => {
+                // 1. Determine the final output path
+                let final_path = match output_path {
+                    Some(path_str) => PathBuf::from(path_str),
+                    None => {
+                        // Generate default path using the state file from config
+                        let state_file_path = Path::new(&self.config.state_file);
+                        FileSystem::generate_default_all_epochs_report_path(state_file_path)
+                    }
+                };
+                debug!("Determined report output path: {:?}", final_path);
+
+                // 2. Generate the report content
+                let report_content = self.generate_all_epochs_report(only_closed)?;
+                debug!("Generated report content (length: {} bytes)", report_content.len());
+
+
+                // 3. Ensure parent directory exists
+                if let Some(parent) = final_path.parent() {
+                    fs::create_dir_all(parent)?;
+                    debug!("Ensured parent directory exists: {:?}", parent);
+                } else {
+                     debug!("No parent directory found for path: {:?}", final_path);
+                     // Decide if this is an error or ok (e.g. writing to current dir)
+                     // For now, let's proceed, fs::write will handle root paths etc.
+                }
+
+                // 4. Write the report to the file
+                fs::write(&final_path, &report_content)?;
+                debug!("Successfully wrote report to {:?}", final_path);
+
+
+                // 5. Always return the confirmation message
+                Ok(format!("Generated All Epochs Summary Report at: {:?}", final_path))
+            }
         }
     }
 

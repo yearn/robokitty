@@ -11,6 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::error::Error;
+use chrono::Utc;
 
 pub struct FileSystem;
 
@@ -127,6 +128,18 @@ impl FileSystem {
         } else {
             sanitized
         }
+    }
+
+    /// Generates the default file path for the All Epochs Summary Report.
+    /// Uses the directory of the state_file as the base for the 'reports' folder.
+    pub fn generate_default_all_epochs_report_path(state_file: &Path) -> PathBuf {
+        let state_file_dir = state_file.parent().unwrap_or_else(|| Path::new("."));
+        let reports_dir = state_file_dir.join("reports"); // No epoch subfolder for this one
+
+        let date = Utc::now().format("%Y-%m-%d"); // Use standard YYYY-MM-DD
+        let file_name = format!("all_epochs_report-{}.md", date);
+
+        reports_dir.join(file_name)
     }
 }
 

@@ -360,6 +360,17 @@ pub enum ReportCommands {
        #[arg(value_name = "PROPOSAL")]
        proposal_name: String,
    },
+
+   /// Generate a summary report across all epochs
+   AllEpochs {
+        /// Optional path to save the report markdown file
+        #[arg(long, value_name = "PATH")]
+        output_path: Option<String>,
+
+        /// Only include data from closed epochs in the report
+        #[arg(long)]
+        only_closed: bool,
+    },
 }
 
 
@@ -619,6 +630,9 @@ impl Cli {
                 },
                 ReportCommands::ClosedProposals { epoch_name } => {
                     Ok(Command::GenerateReportsForClosedProposals { epoch_name })
+                },
+                ReportCommands::AllEpochs { output_path, only_closed } => {
+                    Ok(Command::GenerateAllEpochsReport { output_path, only_closed })
                 },
             },
 
