@@ -121,11 +121,12 @@ pub fn format_report(
 // --- End Structs ---
 
 // --- Stablecoin Definition ---
-const STABLECOINS: [&str; 4] = ["DAI", "USDC", "USD", "yv-mkUSD"];
+const STABLECOINS: [&str; 4] = ["DAI", "USDC", "USD", "USDT"];
 const STABLES_KEY: &str = "Stables";
 
 fn is_stablecoin(token: &str) -> bool {
-    STABLECOINS.contains(&token.to_uppercase().as_str())
+    let upper_token = token.trim().to_uppercase();
+    STABLECOINS.iter().any(|&stable| stable == upper_token) // Direct comparison with constant
 }
 
 // Helper function to safely calculate averages
@@ -647,26 +648,39 @@ fn format_section_i(stats: &OverallStats, scope: &str) -> String {
     if stats.total_allocated_budget.is_empty() {
         section.push_str("    *   N/A\n");
     } else {
+        // Loop uses format_currency - CORRECT
         for (token, amount) in stats.total_allocated_budget.iter().sorted_by_key(|(t, _)| *t) {
-            section.push_str(&format!("    *   {}: {:.2}\n", token, amount));
+            section.push_str(&format!("    *   {}: {}\n", token, format_currency(*amount)));
         }
     }
 
-    section.push_str("*   **Total Budget Requested (Approved Proposals):**\n");
-     if stats.total_requested_budget.is_empty() {
-        section.push_str("    *   N/A\n");
-    } else {
+    section.push_str("*   **Total Budget Requested (Approved - Funding):**\n");
+     if stats.total_requested_budget.is_empty() { /* ... N/A ... */ } else {
+        // Loop uses format_currency - CORRECT
         for (token, amount) in stats.total_requested_budget.iter().sorted_by_key(|(t, _)| *t) {
-            section.push_str(&format!("    *   {}: {:.2}\n", token, amount));
+             section.push_str(&format!("    *   {}: {}\n", token, format_currency(*amount)));
+        }
+    }
+    section.push_str("*   **Total Budget Requested (Approved - Loans):**\n");
+     if stats.total_loan_requested_budget.is_empty() { /* ... N/A ... */ } else {
+        // Loop uses format_currency - CORRECT
+        for (token, amount) in stats.total_loan_requested_budget.iter().sorted_by_key(|(t, _)| *t) {
+             section.push_str(&format!("    *   {}: {}\n", token, format_currency(*amount)));
         }
     }
 
-    section.push_str("*   **Total Budget Paid (Approved & Paid Proposals):**\n");
-    if stats.total_paid_budget.is_empty() {
-        section.push_str("    *   N/A\n");
-    } else {
+    section.push_str("*   **Total Budget Paid (Funding):**\n");
+    if stats.total_paid_budget.is_empty() { /* ... N/A ... */ } else {
+        // Loop uses format_currency - CORRECT
         for (token, amount) in stats.total_paid_budget.iter().sorted_by_key(|(t, _)| *t) {
-            section.push_str(&format!("    *   {}: {:.2}\n", token, amount));
+            section.push_str(&format!("    *   {}: {}\n", token, format_currency(*amount)));
+        }
+    }
+    section.push_str("*   **Total Budget Paid (Loans):**\n");
+    if stats.total_loan_paid_budget.is_empty() { /* ... N/A ... */ } else {
+        // Loop uses format_currency - CORRECT
+        for (token, amount) in stats.total_loan_paid_budget.iter().sorted_by_key(|(t, _)| *t) {
+            section.push_str(&format!("    *   {}: {}\n", token, format_currency(*amount)));
         }
     }
 
