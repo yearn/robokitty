@@ -2400,31 +2400,33 @@ def hello_world():
 
         // Pass state and the calculated points map
         let team_stats = reporting::calculate_team_performance_summary(
-            &self.state, // Pass state for team info
+            &self.state, // Pass state
             &selected_epochs,
             &relevant_proposals,
-            &team_total_points_map, // Pass the pre-calculated points
+            &team_total_points_map, // Pass pre-calculated points
         );
         debug!("Calculated {} team performance summaries.", team_stats.len());
 
-        let paid_funding = reporting::calculate_paid_funding_per_team_epoch(
+        // Calculate paid funding (now returns a tuple)
+        let (paid_funding_data, paid_loan_data) = reporting::calculate_paid_funding_per_team_epoch(
             &self.state,
             &selected_epochs,
             &relevant_proposals,
         );
-         debug!("Calculated paid funding data.");
+         debug!("Calculated paid funding and loan data.");
 
-        // 4. Format the report
+        // 4. Format the report (pass both funding and loan data)
         let scope = if only_closed { "Completed Epochs Only" } else { "All Epochs" };
         let report_content = reporting::format_report(
             overall_stats,
             epoch_stats,
             team_stats,
-            paid_funding,
+            paid_funding_data, // Pass funding data
+            paid_loan_data,    // Pass loan data
             scope,
-            self.state.current_state().teams(), // Pass current teams map
-            &selected_epochs,                 // Pass selected epochs slice
-        );
+            self.state.current_state().teams(),
+            &selected_epochs,
+        ); // Update format_report signature later
 
         Ok(report_content)
     }
