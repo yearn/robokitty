@@ -7,6 +7,10 @@ use crate::core::models::{
     Raffle, RaffleConfig, RaffleResult, RaffleTicket,
     Vote, VoteType, VoteChoice, VoteCount, VoteParticipation, VoteResult, get_id_by_name
 };
+use crate::core::reporting::{
+    self,
+    OverallStats, EpochStats, TeamPerformanceSummary, PaidFundingData,
+};
 use crate::core::progress::raffle::{RaffleProgress, RaffleCreationError};
 use crate::core::models::common::{NameMatches, UnpaidRequest, UnpaidRequestsReport, TeamPayment, EpochPaymentsReport};
 use crate::services::ethereum::EthereumServiceTrait;
@@ -2341,21 +2345,86 @@ def hello_world():
         }
     }
 
+    /// Generates the All Epochs Summary Report content.
     pub fn generate_all_epochs_report(
         &self,
         only_closed: bool,
-        // output_path: Option<&str>, // We handle output path in execute_command
     ) -> Result<String, Box<dyn Error>> {
-        // TODO: Implement actual report generation logic here
-        // This involves fetching epochs based on `only_closed`,
-        // aggregating data across them, and formatting the Markdown.
+        debug!("Generating all epochs report. Only closed: {}", only_closed);
 
+        // 1. Select and sort epochs
+        let selected_epochs = reporting::select_epochs(&self.state, only_closed);
+        debug!("Selected {} epochs.", selected_epochs.len());
+
+        if selected_epochs.is_empty() {
+            return Ok(format!(
+                "# All Epochs Summary Report ({})\n\nNo epochs found matching the criteria.",
+                if only_closed { "Completed Epochs Only" } else { "All Epochs" }
+            ));
+        }
+        let selected_epoch_ids: Vec<Uuid> = selected_epochs.iter().map(|e| e.id()).collect();
+
+        // 2. Get relevant data slices
+        let relevant_proposals = reporting::get_relevant_proposals(&self.state, &selected_epoch_ids);
+        let relevant_proposal_ids: Vec<Uuid> = relevant_proposals.iter().map(|p| p.id()).collect();
+        let relevant_votes = reporting::get_relevant_votes(&self.state, &relevant_proposal_ids);
+        debug!("Found {} relevant proposals and {} relevant votes.", relevant_proposals.len(), relevant_votes.len());
+
+        let mut team_total_points_map: HashMap<Uuid, u32> = HashMap::new();
+        for team_id in self.state.current_state().teams().keys() {
+            let mut total_points_for_team = 0;
+            for epoch_id in &selected_epoch_ids {
+                // Call the method within BudgetSystem directly
+                total_points_for_team += self.calculate_team_points_for_epoch(*team_id, *epoch_id);
+            }
+            team_total_points_map.insert(*team_id, total_points_for_team);
+        }
+        debug!("Calculated total points for {} teams.", team_total_points_map.len());
+
+        // 3. Calculate aggregated stats (Pass points map to team summary calc)
+        let overall_stats = reporting::calculate_overall_summary_stats(
+            &self.state,
+            &selected_epochs,
+            &relevant_proposals,
+            &relevant_votes,
+        );
+        debug!("Calculated overall stats: {:?}", overall_stats);
+
+        let epoch_stats = reporting::calculate_epoch_by_epoch_stats(
+             &self.state,
+             &selected_epochs,
+             &relevant_proposals,
+             &relevant_votes,
+         );
+        debug!("Calculated {} epoch-by-epoch stats.", epoch_stats.len());
+
+        // Pass state and the calculated points map
+        let team_stats = reporting::calculate_team_performance_summary(
+            &self.state, // Pass state for team info
+            &selected_epochs,
+            &relevant_proposals,
+            &team_total_points_map, // Pass the pre-calculated points
+        );
+        debug!("Calculated {} team performance summaries.", team_stats.len());
+
+        let paid_funding = reporting::calculate_paid_funding_per_team_epoch(
+            &self.state,
+            &selected_epochs,
+            &relevant_proposals,
+        );
+         debug!("Calculated paid funding data.");
+
+        // 4. Format the report (using placeholder formatter for now)
         let scope = if only_closed { "Completed Epochs Only" } else { "All Epochs" };
-        Ok(format!(
-            "# All Epochs Summary Report ({})\n\n**Generated:** {}\n\n*Report generation not yet fully implemented.*",
+        let report_content = reporting::format_report(
+            overall_stats,
+            epoch_stats,
+            team_stats,
+            paid_funding,
             scope,
-            Utc::now().to_rfc3339()
-        ))
+        );
+
+        Ok(report_content)
     }
 
 }
