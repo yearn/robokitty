@@ -120,6 +120,10 @@ pub enum Command {
         epoch_name: String,
         output_path: Option<String>,
     },
+    GenerateAllEpochsReport {
+        output_path: Option<String>,
+        only_closed: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

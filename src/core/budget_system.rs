@@ -2341,6 +2341,23 @@ def hello_world():
         }
     }
 
+    pub fn generate_all_epochs_report(
+        &self,
+        only_closed: bool,
+        // output_path: Option<&str>, // We handle output path in execute_command
+    ) -> Result<String, Box<dyn Error>> {
+        // TODO: Implement actual report generation logic here
+        // This involves fetching epochs based on `only_closed`,
+        // aggregating data across them, and formatting the Markdown.
+
+        let scope = if only_closed { "Completed Epochs Only" } else { "All Epochs" };
+        Ok(format!(
+            "# All Epochs Summary Report ({})\n\n**Generated:** {}\n\n*Report generation not yet fully implemented.*",
+            scope,
+            Utc::now().to_rfc3339()
+        ))
+    }
+
 }
 
 #[async_trait]
@@ -2739,6 +2756,25 @@ impl CommandExecutor for BudgetSystem {
             Command::GenerateEpochPaymentsReport { epoch_name, output_path } => {
                 self.generate_epoch_payments_report(&epoch_name, output_path.as_deref())
             },
+            Command::GenerateAllEpochsReport { output_path, only_closed } => {
+                // Generate the report content using the (currently placeholder) function
+                let report_content = self.generate_all_epochs_report(only_closed)?;
+
+                // Handle file output or return string
+                if let Some(path_str) = output_path {
+                    let path = Path::new(&path_str);
+                    // Ensure parent directory exists
+                    if let Some(parent) = path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    // Write the report to the specified file
+                    fs::write(path, &report_content)?;
+                    Ok(format!("Generated All Epochs Summary Report at: {:?}", path))
+                } else {
+                    // Return the report content as a string
+                    Ok(report_content)
+                }
+            }
         }
     }
 
