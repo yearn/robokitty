@@ -70,11 +70,25 @@ pub struct TeamPerformanceSummary {
 
 #[derive(Debug, Default, Clone)]
 pub struct PaidFundingData {
-    // Token -> Epoch ID -> Team ID -> Amount
-    pub funding: HashMap<String, HashMap<Uuid, HashMap<Uuid, f64>>>,
-    pub team_totals: HashMap<String, HashMap<Uuid, f64>>, // Token -> Team ID -> Total Amount
-    pub epoch_totals: HashMap<String, HashMap<Uuid, f64>>, // Token -> Epoch ID -> Total Amount
-    pub grand_totals: HashMap<String, f64>, // Token -> Grand Total Amount
+    // Token -> Epoch ID -> Team ID -> Amount (Only for proposals WITH a team_id)
+    pub funding_by_team: HashMap<String, HashMap<Uuid, HashMap<Uuid, f64>>>,
+
+    // Token -> Epoch ID -> Amount (Only for proposals WITHOUT a team_id)
+    pub funding_no_team: HashMap<String, HashMap<Uuid, f64>>,
+
+    // --- Derived Totals (Calculated based on the above) ---
+    // Token -> Team ID -> Total Amount (Sum across epochs for specific team)
+    pub team_totals: HashMap<String, HashMap<Uuid, f64>>,
+
+    // Token -> Total Amount (Sum across epochs for team-less proposals)
+    pub no_team_grand_total: HashMap<String, f64>,
+
+    // Token -> Epoch ID -> Total Amount (Sum across teams + no_team for specific epoch)
+    // Note: This could also be calculated during formatting if preferred. Let's calculate it here.
+    pub epoch_grand_totals: HashMap<String, HashMap<Uuid, f64>>,
+
+    // Token -> Grand Total Amount (Sum across all epochs, all teams + no_team)
+    pub grand_totals: HashMap<String, f64>,
 }
 
 /// Formats the complete All Epochs Summary report.
@@ -99,8 +113,9 @@ pub fn format_report(
          report.push_str("This report summarizes key financial, performance, and voting metrics across all **completed (Closed)** epochs managed by the RoboKitty budget system.\n\n");
     }
     
-    report.push_str(&format!("*Note: '{}' category aggregates the following tokens: {}.*\n", STABLES_KEY, STABLECOINS.join(", ")));
-    report.push_str("---\n\n");
+    report.push_str("```\n");
+    report.push_str(&format!("NOTE: The '{}' category aggregates the following tokens: {}.\n", STABLES_KEY, STABLECOINS.join(", ")));
+    report.push_str("```\n\n");
 
     // Append sections
     report.push_str(&format_section_i(&stats, scope));
@@ -501,41 +516,59 @@ pub fn calculate_paid_funding_per_team_epoch(
         if proposal.is_approved() {
             if let Some(details) = proposal.budget_request_details() {
                  if details.is_paid() {
-                     if let Some(team_id) = details.team() {
-                        let epoch_id = proposal.epoch_id();
-                        // Ensure epoch is selected
-                        if selected_epoch_ids.contains(&epoch_id) {
-                             for (token, amount) in details.request_amounts() {
-                                 if *amount > 0.0 {
-                                    let token_key = if is_stablecoin(token) { STABLES_KEY.to_string() } else { token.clone() };
-                                    let is_loan = details.is_loan();
+                    let epoch_id = proposal.epoch_id();
+                    // Ensure epoch is selected
+                    if selected_epoch_ids.contains(&epoch_id) {
+                        let is_loan = details.is_loan();
+                        let target_data = if is_loan { &mut loan_data } else { &mut funding_data };
+                        let maybe_team_id = details.team();
 
-                                    // Choose which data structure to update
-                                    let target_data = if is_loan { &mut loan_data } else { &mut funding_data };
+                        for (token, amount) in details.request_amounts() {
+                             if *amount > 0.0 {
+                                let token_key = if is_stablecoin(token) { STABLES_KEY.to_string() } else { token.clone() };
 
-                                    // Per Team/Epoch/Token
-                                    *target_data.funding
-                                        .entry(token_key.clone()).or_default()
-                                        .entry(epoch_id).or_default()
-                                        .entry(team_id).or_insert(0.0) += amount;
+                                if let Some(team_id) = maybe_team_id {
+                                    // -- Has Team --
+                                    // Per Team/Epoch/Token: HashMap<Token, HashMap<Epoch, HashMap<Team, Amount>>>
+                                    *target_data.funding_by_team
+                                        .entry(token_key.clone()).or_default() // Entry for Token -> HashMap<Epoch, ...>
+                                        .entry(epoch_id).or_default()          // Entry for Epoch -> HashMap<Team, Amount>
+                                        .entry(team_id).or_insert(0.0)        // Entry for Team -> Amount
+                                        += amount;
 
-                                    // Team Totals
+                                    // Team Totals: HashMap<Token, HashMap<Team, Amount>>
                                     *target_data.team_totals
-                                        .entry(token_key.clone()).or_default()
-                                        .entry(team_id).or_insert(0.0) += amount;
+                                        .entry(token_key.clone()).or_default() // Entry for Token -> HashMap<Team, Amount>
+                                        .entry(team_id).or_insert(0.0)        // Entry for Team -> Amount
+                                        += amount;
+                                } else {
+                                    // -- No Team --
+                                    // funding_no_team: HashMap<Token, HashMap<Epoch, Amount>>
+                                     *target_data.funding_no_team
+                                         .entry(token_key.clone()).or_default() // Entry for Token -> HashMap<Epoch, Amount>
+                                         .entry(epoch_id).or_insert(0.0)        // Entry for Epoch -> Amount
+                                         += amount;
 
-                                    // Epoch Totals
-                                    *target_data.epoch_totals
-                                        .entry(token_key.clone()).or_default()
-                                        .entry(epoch_id).or_insert(0.0) += amount;
-
-                                    // Grand Totals
-                                    *target_data.grand_totals
-                                        .entry(token_key).or_insert(0.0) += amount;
+                                     // no_team_grand_total: HashMap<Token, Amount>
+                                     *target_data.no_team_grand_total
+                                         .entry(token_key.clone()).or_insert(0.0) // Entry for Token -> Amount
+                                         += amount;
                                 }
+
+                                // --- Update totals regardless of team ---
+                                // epoch_grand_totals: HashMap<Token, HashMap<Epoch, Amount>>
+                                *target_data.epoch_grand_totals
+                                    .entry(token_key.clone()).or_default() // Entry for Token -> HashMap<Epoch, Amount>
+                                    .entry(epoch_id).or_insert(0.0)        // Entry for Epoch -> Amount
+                                    += amount;
+
+                                // grand_totals: HashMap<Token, Amount>
+                                *target_data.grand_totals
+                                    .entry(token_key).or_insert(0.0) // Entry for Token -> Amount
+                                    += amount;
                             }
                         }
-                     }
+                    }
                  }
             }
         }
@@ -763,6 +796,7 @@ fn format_section_ii(epoch_stats: &[EpochStats], scope: &str) -> String {
     section.push_str("\n*Notes:*\n");
     section.push_str("*   Data includes epochs based on the selected scope (`All Epochs` or `Completed Epochs Only`).\n");
     section.push_str("*   Financial amounts are aggregated per token, with stablecoins grouped.\n");
+    section.push_str("*   Epoch totals for budgets and proposal counts include proposals not associated with a specific team.\n");
     section.push_str("*   `Paid Funding` excludes loan amounts. `Paid Loans` shows only loan amounts.\n");
     section.push_str("*   `# Resolved`: Number of proposals within the epoch that have a resolution (Approved, Rejected, Invalid, Duplicate, Retracted).\n");
     section.push_str("*   `Approval Rate`: (# Approved / # Resolved) * 100 for the epoch.\n");
@@ -814,106 +848,132 @@ fn format_section_iv(
     scope: &str,
 ) -> String {
     let mut section = format!("## IV. Detailed Team Funding Paid per Epoch ({})\n\n", scope);
-    // --- Funding Subsection ---
-    section.push_str("### Paid Funding (Non-Loan)\n\n");
-    section.push_str("This section breaks down the *paid funding* amounts (excluding loans) for each team within each epoch included in this report.\n\n");
-    section.push_str("*(Note: A separate table is generated for each major token/group involved in paid funding requests.)*\n\n");
+    
+    // --- Helper function to generate one table (Funding or Loans) ---
+    let generate_table = |title: &str, description: &str, data: &PaidFundingData| -> String {
+        let mut table_section = String::new();
+        table_section.push_str(&format!("### {}\n\n", title));
+        table_section.push_str(&format!("{}\n\n", description));
+        table_section.push_str("*(Note: A separate table is generated for each major token/group involved.)*\n\n");
 
-    if paid_funding_data.funding.is_empty() {
-        section.push_str("No paid funding data found for the selected epochs.\n\n");
-    } else {
+        if data.grand_totals.is_empty() { // Check if any paid data exists for this type
+            table_section.push_str(&format!("No paid {} data found for the selected epochs.\n\n", title.to_lowercase()));
+            return table_section;
+        }
+
         // Sort tokens for consistent table order
-        let sorted_tokens: Vec<&String> = paid_funding_data.funding.keys().sorted().collect();
+        let sorted_tokens: Vec<&String> = data.grand_totals.keys().sorted().collect(); // Sort by grand total keys
+
         for token in sorted_tokens {
-             section.push_str(&format!("**Token: {}**\n\n", token));
+            table_section.push_str(&format!("**Token: {}**\n\n", token));
             // Header
-            section.push_str("| Team Name        ");
-            for epoch in selected_epochs { section.push_str(&format!("| {} Paid ", epoch.name())); }
-            section.push_str("| **Total Paid** |\n");
+            table_section.push_str("| Team Name        ");
+            for epoch in selected_epochs { table_section.push_str(&format!("| {} Paid ", epoch.name())); }
+            table_section.push_str("| **Total Paid** |\n");
             // Separator
-            section.push_str("| :--------------- ");
-            for _ in selected_epochs { section.push_str("| :---------------------- "); }
-            section.push_str("| :------------- |\n");
-            // Team Rows
-            let sorted_team_ids: Vec<&Uuid> = teams.keys().sorted_by_key(|id| teams.get(id).map(|t| t.name()).unwrap_or("")).collect();
-            for team_id in sorted_team_ids {
+            table_section.push_str("| :--------------- ");
+            for _ in selected_epochs { table_section.push_str("| :---------------------- "); }
+            table_section.push_str("| :------------- |\n");
+
+            // --- Team Rows ---
+            let sorted_team_ids: Vec<&Uuid> = teams.keys()
+                 // Filter teams that actually received funding/loans of this type for this token
+                .filter(|team_id| data.team_totals.get(token).map_or(false, |tm| tm.contains_key(team_id)))
+                .sorted_by_key(|id| teams.get(id).map(|t| t.name()).unwrap_or(""))
+                .collect();
+
+            for team_id in &sorted_team_ids { // Iterate over filtered&sorted team IDs
                 let team_name = teams.get(team_id).map_or("Unknown Team", |t| t.name());
-                section.push_str(&format!("| {} ", team_name));
+                table_section.push_str(&format!("| {} ", team_name));
                 for epoch in selected_epochs {
-                    let amount = paid_funding_data.funding.get(token)
+                    let amount = data.funding_by_team.get(token)
                         .and_then(|emap| emap.get(&epoch.id()))
                         .and_then(|tmap| tmap.get(team_id)).unwrap_or(&0.0);
-                    section.push_str(&format!("| {} ", format_currency(*amount))); // Use currency format
+                    table_section.push_str(&format!("| {} ", format_currency(*amount)));
                 }
-                let team_total = paid_funding_data.team_totals.get(token)
+                // Use pre-calculated team total for this token
+                let team_total = data.team_totals.get(token)
                     .and_then(|tmap| tmap.get(team_id)).unwrap_or(&0.0);
-                section.push_str(&format!("| **{}** |\n", format_currency(*team_total))); // Use currency format
+                table_section.push_str(&format!("| **{}** |\n", format_currency(*team_total)));
             }
-            // Totals Row
-            section.push_str("| **Totals**       ");
-            for epoch in selected_epochs {
-                let epoch_total = paid_funding_data.epoch_totals.get(token)
-                    .and_then(|emap| emap.get(&epoch.id())).unwrap_or(&0.0);
-                section.push_str(&format!("| **{}** ", format_currency(*epoch_total))); // Use currency format
-            }
-            let grand_total = paid_funding_data.grand_totals.get(token).unwrap_or(&0.0);
-            section.push_str(&format!("| **{}** |\n", format_currency(*grand_total))); // Use currency format
-            section.push_str("\n");
-        }
-    }
 
-     // --- Loans Subsection ---
-    section.push_str("### Paid Loans\n\n");
-    section.push_str("This section breaks down the *paid loan* amounts for each team within each epoch included in this report.\n\n");
-    section.push_str("*(Note: A separate table is generated for each major token/group involved in paid loan requests.)*\n\n");
-
-    if paid_loan_data.funding.is_empty() { // Use the 'funding' field name within the PaidFundingData struct
-        section.push_str("No paid loan data found for the selected epochs.\n");
-    } else {
-        // Sort tokens for consistent table order
-        let sorted_tokens: Vec<&String> = paid_loan_data.funding.keys().sorted().collect();
-        for token in sorted_tokens {
-             section.push_str(&format!("**Token: {}**\n\n", token));
-             // Header
-            section.push_str("| Team Name        ");
-            for epoch in selected_epochs { section.push_str(&format!("| {} Paid ", epoch.name())); }
-            section.push_str("| **Total Paid** |\n");
-            // Separator
-            section.push_str("| :--------------- ");
-            for _ in selected_epochs { section.push_str("| :---------------------- "); }
-            section.push_str("| :------------- |\n");
-             // Team Rows
-            let sorted_team_ids: Vec<&Uuid> = teams.keys().sorted_by_key(|id| teams.get(id).map(|t| t.name()).unwrap_or("")).collect();
-            for team_id in sorted_team_ids {
-                let team_name = teams.get(team_id).map_or("Unknown Team", |t| t.name());
-                section.push_str(&format!("| {} ", team_name));
-                for epoch in selected_epochs {
-                    let amount = paid_loan_data.funding.get(token) // Use the 'funding' field name
-                        .and_then(|emap| emap.get(&epoch.id()))
-                        .and_then(|tmap| tmap.get(team_id)).unwrap_or(&0.0);
-                    section.push_str(&format!("| {} ", format_currency(*amount))); // Use currency format
-                }
-                let team_total = paid_loan_data.team_totals.get(token)
-                    .and_then(|tmap| tmap.get(team_id)).unwrap_or(&0.0);
-                section.push_str(&format!("| **{}** |\n", format_currency(*team_total))); // Use currency format
-            }
-            // Totals Row
-            section.push_str("| **Totals**       ");
+             // --- Team Totals Row (Calculated from team_totals map) ---
+            table_section.push_str("| **Team Totals**  ");
+            let mut epoch_team_totals = HashMap::new();
             for epoch in selected_epochs {
-                let epoch_total = paid_loan_data.epoch_totals.get(token)
-                    .and_then(|emap| emap.get(&epoch.id())).unwrap_or(&0.0);
-                section.push_str(&format!("| **{}** ", format_currency(*epoch_total))); // Use currency format
+                let mut current_epoch_team_total = 0.0;
+                 if let Some(epoch_map) = data.funding_by_team.get(token) {
+                     if let Some(team_map) = epoch_map.get(&epoch.id()) {
+                         current_epoch_team_total = team_map.values().sum();
+                     }
+                 }
+                epoch_team_totals.insert(epoch.id(), current_epoch_team_total);
+                table_section.push_str(&format!("| **{}** ", format_currency(current_epoch_team_total)));
             }
-            let grand_total = paid_loan_data.grand_totals.get(token).unwrap_or(&0.0);
-            section.push_str(&format!("| **{}** |\n", format_currency(*grand_total))); // Use currency format
-            section.push_str("\n");
+             // Overall team total for this token
+             let overall_team_total: f64 = data.team_totals.get(token).map_or(0.0, |tm| tm.values().sum());
+            table_section.push_str(&format!("| **{}** |\n", format_currency(overall_team_total)));
+
+
+            // --- General / No Team Row ---
+            table_section.push_str("| **General / No Team** ");
+            for epoch in selected_epochs {
+                let amount = data.funding_no_team.get(token)
+                    .and_then(|emap| emap.get(&epoch.id()))
+                    .unwrap_or(&0.0);
+                table_section.push_str(&format!("| {} ", format_currency(*amount)));
+            }
+            // Use pre-calculated no_team grand total for this token
+            let no_team_total = data.no_team_grand_total.get(token).unwrap_or(&0.0);
+            table_section.push_str(&format!("| **{}** |\n", format_currency(*no_team_total)));
+
+
+             // --- Epoch Grand Total Row (Sum of Team Totals row + No Team row) ---
+            table_section.push_str("| **Epoch Grand Total** ");
+            for epoch in selected_epochs {
+                // Sum the team total for this epoch and the no_team amount for this epoch
+                let team_total_for_epoch = *epoch_team_totals.get(&epoch.id()).unwrap_or(&0.0);
+                let no_team_for_epoch = data.funding_no_team.get(token)
+                    .and_then(|emap| emap.get(&epoch.id()))
+                    .unwrap_or(&0.0);
+                let epoch_grand_total = team_total_for_epoch + no_team_for_epoch;
+
+                 // Optional: Verify against pre-calculated epoch_grand_totals
+                 // let precalc_epoch_grand_total = data.epoch_grand_totals.get(token).and_then(|m| m.get(&epoch.id())).unwrap_or(&0.0);
+                 // assert!((epoch_grand_total - precalc_epoch_grand_total).abs() < f64::EPSILON, "Mismatch in epoch grand total calculation!");
+
+                table_section.push_str(&format!("| **{}** ", format_currency(epoch_grand_total)));
+            }
+            // Use pre-calculated grand total
+            let grand_total = data.grand_totals.get(token).unwrap_or(&0.0);
+            table_section.push_str(&format!("| **{}** |\n", format_currency(*grand_total))); // Use pre-calculated grand total
+
+            table_section.push_str("\n"); // Space before next token table
         }
-    }
+        table_section
+    };
+    // --- End Helper function ---
+
+    // Generate Funding Table
+    section.push_str(&generate_table(
+        "Paid Funding (Non-Loan)",
+        "This section breaks down the *paid funding* amounts (excluding loans) for each team within each epoch included in this report.",
+        paid_funding_data,
+    ));
+
+    // Generate Loans Table
+    section.push_str(&generate_table(
+        "Paid Loans",
+        "This section breaks down the *paid loan* amounts for each team within each epoch included in this report.",
+        paid_loan_data,
+    ));
 
 
     section.push_str("*Notes:*\n");
-    section.push_str("*   Table shows the sum of `request_amounts` for the specified token from proposals submitted by the team that were *approved*, marked as *paid*, and designated as a *loan* (or *not* a loan for the Funding section) during that specific epoch.\n");
-    section.push_str("*   Amounts are shown for the specified token/group only.\n");
+    section.push_str("*   Tables show the sum of `request_amounts` for the specified token/group from proposals submitted by the team (or without a team) that were *approved* and marked as *paid* during that specific epoch.\n");
+    section.push_str("*   `Team Totals` row sums only the values from the listed teams for that column.\n");
+    section.push_str("*   `General / No Team` row sums values from proposals not associated with any team.\n");
+    section.push_str("*   `Epoch Grand Total` row is the sum of `Team Totals` and `General / No Team` for that column.\n");
     section.push_str("\n---\n\n"); // End of report separator
     section
 }
