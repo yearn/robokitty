@@ -1,171 +1,85 @@
-# Robokitty
+# RoboKitty: DAO Budget & Governance System
 
-Robokitty is a dual-interface budget management system that helps organizations manage team participation, proposal voting, and reward distribution. It provides both a CLI and a Telegram bot interface for easy interaction.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Rust](https://github.com/user/robokitty/actions/workflows/rust.yml/badge.svg)](https://github.com/user/robokitty/actions/workflows/rust.yml)
+[![Crates.io](https://img.shields.io/crates/v/robokitty.svg)](https://crates.io/crates/robokitty)
 
-## Features
+RoboKitty is a sophisticated budget and governance management system designed for DAOs and decentralized teams. It provides a robust framework for managing financial epochs, handling budget proposals, conducting fair and verifiable voting raffles using Ethereum block data, and generating detailed performance reports.
 
-- Team management with Earner/Supporter status tracking
-- Proposal lifecycle management
-- Fair participation selection through Ethereum-based raffles
-- Formal and informal voting mechanisms
-- Automated point tracking and reward distribution
-- Comprehensive reporting system
-- Data stored in .JSON
-- Secure state persistence
+The system is accessible through a powerful **Command-Line Interface (CLI)** for administrators and a user-friendly **Telegram Bot** for convenient, on-the-go interactions.
 
-## Installation
+## Key Features
+
+-   **Epoch-Based Budgeting:** Organize financial activities into distinct time periods (Epochs) with their own rewards and proposals.
+-   **Proposal Management:** A complete lifecycle for proposals from announcement and publication to resolution (Approved, Rejected, etc.).
+-   **On-Chain Raffle System:** A fair and transparent mechanism to select "counted" voters for formal proposals, using future Ethereum block randomness (`mixHash`) to prevent manipulation.
+-   **Team & Participation Tracking:** Manage teams, their status (Earner, Supporter), and track their participation in governance, awarding points for engagement.
+-   **Comprehensive Reporting:** Generate detailed reports on team performance, epoch summaries, proposal outcomes, unpaid budget requests, and end-of-epoch payment distributions.
+-   **Stateful & Persistent:** The entire system state is saved to a single JSON file, allowing it to be stopped and restarted without losing data.
+
+---
+
+## Getting Started
+
+Follow these steps to get your RoboKitty instance up and running.
 
 ### Prerequisites
 
-- Rust (latest stable version)
-- Access to an Ethereum node (via IPC)
-- Telegram bot token (for bot functionality)
+-   **Rust Toolchain:** Install Rust via [rustup.rs](https://rustup.rs/).
+-   **Ethereum Node:** RoboKitty requires access to an Ethereum node's IPC file for its raffle mechanism. A local node like [Reth](https://github.com/paradigmxyz/reth) is recommended.
+-   **Telegram Bot Token:** Create a bot via Telegram's [@BotFather](https://t.me/botfather) to get a token.
 
-### Building and Installation
+### Installation & Setup
 
-1. Build the project:
-```bash
-git clone https://github.com/your-org/robokitty.git
-cd robokitty
-cargo build --release
-```
+1.  **Clone the Repository:**
+    ```bash
+    git clone https://github.com/<your-username>/robokitty.git
+    cd robokitty
+    ```
 
-2. Create a dedicated directory for the application:
-```bash
-sudo mkdir -p /opt/robokitty
-```
+2.  **Build the Binaries:**
+    ```bash
+    cargo build --release
+    ```
+    This compiles two executables in `./target/release/`: `robokitty_cli` and `robokitty_bot`.
 
-3. Copy the binaries:
-```bash
-sudo cp target/release/robokitty_cli /opt/robokitty/
-sudo cp target/release/robokitty_bot /opt/robokitty/
-```
+3.  **Create Your Configuration:**
+    -   **Environment File:** Copy the template to `.env` and add your Telegram bot token.
+        ```bash
+        cp .env.template .env
+        ```
+        Then, edit `.env`:
+        ```
+        TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+        ```
 
-4. Set up configuration:
-```bash
-# Copy and edit configuration files
-cp .env.template /opt/robokitty/.env
-cp config.toml.template /opt/robokitty/config.toml
-cd /opt/robokitty
-```
+    -   **Application Config:** Copy the template to `config.toml`.
+        ```bash
+        cp config.toml.template config.toml
+        ```
+        Open `config.toml` and ensure the `ipc_path` points to your Ethereum node's IPC file. You can also configure other system parameters here.
 
-Alternatively, for development/testing:
-```bash
-# Create a local test environment
-mkdir ~/robokitty-test
-cp target/release/robokitty_* ~/robokitty-test/
-cp .env.template ~/robokitty-test/.env
-cp config.toml.template ~/robokitty-test/config.toml
-cd ~/robokitty-test
-```
+4.  **Run the Application:**
+    -   **To use the CLI:**
+        ```bash
+        ./target/release/robokitty_cli --help
+        ```
+    -   **To start the Telegram Bot:**
+        ```bash
+        ./target/release/robokitty_bot
+        ```
 
-## Configuration
+---
 
-1. Edit `.env` to set your Telegram bot token:
-```
-TELEGRAM_BOT_TOKEN=your_token_here
-```
+## Documentation
 
-2. Configure `config.toml` with your settings:
-```toml
-ipc_path = "/path/to/ethereum/node.ipc"
-future_block_offset = 2
-state_file = "budget_system_state.json"
-script_file = "input_script.json"
-default_total_counted_seats = 7
-default_max_earner_seats = 5
-default_qualified_majority_threshold = 0.7
-counted_vote_points = 5
-uncounted_vote_points = 2
-```
+For more detailed information, please refer to our full documentation:
 
-Note: Both `.env` and `config.toml` must be in the same directory as the binaries.
-
-## Usage
-
-### CLI Interface
-
-```bash
-# Create a new epoch
-./robokitty_cli create-epoch "Q1 2024" "2024-01-01" "2024-03-31"
-
-# Add a team
-./robokitty_cli add-team "Team Alpha" "John Doe" 1000,2000,3000
-
-# Create a proposal
-./robokitty_cli add-proposal "New Initiative" "https://example.com/proposal"
-
-# Run a raffle
-./robokitty_cli create-raffle "New Initiative"
-
-# Process votes
-./robokitty_cli create-and-process-vote "New Initiative" "Team1:Yes,Team2:No" "Team3:Yes"
-```
-
-### Telegram Bot
-
-Start the bot:
-```bash
-./robokitty_bot
-```
-
-Available commands in Telegram:
-- `/help` - Display available commands
-- `/print_team_report` - Show team information
-- `/print_epoch_state` - Show current epoch status
-- `/create_epoch` - Create a new epoch
-- `/add_team` - Add a new team
-- `/create_raffle` - Create a new raffle
-And more...
-
-## Security Considerations
-
-- Keep your `.env` and `config.toml` files secure and never commit them to version control
-- The system uses file locking to prevent concurrent modifications
-- All user inputs are validated before processing
-- State files are kept in a secure location with appropriate permissions
-- Ensure proper file permissions are set on configuration files and binaries
-
-## Development
-
-### Running Tests
-
-```bash
-cargo test
-```
-
-### Code Structure
-
-- `src/core/`: Core business logic and data models
-- `src/services/`: External service integrations (Ethereum, Telegram)
-- `src/commands/`: Command processing for CLI and Telegram
-- `src/bin/`: Binary entry points
-
-## Contributing
-
-Contributions are welcome! Please follow these guidelines:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Make your changes
-4. Run the test suite to ensure everything works
-5. Commit your changes (`git commit -m 'Add amazing feature'`)
-6. Push to your branch (`git push origin feature/amazing-feature`)
-7. Open a Pull Request
-
-Please ensure your contributions:
-- Include tests for new functionality
-- Follow the existing code style
-- Update documentation as needed
-- Do not include any sensitive information
-- Are appropriately licensed (see below)
+-   **[Configuration Guide](./docs/CONFIGURATION.md):** A deep dive into all the settings in `config.toml`.
+-   **[Usage Guide](./docs/USAGE_GUIDE.md):** Comprehensive instructions and examples for both the CLI and the Telegram Bot.
+-   **[Core Concepts](./docs/CONCEPTS.md):** An explanation of key ideas like Epochs, Teams, and the Raffle Mechanism.
+-   **[Developer & Contribution Guide](./CONTRIBUTING.md):** Information on the codebase structure and how to contribute to the project.
 
 ## License
 
-This project is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
-
-This means:
-- You can use, modify, and distribute this software
-- If you modify the software and run it on a server, you must release your modifications
-- Any derivative work must also be licensed under AGPL-3.0
-- See the [LICENSE](LICENSE) file for details
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
